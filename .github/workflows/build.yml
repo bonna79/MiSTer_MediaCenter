@@ -1,4 +1,4 @@
-name: Build MiSTer
+name: Build MiSTer MediaCenter
 
 on:
   workflow_dispatch:
@@ -16,9 +16,11 @@ jobs:
           echo "$(echo /opt/gcc-arm-*/bin)" >> "$GITHUB_PATH"
 
       - name: Build
-        run: make
+        run: |
+          make
+          cp bin/MiSTer bin/MiSTer_MediaCenter
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MiSTer
-          path: bin/MiSTer
+          name: MiSTer_MediaCenter
+          path: bin/MiSTer_MediaCenter

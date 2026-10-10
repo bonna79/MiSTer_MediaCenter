@@ -1,0 +1,17 @@
+MiSTer MediaCenter
+Copyright (C) 2026 bonna79
+
+This program is free software, distributed under the GNU General Public
+License version 3 (see LICENSE).
+
+It is derived from:
+
+- Main_MiSTer, the MiSTer FPGA main program, by Sorgelig and the
+  MiSTer-devel contributors (GPL-3.0).
+  https://github.com/MiSTer-devel/Main_MiSTer
+
+- Physical Disc Support for MiSTer Main, by Anime0t4ku and contributors
+  (GPL-3.0). The optical drive code under support/physical_disc/ comes
+  from this project.
+
+The full commit history of both projects is preserved in this repository.

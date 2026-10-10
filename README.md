@@ -1,276 +1,46 @@
-# MiSTer Main – Physical Disc Support
+# MiSTer MediaCenter
 
-Physical Disc Support adds direct **USB optical drive support** to MiSTer FPGA, allowing supported cores to run games from real CDs instead of disc images.
+MiSTer MediaCenter è un lettore multimediale per MiSTer FPGA (DE10-Nano). Usa l'ARM e l'FPGA insieme: l'ARM legge dischi e file, l'FPGA presenta audio e video.
 
-Connect a compatible USB CD/DVD drive, insert a supported disc, and launch the appropriate Physical Disc core from the MiSTer menu.
+Questo repository è il Main (il programma ARM) del lettore. Si attiva al posto del Main standard tramite `MiSTer.ini` e non modifica l'installazione esistente.
 
-For easier setup and configuration, **MiSTer Companion** can install, update, and configure Physical Disc Support automatically.
+## Stato
 
-## Supported Systems
+Prima versione, non ancora provata su hardware.
 
-- Sony PlayStation
-- Sega Saturn
-- Mega CD / Sega CD
-- PC Engine CD / TurboGrafx-16 CD
-- Neo Geo CD
-- Philips CD-i *(experimental)*
-- 3DO *(experimental / unstable)*
-- SNES MSU-1
-- Mega Drive / Genesis MD+
-- DVD-Video, Video CD and Super Video CD *(through the DVD cores)*
+| Funzione | Stato | Come funziona |
+| --- | --- | --- |
+| DVD-Video, anche commerciali | Sì | Riconosce il disco e apre il core DVD ([MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD)); i DVD protetti sono letti dal suo Main `MiSTer_DVDcss` con libdvdcss |
+| Video CD 1.0/1.1/2.0 e Super Video CD | Sì | Riconosce il disco e apre il core FPGA DVD |
+| CD audio | Sì | Apre il core scelto con `AUDIOCD=` oppure [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi) |
+| File DivX/Xvid/MKV e audio compresso da SD e USB | Pianificato | Decodifica ARM con FFmpeg, uscita video FPGA |
 
-Compatibility can vary depending on the game, core, and USB optical drive being used.
+## Installazione
 
-## Requirements
-
-- MiSTer FPGA
-- Compatible USB CD/DVD drive
-- Physical Disc version of MiSTer Main
-- Physical Disc compatible cores
-
-## Installation
-
-### MiSTer Companion
-
-The easiest way to install and configure Physical Disc Support is with **MiSTer Companion**.
-
-Download:
-
-https://mistercompanion.org
-
-Open the **Install Center** and install **Physical Disc Cores**.
-
-MiSTer Companion can:
-
-- Install the required Physical Disc files
-- Update Physical Disc Support
-- Configure the required `MiSTer.ini` entries
-- Enable or disable Auto Disc Detection
-
-This is the recommended installation method for most users.
-
-### Update_All
-
-Physical Disc Support can also be installed through **Update_All** using its Downloader database.
-
-Once enabled, running Update_All will install and update the required Physical Disc files.
-
-## Usage
-
-### Manual Launch
-
-Manual launching is the standard way to use Physical Disc Support and does not require Auto Disc Detection.
-
-Physical Disc Support installs a **`_Physical Disc Cores`** folder in the MiSTer menu.
-
-This folder contains MGL files for the supported Physical Disc cores.
-
-To launch a physical disc:
-
-1. Connect your USB optical drive.
-2. Insert a supported disc.
-3. Open **`_Physical Disc Cores`** from the MiSTer menu.
-4. Select the MGL for the system you want to use.
-5. The corresponding Physical Disc core will start and use the inserted disc.
-
-The MGL files make it easy to manually select which Physical Disc core should be used.
-
-They are also useful for Audio CDs, as you can simply launch the MGL for the core you want to use.
-
-## Auto Disc Detection
-
-Auto Disc Detection is an optional extra feature that can automatically identify a newly inserted disc and launch the appropriate Physical Disc core.
-
-When enabled:
-
-1. Start MiSTer normally.
-2. Insert a supported disc.
-3. Physical Disc Support identifies the disc.
-4. The appropriate core is launched automatically.
-
-A disc that is already inserted when MiSTer starts is not automatically launched. Auto Disc Detection reacts to a disc being inserted after MiSTer has started.
-
-MiSTer Companion provides an easy option to enable or disable Auto Disc Detection without manually editing `MiSTer.ini`.
-
-## MiSTer.ini Configuration
-
-Physical Disc Support uses dedicated `MiSTer.ini` sections following this pattern:
-
-```ini
-[A0CD-*]
-main=MiSTer_Physical-CD
-```
-
-The `*` represents the Physical Disc profile being used.
-
-MiSTer Companion can configure the required entries automatically.
-
-### Enabling Auto Disc Detection
-
-To enable Auto Disc Detection manually, add the following to your existing `[menu]` section:
-
-```ini
-main=MiSTer_Physical-CD
-```
-
-For example:
+1. Scarica `MiSTer_MediaCenter` dall'ultima build nella pagina Actions o Releases.
+2. Copialo in `/media/fat/` sulla SD.
+3. Aggiungi a `/media/fat/MiSTer.ini`:
 
 ```ini
 [menu]
-main=MiSTer_Physical-CD
+main=MiSTer_MediaCenter
 ```
 
-## Audio CD Override
+Per i DVD commerciali e i Video CD installa il core [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) e segui la sua guida: aggiunge la sezione `[DVD]` con `main=MiSTer_DVDcss` e lo script `install_dvdcss`.
 
-When Auto Disc Detection is enabled, standard Audio CDs use the **PlayStation profile by default**.
+## Impostazioni in `MiSTer.ini`
 
-If you prefer Audio CDs to launch using another supported Physical Disc profile, add an `AUDIOCD=` override to your existing `[menu]` section.
+| Voce | Valori | Effetto |
+| --- | --- | --- |
+| `DVD=` | `HYBRID`, `FPGA` | Core da aprire per i DVD-Video; senza voce sceglie da solo |
+| `AUDIOCD=` | `PSX`, `A0CD-Saturn`, `MISTERHIFI`, … | Programma da aprire per i CD audio |
 
-For example, to use the Sega Saturn profile:
+I Video CD aprono sempre il core FPGA DVD.
 
-```ini
-AUDIOCD=A0CD-Saturn
-```
+## Compilazione
 
-Supported Audio CD overrides:
+Il workflow `.github/workflows/build.yml` compila il Main a ogni push con GCC ARM 10.2 (`arm-none-linux-gnueabihf`) e pubblica il binario come artifact. In locale: `make` con quel compilatore nel `PATH`.
 
-```ini
-AUDIOCD=A0CD-PSX
-AUDIOCD=A0CD-Saturn
-AUDIOCD=A0CD-MegaCD
-AUDIOCD=A0CD-TurboGrafx16-CD
-AUDIOCD=A0CD-NeoGeoCD
-AUDIOCD=A0CD-CDi
-AUDIOCD=A0CD-3DO
-AUDIOCD=MISTERHIFI
-```
+## Provenienza e licenza
 
-Only use **one** `AUDIOCD=` entry.
-
-`AUDIOCD=MISTERHIFI` launches **MiSTer Hi-Fi** directly into Physical Audio CD playback. MiSTer Hi-Fi must be installed at `/media/fat/Scripts/misterhifi.sh`.
-
-For example:
-
-```ini
-[menu]
-main=MiSTer_Physical-CD
-AUDIOCD=A0CD-Saturn
-```
-
-The Audio CD override is only relevant when using Auto Disc Detection.
-
-When Auto Disc Detection is disabled, simply open **`_Physical Disc Cores`** and launch the MGL for the core you want to use.
-
-## DVD Core Selection
-
-When Auto Disc Detection recognizes a DVD-Video disc and no `DVD=` entry is configured, it selects an installed DVD core automatically. The hybrid DVD Player core is preferred when both supported cores are installed; otherwise, the available core is launched.
-
-To select which installed DVD core should be launched automatically, add one `DVD=` entry to your existing `[menu]` section:
-
-```ini
-DVD=HYBRID
-```
-
-Supported DVD core selections:
-
-```ini
-DVD=HYBRID
-DVD=FPGA
-```
-
-`DVD=HYBRID` launches only `DVD_Player.rbf`.
-
-`DVD=FPGA` launches the latest dated `DVD_<date>.rbf` core, such as `/media/fat/_Other/DVD_20260830.rbf`.
-
-Both DVD cores support physical DVDs independently. This setting is only used by Auto Disc Detection to choose which core to open when a DVD-Video disc is inserted.
-
-An explicit selection is always respected. If the selected core is not installed, Auto Disc Detection shows a warning instead of launching the other core. Invalid `DVD=` values are also reported without launching a core.
-
-### Commercial DVDs with the FPGA DVD core
-
-Most commercial DVDs are CSS-protected. The FPGA DVD core ([MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD)) reads and decrypts them through its own `MiSTer_DVDcss` Main. Follow its installation guide, which adds this section to `MiSTer.ini`:
-
-```ini
-[DVD]
-main=MiSTer_DVDcss
-```
-
-Then run `install_dvdcss` once from the MiSTer Scripts menu. Physical Disc Support only recognizes the disc and opens the DVD core; reading and decryption are handled by the DVD core's Main.
-
-## Video CD and Super Video CD
-
-Auto Disc Detection recognizes Video CDs (VCD 1.0, 1.1, 2.0) and Super Video CDs by their `VCD`/`SVCD` and `MPEGAV`/`MPEG2` folders, and launches the FPGA DVD core (`DVD_<date>.rbf`), which plays them from the drive through `MiSTer_DVDcss` as described above.
-
-VCD 2.0 discs also contain a CD-i application, so they used to be detected as CD-i discs. They are now detected as Video CDs first.
-
-The `DVD=` setting does not apply to Video CDs: the FPGA DVD core is always used. If it is not installed, a warning is shown and no core is launched.
-
-## Disc Swapping
-
-Supported cores can detect physical disc removal and insertion while running.
-
-This allows Physical Disc Support to handle things such as:
-
-- Multi-disc games
-- Games that request a disc change
-- Games that allow the game disc to be replaced while the core remains running
-
-Support depends on the individual core and game.
-
-## CD Audio
-
-Physical Disc Support supports games that use CD audio, including mixed-mode discs containing both game data and Red Book audio tracks.
-
-Because the audio is being read from a real optical drive rather than a disc image, compatibility and timing can vary between drives and games.
-
-## Burning SNES MSU-1 & Mega Drive / Genesis MD+ CDs
-
-For users who want to create physical discs for **SNES MSU-1** or **Mega Drive / Genesis MD+**, a dedicated burning tutorial is included with the project.
-
-The tutorial was written by **NinoPrime** and covers the process of preparing and burning compatible discs for use with Physical Disc Support.
-
-> **Note:** The tutorial currently covers the process on **Windows only**.
-
-[Burning MSU-1 & MD+ CDs](assets/Burning%20MSU-1%20%26%20MD%2B%20CD%27s.docx)
-
-## Updating
-
-Physical Disc Support can be updated through:
-
-- MiSTer Companion
-- Update_All
-
-MiSTer Companion:
-
-https://mistercompanion.org
-
-## Known Issues
-
-Physical Disc Support is still under active development.
-
-Current known issues include:
-
-- Some games may still require additional timing.
-- USB optical drive compatibility can vary between models.
-- Philips CD-i support is experimental.
-
-## Reporting Issues
-
-When reporting an issue, please include:
-
-- System/core
-- Game title
-- Region
-- USB optical drive model
-- Whether the issue also happens when using a disc image
-- Whether the problem affects loading, CD audio, disc detection, or disc swapping
-
-## Credits
-
-- **NinoPrime** — author of the SNES MSU-1 & Mega Drive / Genesis MD+ CD burning tutorial
-
-This project builds on MiSTer Main, the supported MiSTer cores, and the work of the MiSTer FPGA community.
-
-MiSTer FPGA:
-
-https://github.com/MiSTer-devel
+MiSTer MediaCenter deriva da [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer) e dal supporto ai dischi fisici di Physical Disc. È distribuito sotto GPL-3.0, come i progetti da cui deriva: vedi [LICENSE](LICENSE) e [NOTICE](NOTICE).
