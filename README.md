@@ -17,6 +17,7 @@ For easier setup and configuration, **MiSTer Companion** can install, update, an
 - 3DO *(experimental / unstable)*
 - SNES MSU-1
 - Mega Drive / Genesis MD+
+- DVD-Video, Video CD and Super Video CD *(through the DVD cores)*
 
 Compatibility can vary depending on the game, core, and USB optical drive being used.
 
@@ -184,6 +185,25 @@ DVD=FPGA
 Both DVD cores support physical DVDs independently. This setting is only used by Auto Disc Detection to choose which core to open when a DVD-Video disc is inserted.
 
 An explicit selection is always respected. If the selected core is not installed, Auto Disc Detection shows a warning instead of launching the other core. Invalid `DVD=` values are also reported without launching a core.
+
+### Commercial DVDs with the FPGA DVD core
+
+Most commercial DVDs are CSS-protected. The FPGA DVD core ([MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD)) reads and decrypts them through its own `MiSTer_DVDcss` Main. Follow its installation guide, which adds this section to `MiSTer.ini`:
+
+```ini
+[DVD]
+main=MiSTer_DVDcss
+```
+
+Then run `install_dvdcss` once from the MiSTer Scripts menu. Physical Disc Support only recognizes the disc and opens the DVD core; reading and decryption are handled by the DVD core's Main.
+
+## Video CD and Super Video CD
+
+Auto Disc Detection recognizes Video CDs (VCD 1.0, 1.1, 2.0) and Super Video CDs by their `VCD`/`SVCD` and `MPEGAV`/`MPEG2` folders, and launches the FPGA DVD core (`DVD_<date>.rbf`), which plays them from the drive through `MiSTer_DVDcss` as described above.
+
+VCD 2.0 discs also contain a CD-i application, so they used to be detected as CD-i discs. They are now detected as Video CDs first.
+
+The `DVD=` setting does not apply to Video CDs: the FPGA DVD core is always used. If it is not installed, a warning is shown and no core is launched.
 
 ## Disc Swapping
 

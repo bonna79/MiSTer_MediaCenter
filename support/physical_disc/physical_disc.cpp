@@ -1620,7 +1620,7 @@ static uint32_t iso_le32(const uint8_t *p)
 	return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
-static int iso_root_has_file(int base, const char *wanted)
+static int iso_root_has_entry(int base, const char *wanted, int want_dir)
 {
 	uint8_t pvd[2048];
 	const int wanted_len = wanted ? strlen(wanted) : 0;
@@ -1648,7 +1648,8 @@ static int iso_root_has_file(int base, const char *wanted)
 			if (len < 34 || off + len > limit) break;
 
 			int nlen = sec[off + 32];
-			if (nlen > 0 && off + 33 + nlen <= off + len && !(sec[off + 25] & 0x02)) {
+			const int is_dir = (sec[off + 25] & 0x02) != 0;
+			if (nlen > 0 && off + 33 + nlen <= off + len && is_dir == !!want_dir) {
 				const char *name = (const char *)(sec + off + 33);
 				int plain_len = nlen;
 				for (int i = 0; i < nlen; i++) {
@@ -1661,6 +1662,25 @@ static int iso_root_has_file(int base, const char *wanted)
 	}
 
 	return 0;
+}
+
+static int iso_root_has_file(int base, const char *wanted)
+{
+	return iso_root_has_entry(base, wanted, 0);
+}
+
+static int iso_root_has_dir(int base, const char *wanted)
+{
+	return iso_root_has_entry(base, wanted, 1);
+}
+
+// Video CD (White Book) and Super Video CD keep their descriptor in VCD/ or
+// SVCD/ and the MPEG tracks in MPEGAV/ or MPEG2/. VCD 2.0 discs also carry a
+// CDI/ application for CD-i players, so this must run before the CD-i checks.
+static int iso_root_is_vcd(int base)
+{
+	if (!iso_root_has_dir(base, "VCD") && !iso_root_has_dir(base, "SVCD")) return 0;
+	return iso_root_has_dir(base, "MPEGAV") || iso_root_has_dir(base, "MPEG2");
 }
 
 static int iso_root_features(int base, int *has_mdplus, int *has_snes)
@@ -1728,6 +1748,8 @@ physical_disc_disc_t physical_disc_identify()
 		if (!memcmp(raw + 16, "SEGA SEGASATURN", 15)) return PHYSICAL_DISC_DISC_SATURN;
 		if (raw[16] == 0x01 && raw[17] == 0x5A && raw[18] == 0x5A && raw[19] == 0x5A && raw[20] == 0x5A && raw[21] == 0x5A) return PHYSICAL_DISC_DISC_3DO;
 	}
+
+	if (iso_root_is_vcd(base)) return PHYSICAL_DISC_DISC_VCD;
 
 	if (!physical_disc_read_sector(base + 16, raw, NULL)) {
 		uint8_t *iso = raw + 16;
@@ -2014,6 +2036,7 @@ const char *physical_disc_disc_name(physical_disc_disc_t t)
 	case PHYSICAL_DISC_DISC_MDPLUS: return "MD+";
 	case PHYSICAL_DISC_DISC_SNES:   return "SNES MSU-1";
 	case PHYSICAL_DISC_DISC_AUDIO:  return "Audio CD";
+	case PHYSICAL_DISC_DISC_VCD:    return "Video CD";
 	case PHYSICAL_DISC_DISC_NONE:   return "No Disc";
 	default:                 return "Unknown";
 	}

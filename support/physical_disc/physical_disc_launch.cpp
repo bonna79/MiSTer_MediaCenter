@@ -171,6 +171,24 @@ static int menu_launch_dvd_player(void)
 	return 1;
 }
 
+// Video CD and Super Video CD playback is provided by the FPGA DVD core
+// (MiSTer_DVD), which reads the disc itself through its MiSTer_DVDcss Main.
+// The hybrid DVD Player is not used here because it does not handle VCDs.
+static int menu_launch_vcd_player(void)
+{
+	char path[512];
+	if (!find_core_rbf(DVD_FPGA_CORE, path, sizeof(path)))
+	{
+		printf("DISC: Video CD detected but the FPGA DVD core was not found\n");
+		Info("Video CD needs the FPGA DVD core", 5000);
+		return 0;
+	}
+
+	printf("DISC: Video CD detected, launching %s\n", path);
+	fpga_load_rbf(path);
+	return 1;
+}
+
 static int sector_has_data(const uint8_t *data)
 {
 	for (int i = 0; i < PHYSICAL_DISC_RAW; i++)
@@ -634,6 +652,14 @@ int physical_disc_launch_menu_tick(void)
 	}
 
 	physical_disc_disc_t type = physical_disc_identify();
+	if (type == PHYSICAL_DISC_DISC_VCD)
+	{
+		menu_write_handled(fingerprint);
+		physical_disc_close();
+		menu_detecting = 0;
+		return menu_launch_vcd_player();
+	}
+
 	const int launch_hifi = type == PHYSICAL_DISC_DISC_AUDIO && menu_audio_hifi();
 	const char *mgl = launch_hifi ? NULL : menu_mgl_for_disc(type);
 	menu_write_handled(fingerprint);
