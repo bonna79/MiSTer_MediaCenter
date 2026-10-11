@@ -165,6 +165,10 @@ main=MiSTer_MediaCenter
 MEGACD_SUBCODE_LOG=1
 ```
 
+## Copia dei dischi su CD-R
+
+Copiare i giochi in CHD e riscriverli su CD-R, conservando il subcanale Q e la protezione LibCrypt della PSX, non è compito di MediaCenter. Se ne occupa il programma separato [MiSTer-Disc-Tools](https://github.com/bonna79/MiSTer-Disc-Tools), che si installa a parte e funziona accanto a questo Main.
+
 ## Provenienza e licenza
 
 MiSTer MediaCenter deriva da [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer) e dal supporto ai dischi fisici di Physical Disc di Anime0t4ku. Usa FFmpeg, libdvdread e libdvdnav. È distribuito sotto GPL-3.0, come i progetti da cui deriva: vedi [LICENSE](LICENSE) e [NOTICE](NOTICE).
