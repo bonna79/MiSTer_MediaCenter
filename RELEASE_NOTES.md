@@ -1,3 +1,5 @@
+> Sviluppato con l'aiuto dell'intelligenza artificiale (Claude di Anthropic). / Developed with the help of AI (Anthropic's Claude).
+
 Prima versione pubblica di MiSTer MediaCenter: un unico lettore per Video CD, DVD-Video (anche protetti, con i menu), DVD dati con DivX/MP4/MP3 e file da SD, USB e rete. Include tutte le funzioni di Physical Disc: PSX con subcanale Q e LibCrypt, Mega CD con CD+G, avvio automatico dei dischi.
 
 **Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD. Poi aggiungi a `MiSTer.ini`:
@@ -31,6 +33,6 @@ Se trovi un problema, apri una segnalazione in [Issues](https://github.com/bonna
 
 It includes every Physical Disc feature: PSX with Q subchannel and LibCrypt, Mega CD with CD+G, automatic disc start.
 
-To install, extract `MiSTer_MediaCenter.zip` into the root of the SD card, then add `main=MiSTer_MediaCenter` to the `[menu]` and `[A0CD-*]` sections of `MiSTer.ini`. Protected DVDs need `libdvdcss.so.2` in `/media/fat/dvdcss/`, which is not included. The full guide is in the [README](https://github.com/bonna79/MiSTer_MediaCenter#english).
+To install, extract `MiSTer_MediaCenter.zip` into the root of the SD card, then add `main=MiSTer_MediaCenter` to the `[menu]` and `[A0CD-*]` sections of `MiSTer.ini`. Protected DVDs need `libdvdcss.so.2` in `/media/fat/dvdcss/`, which is not included. The full guide is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md).
 
 Tested on a real MiSTer over HDMI. Report problems on [Issues](https://github.com/bonna79/MiSTer_MediaCenter/issues), with photos of the screen and `/tmp/mediacenter.log`.
