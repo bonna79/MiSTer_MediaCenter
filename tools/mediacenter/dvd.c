@@ -5,6 +5,10 @@
 // split into video, audio and subpicture packets here and decoded with the
 // same FFmpeg decoders, output, clock and on-screen controls as the files.
 //
+// The disc is read and decoded by a reader thread on one core while the
+// player loop shows the pictures and handles the controls on the other, so a
+// slow read from the drive does not stop the picture.
+//
 // Encrypted (CSS) discs need libdvdcss: it is loaded from DVDCSS_PATH, where
 // MiSTer_DVD's install_dvdcss puts it, before libdvdread looks for it.
 
@@ -18,6 +22,8 @@
 #define DVD_LANG "it"
 #define DVD_MAX_SUBS 8
 #define DVD_FF_SPEED 10.0
+#define DVD_VQ 30          // pictures decoded ahead (1.2 s at 25 fps)
+#define DVD_AHEAD 1.0      // seconds of audio and video decoded ahead
 
 typedef struct
 {
@@ -38,11 +44,14 @@ typedef struct
 	AVChannelLayout swr_layout;
 	int swr_rate, swr_fmt;
 
-	// Streams: -1 follows the disc; otherwise the logical stream the user chose.
-	int user_audio;
-	int user_spu;      // -2 follows the disc, -1 off
-	int vm_audio_phys; // physical audio stream chosen by the disc
-	int vm_spu_phys;   // physical subpicture stream chosen by the disc (0x80: forced only)
+	// Streams. libdvdnav's dvdnav_get_audio_logical_stream() and
+	// dvdnav_get_spu_logical_stream() take a logical (menu) stream number and
+	// return the physical (MPEG) one, despite their names.
+	int user_audio;      // logical stream chosen by the user, -1 follows the disc
+	int user_spu;        // -2 follows the disc, -1 off, else the logical stream
+	int vm_audio_phys;   // physical audio stream chosen by the disc
+	int vm_audio_logical;
+	int vm_spu_phys;     // physical subpicture stream chosen by the disc (0x80: forced only)
 	int spu_phys, spu_forced_only;
 
 	uint32_t clut[16]; // 0x00YYCrCb from the disc
@@ -67,6 +76,18 @@ typedef struct
 	double still_until;
 	int wait;          // DVDNAV_WAIT: let the queued output play out
 	int stopped;       // DVDNAV_STOP
+	int halt;          // stopped by the user: read nothing
+
+	// Reader thread and the requests the player loop leaves for it
+	pthread_t thread;
+	int thread_on;
+	volatile int thread_run;
+	int req_flush;     // drop everything queued (a jump made by the player)
+	int req_seek;      // fast forward / rewind: jump to seek_to and decode one picture
+	double seek_to;
+	int seeking;       // a seek was made: hold after its first picture
+	int ff_hold;       // the picture after a seek is decoded
+	int req_audio;     // the user changed the audio stream
 
 	AVFrame *last;     // the picture on screen, redrawn when the overlay changes
 	int overlay_dirty;
@@ -76,6 +97,12 @@ typedef struct
 } dvd_t;
 
 static dvd_t dvd;
+
+// Guards what both threads use: the picture and audio queues, the
+// subpictures, the button highlight, the clock and the flags above.
+static pthread_mutex_t dvd_lock = PTHREAD_MUTEX_INITIALIZER;
+#define DVD_LOCK() pthread_mutex_lock(&dvd_lock)
+#define DVD_UNLOCK() pthread_mutex_unlock(&dvd_lock)
 
 static void ycrcb_to_rgb(uint32_t v, int *r, int *g, int *b)
 {
@@ -136,6 +163,7 @@ static void dvd_open_spu_decoder(void)
 	av_dict_free(&opts);
 }
 
+// Called with dvd_lock held.
 static void dvd_clear_subs(void)
 {
 	for (int i = 0; i < dvd.num_subs; i++) avsubtitle_free(&dvd.subs[i].sub);
@@ -156,6 +184,7 @@ static void dvd_set_audio_codec(int id)
 	if (same)
 	{
 		// another stream of the same format: start clean
+		printf("mediacenter: DVD audio stream 0x%02x %s\n", id, avcodec_get_name(codec));
 		avcodec_flush_buffers(mc.adec);
 		if (dvd.apar) { av_parser_close(dvd.apar); dvd.apar = av_parser_init(codec); }
 		return;
@@ -191,9 +220,11 @@ static void dvd_audio_frame(AVFrame *f)
 		dvd.swr_fmt = f->format;
 	}
 	double pts = f->best_effort_timestamp == AV_NOPTS_VALUE ? NAN : dvd_pos(f->best_effort_timestamp);
+	DVD_LOCK();
 	// keep continuity across small timestamp jitter
 	if (!isnan(pts) && mc.pend_len && fabs(pts - mc.audio_end) < 0.08) pts = NAN;
 	push_audio_at(f, pts);
+	DVD_UNLOCK();
 }
 
 static void dvd_video_frame(AVFrame *f)
@@ -201,7 +232,10 @@ static void dvd_video_frame(AVFrame *f)
 	double pts = f->best_effort_timestamp == AV_NOPTS_VALUE ? NAN : dvd_pos(f->best_effort_timestamp);
 	AVRational fr = mc.vdec->framerate;
 	double step = (fr.num > 0 && fr.den > 0) ? 1.0 / av_q2d(fr) : 0.04;
+	DVD_LOCK();
 	queue_video_at(f, pts, step);
+	if (dvd.seeking) { dvd.seeking = 0; dvd.ff_hold = 1; }
+	DVD_UNLOCK();
 }
 
 static void dvd_receive(AVCodecContext *ctx, int video)
@@ -251,6 +285,7 @@ static void dvd_spu_packet(const uint8_t *data, int size, int64_t pts)
 	pkt->data = NULL;
 	pkt->size = 0;
 
+	DVD_LOCK();
 	double base = pts == AV_NOPTS_VALUE ? mc.clock : dvd_pos(pts);
 	if (dvd.num_subs == DVD_MAX_SUBS)
 	{
@@ -264,6 +299,7 @@ static void dvd_spu_packet(const uint8_t *data, int size, int64_t pts)
 	dvd.overlay_dirty = 1;
 	s->end = (sub.end_display_time > sub.start_display_time && sub.end_display_time < 0x7fffffff)
 		? base + sub.end_display_time / 1000.0 : INFINITY;
+	DVD_UNLOCK();
 }
 
 // Feeds a parser and the decoder behind it.
@@ -300,6 +336,7 @@ static void dvd_drain_video(void)
 }
 
 // Drops everything queued or buffered (a jump to another place on the disc).
+// Reader thread only: it owns the decoders.
 static void dvd_flush(void)
 {
 	if (mc.vdec) avcodec_flush_buffers(mc.vdec);
@@ -309,45 +346,78 @@ static void dvd_flush(void)
 	if (dvd.apar) { av_parser_close(dvd.apar); dvd.apar = av_parser_init(dvd.audio_codec); }
 	if (dvd.spar) av_parser_close(dvd.spar);
 	dvd.spar = av_parser_init(AV_CODEC_ID_DVD_SUBTITLE);
+	DVD_LOCK();
 	vq_clear();
 	mc.pend_len = 0;
 	mc.audio_end = mc.clock;
 	mc.last_vpts = NAN;
-	audio_flush();
 	dvd_clear_subs();
+	DVD_UNLOCK();
+	audio_flush();
 }
 
 // ---------------------------------------------------------------------------
 // Program stream
 // ---------------------------------------------------------------------------
 
-// Which audio stream to play: the user's choice, else the disc's.
-static int dvd_audio_phys(void)
+// The logical audio stream playing: the user's choice, else the disc's.
+static int dvd_audio_logical(void)
 {
-	if (dvd.user_audio >= 0)
-	{
-		for (int p = 0; p < 8; p++)
-			if (dvdnav_get_audio_logical_stream(dvd.nav, p) == dvd.user_audio) return p;
-	}
-	return dvd.vm_audio_phys;
+	if (dvd.user_audio >= 0) return dvd.user_audio;
+	// the disc's register can hold a stream that does not exist (the VM then
+	// plays the first one): find the logical stream from the physical one
+	for (int l = 0; l < 8; l++)
+		if (dvdnav_get_audio_logical_stream(dvd.nav, l) == dvd.vm_audio_phys) return l;
+	return dvd.vm_audio_logical;
 }
 
-// The substream id of that stream, from its format.
+// Its substream id in the program stream, from its format.
 static int dvd_audio_id(void)
 {
-	int phys = dvd_audio_phys();
+	int logical = dvd_audio_logical();
+	int phys = dvd.user_audio >= 0 ? dvdnav_get_audio_logical_stream(dvd.nav, dvd.user_audio) : dvd.vm_audio_phys;
+	if (phys < 0) phys = dvd.vm_audio_phys;
 	if (phys < 0) return -1;
-	int logical = dvdnav_get_audio_logical_stream(dvd.nav, phys);
 	switch (logical >= 0 ? dvdnav_audio_stream_format(dvd.nav, logical) : DVD_AUDIO_FORMAT_AC3)
 	{
 	case DVD_AUDIO_FORMAT_MPEG:
-	case DVD_AUDIO_FORMAT_MPEG2_EXT: return 0xc0 + phys;
-	case DVD_AUDIO_FORMAT_LPCM: return 0xa0 + phys;
-	case DVD_AUDIO_FORMAT_DTS: return 0x88 + phys;
-	default: return 0x80 + phys;
+	case DVD_AUDIO_FORMAT_MPEG2_EXT: return 0xc0 + (phys & 7);
+	case DVD_AUDIO_FORMAT_LPCM: return 0xa0 + (phys & 7);
+	case DVD_AUDIO_FORMAT_DTS: return 0x88 + (phys & 7);
+	default: return 0x80 + (phys & 7);
 	}
 }
 
+// Number of logical audio streams of the title (0 outside a title).
+static int dvd_count_audio(void)
+{
+	if (!dvdnav_is_domain_vts(dvd.nav)) return 0;
+	int n = 0;
+	for (int l = 0; l < 8; l++)
+		if (dvdnav_get_audio_logical_stream(dvd.nav, l) >= 0) n = l + 1;
+	return n;
+}
+
+static int dvd_count_spu(void)
+{
+	if (!dvdnav_is_domain_vts(dvd.nav)) return 0;
+	int n = 0;
+	for (int l = 0; l < 32; l++)
+		if (dvdnav_get_spu_logical_stream(dvd.nav, l) >= 0) n = l + 1;
+	return n;
+}
+
+// The logical subpicture stream shown as subtitles, -1 for none.
+static int dvd_spu_logical(void)
+{
+	if (dvd.spu_phys < 0 || dvd.spu_forced_only) return -1;
+	if (dvd.user_spu >= 0) return dvd.user_spu;
+	for (int l = 0; l < 32; l++)
+		if (dvdnav_get_spu_logical_stream(dvd.nav, l) == dvd.spu_phys) return l;
+	return -1;
+}
+
+// Picks the subpicture stream to decode. Called with dvd_lock held.
 static void dvd_update_spu(void)
 {
 	int phys = dvd.vm_spu_phys;
@@ -355,15 +425,10 @@ static void dvd_update_spu(void)
 	if (dvdnav_is_domain_vts(dvd.nav) && dvd.user_spu != -2)
 	{
 		forced = 0;
-		phys = -1;
-		if (dvd.user_spu >= 0)
-		{
-			for (int p = 0; p < 32; p++)
-				if (dvdnav_get_spu_logical_stream(dvd.nav, p) == dvd.user_spu) phys = p;
-		}
-		if (phys < 0) { phys = dvd.vm_spu_phys & 0x1f; forced = 1; } // forced subtitles still show
+		phys = dvd.user_spu >= 0 ? dvdnav_get_spu_logical_stream(dvd.nav, dvd.user_spu) : -1;
+		// subtitles off: forced subtitles (translated signs) still show
+		if (phys < 0 && dvd.vm_spu_phys >= 0) { phys = dvd.vm_spu_phys; forced = 1; }
 	}
-	if (dvd.vm_spu_phys < 0 && phys < 0) forced = 0;
 	phys = phys < 0 ? -1 : (phys & 0x1f);
 	if (phys != dvd.spu_phys) dvd_clear_subs();
 	dvd.spu_phys = phys;
@@ -451,8 +516,10 @@ static void dvd_update_highlight(void)
 		if (dvdnav_get_highlight_area(pci, button, 0, &hl) == DVDNAV_STATUS_OK)
 		{
 			on = 1;
+			DVD_LOCK();
 			if (memcmp(&hl, &dvd.hl, sizeof(hl))) dvd.overlay_dirty = 1;
 			dvd.hl = hl;
+			DVD_UNLOCK();
 		}
 	}
 	if (on != dvd.hl_on) dvd.overlay_dirty = 1;
@@ -470,6 +537,12 @@ static void dvd_title_info(void)
 		return;
 	}
 	if (title == dvd.title) return;
+	if (dvd.title > 0)
+	{
+		// another title has its own streams: follow the disc again
+		dvd.user_audio = -1;
+		if (dvd.user_spu >= 0) dvd.user_spu = -2;
+	}
 	dvd.title = title;
 	int32_t parts = 0;
 	dvdnav_get_number_of_parts(dvd.nav, title, &parts);
@@ -506,7 +579,9 @@ static int dvd_step(void)
 	{
 		pci_t *pci = dvdnav_get_current_nav_pci(dvd.nav);
 		int64_t s = pci->pci_gi.vobu_s_ptm, e = pci->pci_gi.vobu_e_ptm;
+		DVD_LOCK();
 		int64_t now = (int64_t)(mc.clock * 90000);
+		DVD_UNLOCK();
 		if (!dvd.timeline_set || dvd.hop)
 		{
 			// a jump: what follows plays from now
@@ -532,17 +607,22 @@ static int dvd_step(void)
 		if (!dvd.still)
 		{
 			dvd_drain_video();
+			DVD_LOCK();
 			dvd.still = ev->length ? ev->length : 1;
 			dvd.still_until = NAN; // starts when the last picture is shown
+			DVD_UNLOCK();
 		}
 		return 1;
 	}
 
 	case DVDNAV_WAIT:
+		DVD_LOCK();
 		dvd.wait = 1;
+		DVD_UNLOCK();
 		return 1;
 
 	case DVDNAV_SPU_CLUT_CHANGE:
+		DVD_LOCK();
 		memcpy(dvd.clut, buf, sizeof(dvd.clut));
 		for (int i = 0; i < 16; i++)
 		{
@@ -551,14 +631,17 @@ static int dvd_step(void)
 			dvd.clut_rgb[i] = (uint32_t)(r << 16 | g << 8 | b);
 		}
 		dvd.clut_valid = 1;
+		DVD_UNLOCK();
 		dvd_open_spu_decoder();
 		break;
 
 	case DVDNAV_SPU_STREAM_CHANGE:
 	{
 		dvdnav_spu_stream_change_event_t *ev = (dvdnav_spu_stream_change_event_t *)buf;
+		DVD_LOCK();
 		dvd.vm_spu_phys = ev->physical_wide;
 		dvd_update_spu();
+		DVD_UNLOCK();
 		break;
 	}
 
@@ -566,6 +649,7 @@ static int dvd_step(void)
 	{
 		dvdnav_audio_stream_change_event_t *ev = (dvdnav_audio_stream_change_event_t *)buf;
 		dvd.vm_audio_phys = ev->physical;
+		dvd.vm_audio_logical = ev->logical;
 		dvd.want_audio_id = dvd_audio_id();
 		break;
 	}
@@ -578,14 +662,15 @@ static int dvd_step(void)
 	{
 		int aspect = dvdnav_get_video_aspect(dvd.nav);
 		fb_aspect = aspect == 3 ? 16.0 / 9.0 : 4.0 / 3.0;
-		dvd.user_audio = -1;
 		dvd.title = -1;
 		break;
 	}
 
 	case DVDNAV_CELL_CHANGE:
 		dvd_title_info();
+		DVD_LOCK();
 		dvd_update_spu();
+		DVD_UNLOCK();
 		break;
 
 	case DVDNAV_HOP_CHANNEL:
@@ -594,7 +679,9 @@ static int dvd_step(void)
 		break;
 
 	case DVDNAV_STOP:
+		DVD_LOCK();
 		dvd.stopped = 1;
+		DVD_UNLOCK();
 		return 0;
 
 	default:
@@ -629,6 +716,7 @@ static const dvd_sub_t *dvd_current_sub(void)
 }
 
 // Drops the subpictures replaced by a newer one already showing.
+// Called with dvd_lock held.
 static void dvd_expire_subs(void)
 {
 	int keep = 0;
@@ -643,7 +731,7 @@ static void dvd_expire_subs(void)
 }
 
 // Draws the subpicture (subtitles, menu graphics) and the selected button.
-static void dvd_overlay(void)
+static void dvd_overlay_locked(void)
 {
 	const dvd_sub_t *cur = dvd_current_sub();
 	if (!cur) return;
@@ -683,6 +771,13 @@ static void dvd_overlay(void)
 			}
 		}
 	}
+}
+
+static void dvd_overlay(void)
+{
+	DVD_LOCK();
+	dvd_overlay_locked();
+	DVD_UNLOCK();
 }
 
 static void dvd_show(AVFrame *f)
@@ -733,33 +828,13 @@ static const char *lang_name(uint16_t code, char *buf)
 	return buf;
 }
 
-static int dvd_count_audio(void)
-{
-	int n = 0;
-	for (int p = 0; p < 8; p++)
-	{
-		int l = dvdnav_get_audio_logical_stream(dvd.nav, p);
-		if (l >= n) n = l + 1;
-	}
-	return n;
-}
-
-static int dvd_count_spu(void)
-{
-	int n = 0;
-	for (int l = 0; l < 32; l++)
-		if (dvdnav_spu_stream_to_lang(dvd.nav, l) != 0xffff) n = l + 1;
-	return n;
-}
-
 static void dvd_make_labels(void)
 {
 	static const char *const fmt[] = { "AC3", "?", "MPEG", "MPEG", "LPCM", "?", "DTS", "SDDS" };
 	char lang[4];
 	char a[32] = "", s[32];
 	int na = dvd_count_audio();
-	int phys = dvd_audio_phys();
-	int logical = phys >= 0 ? dvdnav_get_audio_logical_stream(dvd.nav, phys) : -1;
+	int logical = dvd_audio_logical();
 	if (na > 0 && logical >= 0)
 	{
 		uint16_t f = dvdnav_audio_stream_format(dvd.nav, logical);
@@ -768,18 +843,29 @@ static void dvd_make_labels(void)
 	}
 	int ns = dvd_count_spu();
 	if (!ns) s[0] = 0;
-	else if (dvd.spu_phys < 0 || dvd.spu_forced_only) snprintf(s, sizeof(s), "  Sott. no");
 	else
 	{
-		int l = dvdnav_get_spu_logical_stream(dvd.nav, dvd.spu_phys);
-		snprintf(s, sizeof(s), "  Sott. %d/%d%s", l + 1, ns, l >= 0 ? lang_name(dvdnav_spu_stream_to_lang(dvd.nav, l), lang) : "");
+		int l = dvd_spu_logical();
+		if (l < 0) snprintf(s, sizeof(s), "  Sott. no");
+		else snprintf(s, sizeof(s), "  Sott. %d/%d%s", l + 1, ns, lang_name(dvdnav_spu_stream_to_lang(dvd.nav, l), lang));
 	}
 	snprintf(dvd.audio_label, sizeof(dvd.audio_label), "%s%s", a, s);
 }
 
+static void dvd_stop_thread(void)
+{
+	if (!dvd.thread_on) return;
+	dvd.thread_run = 0;
+	pthread_join(dvd.thread, NULL);
+	dvd.thread_on = 0;
+}
+
 static void dvd_close(void)
 {
+	dvd_stop_thread();
+	DVD_LOCK();
 	dvd_clear_subs();
+	DVD_UNLOCK();
 	av_frame_free(&dvd.last);
 	if (dvd.vpar) av_parser_close(dvd.vpar);
 	if (dvd.apar) av_parser_close(dvd.apar);
@@ -831,6 +917,7 @@ static int dvd_open(const char *device)
 	dvd.user_audio = -1;
 	dvd.user_spu = -2;
 	dvd.vm_audio_phys = 0;
+	dvd.vm_audio_logical = 0;
 	dvd.vm_spu_phys = -1;
 	dvd.spu_phys = -1;
 	dvd.title = -1;
@@ -843,13 +930,64 @@ static int dvd_open(const char *device)
 	return 0;
 }
 
+// Whether the reader should decode more. Called with dvd_lock held.
 static int dvd_need_more(void)
 {
-	if (dvd.still || dvd.wait || dvd.stopped) return 0;
-	if (mc.vq_count >= MC_VQ_MAX) return 0;
+	if (dvd.halt || dvd.still || dvd.wait || dvd.stopped || dvd.ff_hold) return 0;
+	if (mc.vq_count >= DVD_VQ) return 0;
 	if (mc.pend_len >= mc.pend_cap - MC_AUDIO_RATE / 2) return 0;
-	if (!mc.vq_count || mc.vq[mc.vq_count - 1].pts <= mc.clock + 0.3) return 1;
-	return mc.audio_end < mc.clock + 0.5;
+	if (!mc.vq_count || mc.vq[mc.vq_count - 1].pts <= mc.clock + DVD_AHEAD) return 1;
+	return mc.audio_end < mc.clock + DVD_AHEAD;
+}
+
+// Reader thread: reads the disc and decodes ahead of the clock.
+static void *dvd_reader(void *arg)
+{
+	(void)arg;
+	while (dvd.thread_run)
+	{
+		DVD_LOCK();
+		int flush = dvd.req_flush, seek = dvd.req_seek, audio = dvd.req_audio;
+		double seek_to = dvd.seek_to;
+		dvd.req_flush = dvd.req_seek = dvd.req_audio = 0;
+		DVD_UNLOCK();
+
+		if (flush || seek)
+		{
+			if (seek) dvdnav_time_search(dvd.nav, (uint64_t)(seek_to * 90000));
+			dvd_flush();
+			DVD_LOCK();
+			dvd.hop = 1;
+			dvd.ff_hold = 0;
+			dvd.seeking = seek;
+			DVD_UNLOCK();
+		}
+		if (audio)
+		{
+			dvd.want_audio_id = dvd_audio_id();
+			if (mc.adec) avcodec_flush_buffers(mc.adec);
+			if (dvd.apar) { av_parser_close(dvd.apar); dvd.apar = av_parser_init(dvd.audio_codec); }
+			DVD_LOCK();
+			mc.pend_len = 0;
+			mc.audio_end = mc.clock;
+			DVD_UNLOCK();
+			audio_flush();
+		}
+
+		DVD_LOCK();
+		int more = dvd_need_more();
+		// a stream too heavy for the CPU: skip pictures nothing refers to
+		int behind = mc.vq_count == 0 && !isnan(mc.last_vpts) && mc.last_vpts < mc.clock - 0.3;
+		DVD_UNLOCK();
+		if (!more)
+		{
+			usleep(4000);
+			continue;
+		}
+		mc.vdec->skip_frame = behind ? AVDISCARD_NONREF : AVDISCARD_DEFAULT;
+		if (!dvd_step()) usleep(4000);
+	}
+	return NULL;
 }
 
 static int dvd_in_menu(void)
@@ -858,25 +996,13 @@ static int dvd_in_menu(void)
 	return pci && pci->hli.hl_gi.btn_ns > 0 && dvd.hl_on;
 }
 
-// Shows the first picture after a jump (fast forward / rewind).
-static void dvd_preview(double t)
+// After a jump made with the controls: drop what is queued at once.
+static void dvd_jumped(void)
 {
-	dvdnav_time_search(dvd.nav, (uint64_t)(t * 90000));
-	dvd.still = dvd.wait = 0;
-	for (int i = 0; i < 2000 && !mc.vq_count && !dvd.stopped && !dvd.still && !dvd.wait; i++)
-	{
-		if (!dvd_step()) break;
-	}
-	if (mc.vq_count)
-	{
-		AVFrame *f = mc.vq[0].frame;
-		mc.vq[0].frame = NULL;
-		vq_clear();
-		dvd_show(f);
-	}
-	mc.pend_len = 0;
-	audio_flush();
-	dvd.hop = 1;
+	DVD_LOCK();
+	dvd.req_flush = 1;
+	dvd.still = dvd.wait = dvd.stopped = dvd.halt = 0;
+	DVD_UNLOCK();
 }
 
 // Plays the DVD in device. Returns END_QUIT when the application must close.
@@ -892,6 +1018,16 @@ static int dvd_play(const char *device)
 	exit_question = "Uscire dal DVD?";
 	if (audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	memset(fb_mem, 0, fb_len);
+
+	frames_shown = frames_dropped = 0;
+	dvd.thread_run = 1;
+	if (pthread_create(&dvd.thread, NULL, dvd_reader, NULL))
+	{
+		audio_close();
+		dvd_close();
+		return END_DONE;
+	}
+	dvd.thread_on = 1;
 
 	int result = END_DONE;
 	double last = now_seconds(), osd_built = 0, title_time = 0;
@@ -927,11 +1063,10 @@ static int dvd_play(const char *device)
 				case KEY_ENTER:
 				case KEY_PLAY:
 				case KEY_PLAYCD:
-					dvdnav_button_activate(dvd.nav, pci);
-					dvd.still = dvd.wait = 0;
+					if (dvdnav_button_activate(dvd.nav, pci) == DVDNAV_STATUS_OK) dvd_jumped();
 					break;
 				case KEY_SPACE:
-					if (dvdnav_menu_call(dvd.nav, DVD_MENU_Escape) == DVDNAV_STATUS_OK) dvd.still = dvd.wait = 0;
+					if (dvdnav_menu_call(dvd.nav, DVD_MENU_Escape) == DVDNAV_STATUS_OK) dvd_jumped();
 					break;
 				default: done = 0; break;
 				}
@@ -948,9 +1083,15 @@ static int dvd_play(const char *device)
 				if (p.state == ST_STOP)
 				{
 					dvdnav_title_play(dvd.nav, dvd.title > 0 ? dvd.title : 1);
-					dvd.stopped = dvd.still = dvd.wait = 0;
+					dvd_jumped();
 				}
-				else if (p.state == ST_FF || p.state == ST_REW) dvd.hop = 1;
+				else if (p.state == ST_FF || p.state == ST_REW)
+				{
+					DVD_LOCK();
+					dvd.ff_hold = 0;
+					dvd.hop = 1;
+					DVD_UNLOCK();
+				}
 				p.state = ST_PLAY;
 				break;
 			case KEY_PAUSE:
@@ -958,26 +1099,36 @@ static int dvd_play(const char *device)
 			case KEY_PLAYPAUSE:
 				if (p.state == ST_PLAY) p.state = ST_PAUSE;
 				else if (p.state == ST_PAUSE) p.state = ST_PLAY;
-				else if (p.state == ST_FF || p.state == ST_REW) p.state = ST_PAUSE;
+				else if (p.state == ST_FF || p.state == ST_REW)
+				{
+					DVD_LOCK();
+					dvd.ff_hold = 0;
+					dvd.hop = 1;
+					DVD_UNLOCK();
+					p.state = ST_PAUSE;
+				}
 				break;
 			case KEY_ESC:
 			case KEY_STOP:
 			case KEY_STOPCD:
 				if (p.state == ST_STOP) break;
 				p.state = ST_STOP;
-				dvdnav_stop(dvd.nav);
-				dvd_flush();
+				// the disc stays where it is; Play starts the title again
+				DVD_LOCK();
+				dvd.req_flush = 1;
+				dvd.halt = 1;
 				dvd.still = dvd.wait = 0;
+				DVD_UNLOCK();
 				memset(fb_mem, 0, fb_len);
 				have_frame = 0;
 				break;
 			case KEY_RIGHT:
 			case KEY_NEXTSONG:
-				if (dvdnav_next_pg_search(dvd.nav) == DVDNAV_STATUS_OK) dvd.still = dvd.wait = 0;
+				if (dvdnav_next_pg_search(dvd.nav) == DVDNAV_STATUS_OK) dvd_jumped();
 				break;
 			case KEY_LEFT:
 			case KEY_PREVIOUSSONG:
-				if (dvdnav_prev_pg_search(dvd.nav) == DVDNAV_STATUS_OK) dvd.still = dvd.wait = 0;
+				if (dvdnav_prev_pg_search(dvd.nav) == DVDNAV_STATUS_OK) dvd_jumped();
 				break;
 			case KEY_PAGEDOWN:
 			case KEY_FASTFORWARD:
@@ -986,11 +1137,19 @@ static int dvd_play(const char *device)
 			{
 				int want = (code == KEY_PAGEDOWN || code == KEY_FASTFORWARD) ? ST_FF : ST_REW;
 				if (p.state == ST_STOP || !dvdnav_is_domain_vts(dvd.nav)) break;
-				if (p.state == want) { p.state = ST_PLAY; dvd.hop = 1; break; }
+				if (p.state == want)
+				{
+					DVD_LOCK();
+					dvd.ff_hold = 0;
+					dvd.hop = 1;
+					DVD_UNLOCK();
+					p.state = ST_PLAY;
+					break;
+				}
 				if (p.state != ST_FF && p.state != ST_REW) p.ff_time = title_time;
 				audio_flush();
 				p.state = want;
-				p.ff_step = 0;
+				p.ff_step = 0.3; // first jump right away
 				break;
 			}
 			case KEY_UP:
@@ -999,15 +1158,17 @@ static int dvd_play(const char *device)
 				int n = dvd_count_audio();
 				if (n > 1)
 				{
-					int cur = dvd.user_audio >= 0 ? dvd.user_audio : dvdnav_get_audio_logical_stream(dvd.nav, dvd.vm_audio_phys);
+					int cur = dvd_audio_logical();
 					if (cur < 0) cur = 0;
-					cur = (cur + (code == KEY_DOWN ? 1 : n - 1)) % n;
+					for (int k = 0; k < n; k++)
+					{
+						cur = (cur + (code == KEY_DOWN ? 1 : n - 1)) % n;
+						if (dvdnav_get_audio_logical_stream(dvd.nav, cur) >= 0) break;
+					}
+					DVD_LOCK();
 					dvd.user_audio = cur;
-					dvd.want_audio_id = dvd_audio_id();
-					if (mc.adec) avcodec_flush_buffers(mc.adec);
-					mc.pend_len = 0;
-					mc.audio_end = mc.clock;
-					audio_flush();
+					dvd.req_audio = 1;
+					DVD_UNLOCK();
 				}
 				else audio_mode = (audio_mode + (code == KEY_DOWN ? 1 : 2)) % 3;
 				break;
@@ -1017,18 +1178,19 @@ static int dvd_play(const char *device)
 				// subtitles: off, then each language
 				int n = dvd_count_spu();
 				if (!n) break;
-				int cur = (dvd.spu_phys >= 0 && !dvd.spu_forced_only) ? dvdnav_get_spu_logical_stream(dvd.nav, dvd.spu_phys) : -1;
-				int next = cur + 1;
-				while (next < n && dvdnav_spu_stream_to_lang(dvd.nav, next) == 0xffff) next++;
+				int next = dvd_spu_logical() + 1;
+				while (next < n && dvdnav_get_spu_logical_stream(dvd.nav, next) < 0) next++;
+				DVD_LOCK();
 				dvd.user_spu = next < n ? next : -1;
 				dvd_update_spu();
+				DVD_UNLOCK();
 				break;
 			}
 			case KEY_SPACE:
 				if (dvdnav_menu_call(dvd.nav, DVD_MENU_Root) == DVDNAV_STATUS_OK ||
 					dvdnav_menu_call(dvd.nav, DVD_MENU_Title) == DVDNAV_STATUS_OK)
 				{
-					dvd.still = dvd.wait = 0;
+					dvd_jumped();
 					if (p.state != ST_PLAY) p.state = ST_PLAY;
 				}
 				break;
@@ -1040,13 +1202,11 @@ static int dvd_play(const char *device)
 		if (result != END_DONE) break;
 
 		AVFrame *show = NULL;
+		int still_skip = 0, wait_skip = 0;
 		if (p.state == ST_PLAY)
 		{
+			DVD_LOCK();
 			mc.clock += elapsed;
-			for (int i = 0; i < 400 && dvd_need_more(); i++)
-			{
-				if (!dvd_step()) break;
-			}
 			feed_audio_output();
 			// a picture timed far ahead would hold back all the others
 			while (mc.vq_count && mc.vq[0].pts > mc.clock + 3.0)
@@ -1058,14 +1218,11 @@ static int dvd_play(const char *device)
 			show = due_frame();
 			dvd_expire_subs();
 
-			mc.vdec->skip_frame = (mc.vq_count == 0 && !isnan(mc.last_vpts) && mc.last_vpts < mc.clock - 0.3)
-				? AVDISCARD_NONREF : AVDISCARD_DEFAULT;
-
 			int drained = !mc.vq_count && mc.pend_len == 0 && mc.audio_end <= mc.clock;
 			if (dvd.wait && drained)
 			{
 				dvd.wait = 0;
-				dvdnav_wait_skip(dvd.nav);
+				wait_skip = 1;
 			}
 			if (dvd.still && !mc.vq_count)
 			{
@@ -1075,29 +1232,46 @@ static int dvd_play(const char *device)
 				if (t >= dvd.still_until)
 				{
 					dvd.still = 0;
-					dvdnav_still_skip(dvd.nav);
+					still_skip = 1;
 				}
 			}
-			if (dvd.stopped)
+			int ended = dvd.stopped && !mc.vq_count && !mc.pend_len;
+			DVD_UNLOCK();
+			if (wait_skip) dvdnav_wait_skip(dvd.nav);
+			if (still_skip) dvdnav_still_skip(dvd.nav);
+			if (ended)
 			{
-				if (!mc.vq_count && !mc.pend_len)
-				{
-					result = END_DONE;
-					break;
-				}
+				av_frame_free(&show);
+				result = END_DONE;
+				break;
 			}
 		}
 		else if (p.state == ST_FF || p.state == ST_REW)
 		{
+			// show the picture found by the last jump, then jump again
+			DVD_LOCK();
+			if (mc.vq_count)
+			{
+				show = mc.vq[0].frame;
+				mc.vq[0].frame = NULL;
+				vq_clear();
+			}
+			mc.pend_len = 0;
+			int busy = dvd.req_seek || dvd.seeking;
+			DVD_UNLOCK();
+
 			p.ff_step += elapsed;
-			if (p.ff_step >= 0.3)
+			if (p.ff_step >= 0.3 && !busy)
 			{
 				double step = p.ff_step * DVD_FF_SPEED;
 				p.ff_step = 0;
 				p.ff_time += p.state == ST_FF ? step : -step;
 				if (p.ff_time < 0) p.ff_time = 0;
 				if (dvd.duration > 0 && p.ff_time > dvd.duration - 1) p.ff_time = dvd.duration - 1;
-				dvd_preview(p.ff_time);
+				DVD_LOCK();
+				dvd.seek_to = p.ff_time;
+				dvd.req_seek = 1;
+				DVD_UNLOCK();
 				if (p.ff_time <= 0 || (dvd.duration > 0 && p.ff_time >= dvd.duration - 1)) p.state = ST_PLAY;
 			}
 		}
@@ -1157,6 +1331,8 @@ static int dvd_play(const char *device)
 		usleep(p.state == ST_PLAY ? 2000 : 10000);
 	}
 
+	dvd_stop_thread();
+	printf("mediacenter: DVD pictures shown %d, dropped late %d\n", frames_shown, frames_dropped);
 	audio_close();
 	exit_question = "Uscire dal Video CD?";
 	dvd_close();

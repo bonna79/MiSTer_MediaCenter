@@ -29,7 +29,8 @@
 
 #define MC_AUDIO_RATE 48000
 #define MC_AUDIO_LEAD 0.15
-#define MC_VQ_MAX 12
+#define MC_VQ_MAX 40  // pictures the queue can hold
+#define MC_VQ_FILE 12 // pictures decoded ahead for files
 #define MC_PENDING_SECONDS 4
 #define MC_SKIP_SECONDS 60.0
 
@@ -466,7 +467,7 @@ static int need_more(void)
 {
 	if (mc.vstream >= 0)
 	{
-		if (mc.vq_count >= MC_VQ_MAX) return 0;
+		if (mc.vq_count >= MC_VQ_FILE) return 0;
 		if (!mc.vq_count || mc.vq[mc.vq_count - 1].pts <= mc.clock + 0.1) return 1;
 	}
 	if (mc.astream >= 0 && mc.pend_len < mc.pend_cap - MC_AUDIO_RATE / 2 && mc.audio_end < mc.clock + 0.5) return 1;
@@ -527,13 +528,15 @@ static void draw_video_frame(AVFrame *f)
 
 // Takes the frames that are due; returns the most recent one (owned by the
 // caller) or NULL.
+static int frames_shown, frames_dropped; // reported in the log
+
 static AVFrame *due_frame(void)
 {
 	AVFrame *show = NULL;
 	int n = 0;
 	while (n < mc.vq_count && mc.vq[n].pts <= mc.clock)
 	{
-		if (show) av_frame_free(&show);
+		if (show) { av_frame_free(&show); frames_dropped++; }
 		show = mc.vq[n].frame;
 		n++;
 	}
@@ -541,6 +544,7 @@ static AVFrame *due_frame(void)
 	{
 		memmove(mc.vq, mc.vq + n, (mc.vq_count - n) * sizeof(mc.vq[0]));
 		mc.vq_count -= n;
+		frames_shown++;
 	}
 	return show;
 }
