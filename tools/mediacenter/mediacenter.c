@@ -19,6 +19,8 @@
 
 #include <dirent.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
 #include <sys/stat.h>
 
 #include <libavcodec/avcodec.h>
@@ -144,6 +146,7 @@ typedef struct
 	double duration;
 	double clock;     // playing position
 	double last_vpts;
+	double read_vpts; // time of the last video packet handed to the thread
 	int eof, flushed;
 
 	vq_item_t vq[MC_VQ_MAX];
@@ -171,6 +174,9 @@ static double ts_seconds(int64_t ts, AVRational tb)
 
 // Pictures the video decoder always skips (light mode for 50/60 fps HD).
 static enum AVDiscard skip_base = AVDISCARD_DEFAULT;
+// Light mode: only every other line is converted and drawn; the FPGA scaler
+// enlarges the half-height picture to the screen.
+static int half_lines = 0;
 
 static AVCodecContext *open_decoder(int stream)
 {
@@ -201,6 +207,7 @@ static AVCodecContext *open_decoder(int stream)
 		double fps = av_q2d(st->avg_frame_rate);
 		if (fps > 31) skip_base = AVDISCARD_NONREF;
 		ctx->skip_frame = skip_base;
+		half_lines = st->codecpar->height >= 576;
 		fprintf(stderr, "mediacenter: %dx%d %s, light decoding\n", st->codecpar->width, st->codecpar->height, codec->name);
 	}
 	if (avcodec_open2(ctx, codec, NULL) < 0)
@@ -271,6 +278,7 @@ static void media_close(void)
 static int media_open(const char *path)
 {
 	skip_base = AVDISCARD_DEFAULT;
+	half_lines = 0;
 	media_close();
 	if (avformat_open_input(&mc.fmt, path, NULL, NULL) < 0)
 	{
@@ -320,7 +328,7 @@ static int media_open(const char *path)
 	mc.start = mc.fmt->start_time != AV_NOPTS_VALUE ? mc.fmt->start_time / (double)AV_TIME_BASE : 0;
 	mc.duration = mc.fmt->duration != AV_NOPTS_VALUE ? mc.fmt->duration / (double)AV_TIME_BASE : 0;
 	mc.audio_only = mc.vstream < 0;
-	mc.last_vpts = NAN;
+	mc.last_vpts = mc.read_vpts = NAN;
 
 	const char *base = strrchr(path, '/');
 	AVDictionaryEntry *title = av_dict_get(mc.fmt->metadata, "title", NULL, 0);
@@ -442,6 +450,163 @@ static void receive_frames(AVCodecContext *ctx, int video)
 	}
 }
 
+// Video decoding thread for files. The main loop reads the file and decodes
+// the sound, which is cheap; the pictures, which with HD H.264 can take longer
+// than they last, are decoded here so they never hold the sound up.
+#define VT_MAX 400 // video packets waiting to be decoded
+
+static struct
+{
+	pthread_t thread;
+	pthread_mutex_t lock;
+	pthread_cond_t cond;
+	int on, run;
+	int direct;           // decode in the caller (fast forward previews)
+	AVPacket *q[VT_MAX + 1]; // a NULL entry ends the stream
+	int head, count;
+	int busy;             // a packet is being decoded outside the lock
+	int drained;          // the end of the stream has been decoded
+	int wait_key;         // queue overflowed: drop packets until a key picture
+	int key_sent;         // a key picture was sent while skipping all others
+	int frames, key_frames; // pictures queued; their count when it was sent
+	double clock;         // copy of mc.clock for the thread
+} vt = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
+
+static void *video_thread(void *arg)
+{
+	(void)arg;
+	AVFrame *frame = av_frame_alloc();
+	pthread_mutex_lock(&vt.lock);
+	while (vt.run && frame)
+	{
+		if (!vt.count || mc.vq_count >= MC_VQ_FILE)
+		{
+			pthread_cond_wait(&vt.cond, &vt.lock);
+			continue;
+		}
+		AVPacket *pkt = vt.q[vt.head];
+		vt.head = (vt.head + 1) % (VT_MAX + 1);
+		vt.count--;
+		// Behind the sound: skip pictures nothing refers to, and when far
+		// behind decode only key pictures until the pictures catch up.
+		double lag = isnan(mc.last_vpts) ? 0 : vt.clock - mc.last_vpts;
+		enum AVDiscard skip = skip_base;
+		if (lag > 0.3 && skip < AVDISCARD_NONREF) skip = AVDISCARD_NONREF;
+		// The decoder hands a key picture over only after decoding the
+		// pictures that follow it: after sending one, decode those again.
+		if (vt.key_sent && vt.frames != vt.key_frames) vt.key_sent = 0;
+		if (lag > 1.5 && !vt.key_sent)
+		{
+			skip = AVDISCARD_NONKEY;
+			if (pkt && (pkt->flags & AV_PKT_FLAG_KEY))
+			{
+				vt.key_sent = 1;
+				vt.key_frames = vt.frames;
+			}
+		}
+		vt.busy = 1;
+		pthread_mutex_unlock(&vt.lock);
+
+		mc.vdec->skip_frame = skip;
+		if (avcodec_send_packet(mc.vdec, pkt) == AVERROR(EAGAIN))
+		{
+			// the decoder holds pictures it must hand over first
+			while (avcodec_receive_frame(mc.vdec, frame) == 0)
+			{
+				pthread_mutex_lock(&vt.lock);
+				queue_video(frame);
+				vt.frames++;
+				pthread_mutex_unlock(&vt.lock);
+				av_frame_unref(frame);
+			}
+			avcodec_send_packet(mc.vdec, pkt);
+		}
+		while (avcodec_receive_frame(mc.vdec, frame) == 0)
+		{
+			pthread_mutex_lock(&vt.lock);
+			queue_video(frame);
+			vt.frames++;
+			pthread_mutex_unlock(&vt.lock);
+			av_frame_unref(frame);
+		}
+
+		pthread_mutex_lock(&vt.lock);
+		if (!pkt) vt.drained = 1;
+		av_packet_free(&pkt);
+		vt.busy = 0;
+		pthread_cond_broadcast(&vt.cond);
+	}
+	pthread_mutex_unlock(&vt.lock);
+	av_frame_free(&frame);
+	return NULL;
+}
+
+// Hands a video packet (NULL: the end of the stream) to the thread.
+static void vt_push(AVPacket *pkt)
+{
+	AVPacket *copy = NULL;
+	if (pkt)
+	{
+		copy = av_packet_alloc();
+		if (!copy) return;
+		av_packet_move_ref(copy, pkt);
+	}
+	pthread_mutex_lock(&vt.lock);
+	if (copy && vt.count >= VT_MAX) vt.wait_key = 1;
+	if (copy && vt.wait_key && (!(copy->flags & AV_PKT_FLAG_KEY) || vt.count >= VT_MAX))
+	{
+		pthread_mutex_unlock(&vt.lock);
+		av_packet_free(&copy);
+		return;
+	}
+	vt.wait_key = 0;
+	if (vt.count <= VT_MAX)
+	{
+		vt.q[(vt.head + vt.count) % (VT_MAX + 1)] = copy;
+		vt.count++;
+	}
+	else av_packet_free(&copy);
+	pthread_cond_broadcast(&vt.cond);
+	pthread_mutex_unlock(&vt.lock);
+}
+
+// Drops the queued packets and waits for the thread to be idle. Returns with
+// the lock held, so the caller can reset the decoder and the picture queue.
+static void vt_stop_and_lock(void)
+{
+	pthread_mutex_lock(&vt.lock);
+	while (vt.busy) pthread_cond_wait(&vt.cond, &vt.lock);
+	while (vt.count)
+	{
+		av_packet_free(&vt.q[vt.head]);
+		vt.head = (vt.head + 1) % (VT_MAX + 1);
+		vt.count--;
+	}
+	vt.wait_key = 0;
+	vt.key_sent = 0;
+	vt.drained = 0;
+}
+
+static void vt_start(void)
+{
+	if (!mc.vdec || vt.on) return;
+	vt.head = vt.count = vt.busy = vt.drained = vt.wait_key = vt.direct = vt.key_sent = 0;
+	vt.clock = mc.clock;
+	vt.run = 1;
+	if (!pthread_create(&vt.thread, NULL, video_thread, NULL)) vt.on = 1;
+}
+
+static void vt_end(void)
+{
+	if (!vt.on) return;
+	vt_stop_and_lock();
+	vt.run = 0;
+	pthread_cond_broadcast(&vt.cond);
+	pthread_mutex_unlock(&vt.lock);
+	pthread_join(vt.thread, NULL);
+	vt.on = 0;
+}
+
 // Reads and decodes one packet. Returns 0 at the end of the file.
 static int decode_step(void)
 {
@@ -450,7 +615,8 @@ static int decode_step(void)
 		if (!mc.flushed)
 		{
 			mc.flushed = 1;
-			if (mc.vdec) { avcodec_send_packet(mc.vdec, NULL); receive_frames(mc.vdec, 1); }
+			if (mc.vdec && vt.on && !vt.direct) vt_push(NULL);
+			else if (mc.vdec) { avcodec_send_packet(mc.vdec, NULL); receive_frames(mc.vdec, 1); }
 			if (mc.adec) { avcodec_send_packet(mc.adec, NULL); receive_frames(mc.adec, 0); }
 		}
 		return 0;
@@ -462,7 +628,13 @@ static int decode_step(void)
 		mc.eof = 1;
 		return 1;
 	}
-	if (mc.pkt->stream_index == mc.vstream && mc.vdec)
+	if (mc.pkt->stream_index == mc.vstream && mc.vdec && vt.on && !vt.direct)
+	{
+		int64_t ts = mc.pkt->dts != AV_NOPTS_VALUE ? mc.pkt->dts : mc.pkt->pts;
+		if (ts != AV_NOPTS_VALUE) mc.read_vpts = ts_seconds(ts, mc.fmt->streams[mc.vstream]->time_base) - mc.start;
+		vt_push(mc.pkt);
+	}
+	else if (mc.pkt->stream_index == mc.vstream && mc.vdec)
 	{
 		if (avcodec_send_packet(mc.vdec, mc.pkt) == AVERROR(EAGAIN))
 		{
@@ -486,7 +658,18 @@ static int decode_step(void)
 
 static int need_more(void)
 {
-	if (mc.vstream >= 0)
+	if (mc.vstream >= 0 && vt.on)
+	{
+		// keep a few packets ready for the video thread; reading further
+		// ahead is driven by the sound
+		// (not beyond a second ahead: when only key pictures are decoded
+		// the thread empties its queue at once)
+		pthread_mutex_lock(&vt.lock);
+		int more = vt.count < 8 && mc.vq_count < MC_VQ_FILE && !(mc.read_vpts > mc.clock + 1.0);
+		pthread_mutex_unlock(&vt.lock);
+		if (more) return 1;
+	}
+	else if (mc.vstream >= 0)
 	{
 		if (mc.vq_count >= MC_VQ_FILE) return 0;
 		if (!mc.vq_count || mc.vq[mc.vq_count - 1].pts <= mc.clock + 0.1) return 1;
@@ -643,26 +826,36 @@ static void fb_native(int w, int h, double aspect)
 // Converts and draws a decoded picture.
 static void draw_video_frame(AVFrame *f)
 {
+	// Light mode: every other line, as a picture of half the height.
+	int h = f->height;
+	int linesize[AV_NUM_DATA_POINTERS];
+	memcpy(linesize, f->linesize, sizeof(linesize));
+	int half = half_lines && native_fb && !(f->flags & AV_FRAME_FLAG_INTERLACED);
+	if (half)
+	{
+		h /= 2;
+		for (int i = 0; i < AV_NUM_DATA_POINTERS; i++) linesize[i] *= 2;
+	}
 	if (native_fb)
 	{
 		// Small pictures (DivX, Video CD) get whole multiples of their lines
 		// so the controls still fit and the scaler has less to enlarge.
 		int mx = f->width < 480 ? 2 : 1, my = 1;
-		while (f->height * (my + 1) <= 1080 && f->height * my < 400) my++;
-		fb_native(f->width * mx, f->height * my, fb_aspect);
+		while (!half && h * (my + 1) <= 1080 && h * my < 400) my++;
+		fb_native(f->width * mx, h * my, fb_aspect);
 	}
 	if (!fb_mem) return;
-	fb_layout(f->width, f->height);
+	fb_layout(f->width, h);
 	if (!frame_rgb || !line_buf || !x_map) return;
-	mc.sws = sws_getCachedContext(mc.sws, f->width, f->height, (enum AVPixelFormat)f->format,
-		f->width, f->height, fb_bgr ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA, SWS_POINT, NULL, NULL, NULL);
+	mc.sws = sws_getCachedContext(mc.sws, f->width, h, (enum AVPixelFormat)f->format,
+		f->width, h, fb_bgr ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA, SWS_POINT, NULL, NULL, NULL);
 	if (!mc.sws) return;
 	int stride = src_w * 4;
 	if (!(stride & 15))
 	{
 		uint8_t *dst[4] = { frame_rgb, NULL, NULL, NULL };
 		int dst_stride[4] = { stride, 0, 0, 0 };
-		sws_scale(mc.sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, dst, dst_stride);
+		sws_scale(mc.sws, (const uint8_t *const *)f->data, linesize, 0, h, dst, dst_stride);
 	}
 	else
 	{
@@ -671,17 +864,17 @@ static void draw_video_frame(AVFrame *f)
 		static uint8_t *tmp = NULL;
 		static int tmp_size = 0;
 		int tstride = (stride + 63) & ~63;
-		if (tmp_size < tstride * f->height)
+		if (tmp_size < tstride * h)
 		{
 			av_free(tmp);
-			tmp = (uint8_t *)av_malloc((size_t)tstride * f->height);
-			tmp_size = tmp ? tstride * f->height : 0;
+			tmp = (uint8_t *)av_malloc((size_t)tstride * h);
+			tmp_size = tmp ? tstride * h : 0;
 		}
 		if (!tmp) return;
 		uint8_t *dst[4] = { tmp, NULL, NULL, NULL };
 		int dst_stride[4] = { tstride, 0, 0, 0 };
-		sws_scale(mc.sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, dst, dst_stride);
-		for (int y = 0; y < f->height; y++) memcpy(frame_rgb + (size_t)y * stride, tmp + (size_t)y * tstride, stride);
+		sws_scale(mc.sws, (const uint8_t *const *)f->data, linesize, 0, h, dst, dst_stride);
+		for (int y = 0; y < h; y++) memcpy(frame_rgb + (size_t)y * stride, tmp + (size_t)y * tstride, stride);
 	}
 	if (f->flags & AV_FRAME_FLAG_INTERLACED) deinterlace_rgb();
 	if (frame_overlay) frame_overlay();
@@ -720,14 +913,16 @@ static void media_seek(double t)
 	if (t < 0) t = 0;
 	int64_t target = (int64_t)((t + mc.start) * AV_TIME_BASE);
 	avformat_seek_file(mc.fmt, -1, INT64_MIN, target, target, AVSEEK_FLAG_BACKWARD);
+	if (vt.on) vt_stop_and_lock();
 	if (mc.vdec) avcodec_flush_buffers(mc.vdec);
 	if (mc.adec) avcodec_flush_buffers(mc.adec);
 	vq_clear();
 	mc.pend_len = 0;
 	mc.audio_end = t;
-	mc.last_vpts = NAN;
+	mc.last_vpts = mc.read_vpts = NAN;
 	mc.eof = mc.flushed = 0;
-	mc.clock = t;
+	mc.clock = vt.clock = t;
+	if (vt.on) pthread_mutex_unlock(&vt.lock);
 	audio_flush();
 }
 
@@ -736,10 +931,13 @@ static void media_preview(double t)
 {
 	media_seek(t);
 	if (mc.vstream < 0) return;
+	// the video thread is idle after the seek: decode here
+	vt.direct = 1;
 	for (int i = 0; i < 400 && !mc.vq_count; i++)
 	{
 		if (!decode_step()) break;
 	}
+	vt.direct = 0;
 	if (mc.vq_count)
 	{
 		AVFrame *f = mc.vq[0].frame;
@@ -797,6 +995,10 @@ static int media_play(int in_playlist)
 	if (mc.astream >= 0 && audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	memset(fb_mem, 0, fb_len);
 	if (mc.audio_only) draw_audio_screen();
+	vt_start();
+	// The loop that reads the file and sends the sound runs ahead of the
+	// video decoding threads, so the sound keeps flowing on a heavy stream.
+	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5);
 
 	int result = END_DONE;
 	double last = now_seconds(), osd_built = 0;
@@ -900,11 +1102,19 @@ static int media_play(int in_playlist)
 			mc.clock += elapsed;
 			fill();
 			feed_audio_output();
-			show = due_frame();
+			if (vt.on)
+			{
+				pthread_mutex_lock(&vt.lock);
+				vt.clock = mc.clock;
+				show = due_frame();
+				pthread_cond_broadcast(&vt.cond);
+				pthread_mutex_unlock(&vt.lock);
+			}
+			else show = due_frame();
 
 			// A stream too heavy for the CPU: skip pictures nothing refers to
 			// until the decoder catches up with the clock.
-			if (mc.vdec)
+			if (mc.vdec && !vt.on)
 			{
 				// Far behind: decode only key pictures until it catches up, so
 				// the audio keeps being decoded in time.
@@ -915,7 +1125,9 @@ static int media_play(int in_playlist)
 				mc.vdec->skip_frame = skip;
 			}
 
-			int video_done = mc.vstream < 0 || (mc.flushed && !mc.vq_count);
+			if (vt.on) pthread_mutex_lock(&vt.lock);
+			int video_done = mc.vstream < 0 || (mc.flushed && (!vt.on || vt.drained) && !mc.vq_count);
+			if (vt.on) pthread_mutex_unlock(&vt.lock);
 			int audio_done = mc.astream < 0 || (mc.flushed && !mc.pend_len);
 			if (mc.eof && mc.flushed && video_done && audio_done)
 			{
@@ -979,6 +1191,8 @@ static int media_play(int in_playlist)
 		usleep(p.state == ST_PLAY ? 2000 : 10000);
 	}
 
+	vt_end();
+	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
 	audio_close();
 	exit_question = "Uscire dal Video CD?";
 	return quit_requested ? END_QUIT : result;
