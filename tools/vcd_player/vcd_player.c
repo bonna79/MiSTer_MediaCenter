@@ -368,6 +368,9 @@ static int have_frame = 0;
 // the PAL/NTSC storage size; MediaCenter sets it per file.
 static double fb_aspect = 4.0 / 3.0;
 static double fb_layout_aspect = 0;
+// Shape of a framebuffer pixel on screen (width / height): not 1 when the
+// scaler stretches the framebuffer, as MediaCenter does for DVD pictures.
+static double fb_par = 1.0;
 
 // On-screen controls: a band at the bottom of the screen, blended over the
 // picture. ovl_a is the coverage and ovl_v the grey level of each pixel.
@@ -377,17 +380,18 @@ static uint32_t *full_line = NULL;
 
 static void fb_layout(int w, int h)
 {
-	if (w == src_w && h == src_h && fb_aspect == fb_layout_aspect) return;
+	double aspect = fb_aspect / fb_par; // in framebuffer pixels
+	if (w == src_w && h == src_h && aspect == fb_layout_aspect) return;
 	src_w = w;
 	src_h = h;
-	fb_layout_aspect = fb_aspect;
+	fb_layout_aspect = aspect;
 
 	dst_h = fb_h;
-	dst_w = (int)(fb_h * fb_aspect + 0.5);
+	dst_w = (int)(fb_h * aspect + 0.5);
 	if (dst_w > fb_w)
 	{
 		dst_w = fb_w;
-		dst_h = (int)(fb_w / fb_aspect + 0.5);
+		dst_h = (int)(fb_w / aspect + 0.5);
 	}
 	dst_x = (fb_w - dst_w) / 2;
 	dst_y = (fb_h - dst_h) / 2;
@@ -456,6 +460,7 @@ static const uint32_t *video_line(int y, int *prev_sy)
 // Draws the last decoded picture and, in the bottom band, the controls.
 static void fb_present(void)
 {
+	if (!fb_mem) return;
 	int prev_sy = -1;
 	for (int y = 0; y < fb_h; y++)
 	{

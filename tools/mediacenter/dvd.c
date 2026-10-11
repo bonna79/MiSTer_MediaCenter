@@ -1018,6 +1018,7 @@ static int dvd_play(const char *device)
 	exit_question = "Uscire dal DVD?";
 	if (audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	memset(fb_mem, 0, fb_len);
+	native_fb = !getenv("MC_ARMSCALE");
 
 	frames_shown = frames_dropped = 0;
 	dvd.thread_run = 1;
@@ -1332,6 +1333,8 @@ static int dvd_play(const char *device)
 	}
 
 	dvd_stop_thread();
+	native_fb = 0;
+	fb_native(0, 0, 0);
 	printf("mediacenter: DVD pictures shown %d, dropped late %d\n", frames_shown, frames_dropped);
 	audio_close();
 	exit_question = "Uscire dal Video CD?";

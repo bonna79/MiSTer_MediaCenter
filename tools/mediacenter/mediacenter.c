@@ -527,9 +527,102 @@ static void fb_wait_vsync(void)
 	}
 }
 
+// DVD pictures are drawn at their own size (720x576 or 720x480) and the
+// FPGA scaler enlarges the framebuffer to the screen with the picture's
+// aspect: the ARM does much less work and the scaler filters better than
+// the line repetition of fb_present. Needs a Main that knows fb_cmd3; with
+// another Main the framebuffer just stays as it is.
+static int native_fb = 0;        // set while a DVD plays
+static int native_w, native_h;   // current special mode, 0 for the normal one
+static double native_aspect;
+static int native_ok = 1;        // cleared when Main ignores the command
+static int fb_fake = 0;          // test mode: memory framebuffer
+static int def_w, def_h;         // the normal framebuffer
+
+static void screen_rebuild(void)
+{
+	free(ovl_a); free(ovl_v); free(full_line);
+	ovl_a = ovl_v = NULL;
+	full_line = NULL;
+	osd_layout();
+	src_w = src_h = 0;
+	fb_layout_aspect = 0;
+	have_frame = 0;
+}
+
+static void fb_native(int w, int h, double aspect)
+{
+	if (!native_ok || !fb_mem) return;
+	if (w == native_w && h == native_h && (!w || aspect == native_aspect)) return;
+	if (!native_w)
+	{
+		def_w = fb_w;
+		def_h = fb_h;
+	}
+	int want_w = w ? w : def_w, want_h = w ? h : def_h;
+
+	if (fb_fake)
+	{
+		free(fb_mem);
+		fb_w = want_w;
+		fb_h = want_h;
+		fb_stride = fb_w * 4;
+		fb_len = (size_t)fb_stride * fb_h;
+		fb_mem = (uint8_t *)calloc(1, fb_len);
+	}
+	else
+	{
+		int fd = open("/dev/MiSTer_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0)
+		{
+			native_ok = 0;
+			return;
+		}
+		char cmd[96];
+		if (w) snprintf(cmd, sizeof(cmd), "fb_cmd3 8888 1 %d %d %d 1000\n", w, h, (int)(aspect * 1000 + 0.5));
+		else snprintf(cmd, sizeof(cmd), "fb_cmd3 default\n");
+		int ok = write(fd, cmd, strlen(cmd)) > 0;
+		close(fd);
+
+		// Main applies the mode in its own loop: wait for Linux to report it.
+		int changed = 0;
+		for (int i = 0; ok && i < 100 && !changed; i++)
+		{
+			usleep(10000);
+			int f = open("/dev/fb0", O_RDWR | O_CLOEXEC);
+			struct fb_var_screeninfo var;
+			if (f >= 0 && !ioctl(f, FBIOGET_VSCREENINFO, &var))
+				changed = (int)var.xres == want_w && (int)var.yres == want_h;
+			if (f >= 0) close(f);
+		}
+		if (!changed)
+		{
+			fprintf(stderr, "mediacenter: framebuffer %dx%d not available, scaling on the ARM\n", want_w, want_h);
+			native_ok = 0;
+			return;
+		}
+		munmap(fb_mem, fb_len);
+		fb_mem = NULL;
+		if (fb_open())
+		{
+			fprintf(stderr, "mediacenter: framebuffer lost\n");
+			quit_requested = 1;
+			return;
+		}
+	}
+	fprintf(stderr, "mediacenter: framebuffer %dx%d%s\n", fb_w, fb_h, w ? " stretched by the scaler" : "");
+	native_w = w;
+	native_h = h;
+	native_aspect = aspect;
+	fb_par = w ? aspect * h / w : 1.0;
+	screen_rebuild();
+}
+
 // Converts and draws a decoded picture.
 static void draw_video_frame(AVFrame *f)
 {
+	if (native_fb) fb_native(f->width, f->height, fb_aspect);
+	if (!fb_mem) return;
 	fb_layout(f->width, f->height);
 	if (!frame_rgb || !line_buf || !x_map) return;
 	mc.sws = sws_getCachedContext(mc.sws, f->width, f->height, (enum AVPixelFormat)f->format,
@@ -1390,6 +1483,7 @@ static int test_setup(const char *spec)
 	fb_len = (size_t)fb_stride * fb_h;
 	fb_bgr = 1;
 	fb_mem = (uint8_t *)calloc(1, fb_len);
+	fb_fake = 1;
 	test_start = now_seconds();
 	input_hook = test_input;
 	return fb_mem ? 0 : -1;

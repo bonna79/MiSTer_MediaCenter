@@ -4292,6 +4292,38 @@ void video_cmd(char *cmd)
 			}
 		}
 
+		// fb_cmd3 <fmt> <rb> <width> <height> <aspect w> <aspect h>: a frame
+		// buffer of the given size stretched to the largest window of that
+		// display aspect, so the scaler does all the enlarging (MediaCenter
+		// shows DVD pictures at their own size this way).
+		// fb_cmd3 default: back to the normal frame buffer.
+		if (!strcmp(cmd, "fb_cmd3 default"))
+		{
+			video_fb_enable(1, 0);
+			return;
+		}
+
+		int aw = 0, ah = 0;
+		if (sscanf(cmd, "fb_cmd3 %d %d %d %d %d %d", &fmt, &rb, &width, &height, &aw, &ah) == 6)
+		{
+			if (width >= 120 && height >= 120 && width <= 1920 && height <= 1080 && aw > 0 && ah > 0)
+			{
+				int out_w = v_cur.item[1], out_h = v_cur.item[5];
+				int win_h = out_h;
+				int win_w = (int)((int64_t)out_h * aw / ah);
+				if (win_w > out_w)
+				{
+					win_w = out_w;
+					win_h = (int)((int64_t)out_w * ah / aw);
+				}
+				hmin = (uint16_t)((out_w - win_w) / 2);
+				vmin = (uint16_t)((out_h - win_h) / 2);
+				hmax = hmin + win_w - 1;
+				vmax = vmin + win_h - 1;
+				accept = 1;
+			}
+		}
+
 		if (sscanf(cmd, "fb_cmd1 %d %d %d %d", &fmt, &rb, &width, &height) == 4)
 		{
 			if (width < 120 || width > (int)v_cur.item[1]) width = v_cur.item[1];
