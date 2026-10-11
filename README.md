@@ -14,7 +14,9 @@ Il lettore Video CD deriva dal ramo `video-cd-boot-launch` di Main_MiSTer_Physic
 | Video CD 1.0/1.1/2.0 | Sì | Lettore integrato `vcd_player` sull'ARM: menu PBC, avanti/indietro, pausa, stop, capitoli, canale audio |
 | Super Video CD | Parziale | Senza `vcd_player` o per gli SVCD (MPEG-2) si apre il core FPGA DVD |
 | CD audio | Sì | Apre il core scelto con `AUDIOCD=` oppure [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi) |
-| File DivX/Xvid/MKV e audio compresso da SD e USB | Pianificato | Decodifica ARM con FFmpeg, uscita video FPGA |
+| File video DivX/Xvid/MP4/MKV/MPEG/VOB da SD, USB e rete | In prova | Programma `mediacenter` sull'ARM, decodifica FFmpeg; SD e 720p MPEG-4, l'H.264 HD è troppo pesante |
+| Audio MP1/MP2/MP3, Ogg, FLAC, WAV, AAC | In prova | Stesso programma; i file di una cartella si ascoltano come un album |
+| DVD-Video nello stesso programma | In sviluppo | Prossimo passo: libdvdnav + libdvdcss in `mediacenter`, con lo stesso menu |
 
 ## Installazione
 
@@ -26,6 +28,27 @@ Il lettore Video CD deriva dal ramo `video-cd-boot-launch` di Main_MiSTer_Physic
 [menu]
 main=MiSTer_MediaCenter
 ```
+
+### Programma `mediacenter`
+
+1. Scarica l'artifact `mediacenter` dalla stessa build.
+2. Copia `mediacenter` in `/media/fat/linux/mediacenter`.
+3. Copia `mediacenter.sh` in `/media/fat/Scripts/`.
+
+Da **Scripts → mediacenter** si apre l'elenco delle sorgenti: disco nel lettore, `/media/fat/Video`, `/media/fat/Music`, la SD, le chiavette USB e la cartella di rete `cifs`. Quando `mediacenter` è installato, anche i Video CD inseriti si aprono con lui (altrimenti con `vcd_player`).
+
+| Tasto | Elenco | Riproduzione |
+| --- | --- | --- |
+| A | Apri | |
+| B | Indietro | Stop |
+| Start | | Play |
+| Select | | Pausa |
+| ◄ ► | Pagina | Capitolo precedente/successivo, senza capitoli ±60 s; nell'album brano precedente/successivo |
+| ▲ ▼ | Su/giù | Cambia traccia audio, oppure canale (stereo, sinistro, destro) |
+| L / R | | Indietro / avanti veloce |
+| X | Esci | Torna all'elenco (conferma con A) |
+
+Per misurare le prestazioni di un file: `/media/fat/linux/mediacenter --bench <file>`. Stampa la velocità di decodifica rispetto al tempo reale: sopra il 100% il file è riproducibile.
 
 Per i DVD commerciali e i Video CD installa il core [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) e segui la sua guida: aggiunge la sezione `[DVD]` con `main=MiSTer_DVDcss` e lo script `install_dvdcss`.
 
@@ -90,11 +113,19 @@ Audio is sent to the MiSTer audio output through `aplay`. If `aplay` is not avai
 | `PHYSICAL_DISC_BOOT=` | `0`, `1` | Avvia il disco già inserito all'accensione |
 | `AUDIOCD=` | `PSX`, `A0CD-Saturn`, `MISTERHIFI`, … | Programma da aprire per i CD audio |
 
-I Video CD usano `vcd_player` se è installato in `/media/fat/linux/vcd_player`, altrimenti il core FPGA DVD.
+I Video CD usano `/media/fat/linux/mediacenter` se è installato, poi `/media/fat/linux/vcd_player`, altrimenti il core FPGA DVD.
 
 ## Compilazione
 
 Il workflow `.github/workflows/build.yml` compila il Main a ogni push con GCC ARM 10.2 (`arm-none-linux-gnueabihf`) e pubblica il binario come artifact. In locale: `make` con quel compilatore nel `PATH`.
+
+`mediacenter` richiede FFmpeg 6.1.2 compilato in statico per l'ARM:
+
+```sh
+git clone --depth 1 -b n6.1.2 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
+tools/mediacenter/build_ffmpeg.sh ffmpeg-src ffmpeg-arm
+make mediacenter FFMPEG=$PWD/ffmpeg-arm
+```
 
 ## Provenienza e licenza
 

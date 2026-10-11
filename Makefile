@@ -127,3 +127,20 @@ $(VCD_PLAYER): tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h
 	$(Q)$(CC) -O2 -fno-tree-vectorize -g -Wall -std=gnu99 -static -o $@ $< -lm -lpthread
 	$(Q)cp $@ $@.elf
 	$(Q)$(STRIP) $@
+
+# MiSTer MediaCenter: the media player application (tools/mediacenter), which
+# contains the Video CD player. Needs a static FFmpeg built with
+# tools/mediacenter/build_ffmpeg.sh; FFMPEG is its install prefix.
+FFMPEG ?= ffmpeg-arm
+MEDIACENTER = $(BUILDDIR)/mediacenter
+
+.PHONY: mediacenter
+mediacenter: $(MEDIACENTER)
+
+$(MEDIACENTER): tools/mediacenter/mediacenter.c tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h tools/vcd_player/vcd_font.h
+	@mkdir -p $(BUILDDIR)
+	$(Q)$(info $@)
+	$(Q)$(CC) -O2 -fno-tree-vectorize -g -Wall -std=gnu99 -static -I$(FFMPEG)/include -o $@ $< \
+		-L$(FFMPEG)/lib -lavformat -lavcodec -lswscale -lswresample -lavutil -lm -lpthread
+	$(Q)cp $@ $@.elf
+	$(Q)$(STRIP) $@

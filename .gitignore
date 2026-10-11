@@ -29,3 +29,5 @@ host
 .vs
 MiSTer
 /bin
+ffmpeg-arm/
+ffmpeg-src/

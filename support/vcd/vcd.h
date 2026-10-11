@@ -8,6 +8,10 @@
 // VCD_PLAYER_PATH. Without that file nothing changes: Video CDs are handled
 // exactly as before.
 
+// MediaCenter (tools/mediacenter) also plays Video CDs and is preferred
+// when installed; vcd_player is the fallback.
+#define MEDIACENTER_PATH "/media/fat/linux/mediacenter"
+#define MEDIACENTER_PROCESS "mediacenter"
 #define VCD_PLAYER_PATH "/media/fat/linux/vcd_player"
 #define VCD_PLAYER_PROCESS "vcd_player"
 

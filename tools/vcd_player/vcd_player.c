@@ -364,6 +364,11 @@ static int fb_open(void)
 
 static int have_frame = 0;
 
+// Display aspect ratio of the picture. Video CD pictures are 4:3 regardless of
+// the PAL/NTSC storage size; MediaCenter sets it per file.
+static double fb_aspect = 4.0 / 3.0;
+static double fb_layout_aspect = 0;
+
 // On-screen controls: a band at the bottom of the screen, blended over the
 // picture. ovl_a is the coverage and ovl_v the grey level of each pixel.
 static int ovl_y = 0, ovl_h = 0, ovl_shown = 0;
@@ -372,17 +377,17 @@ static uint32_t *full_line = NULL;
 
 static void fb_layout(int w, int h)
 {
-	if (w == src_w && h == src_h) return;
+	if (w == src_w && h == src_h && fb_aspect == fb_layout_aspect) return;
 	src_w = w;
 	src_h = h;
+	fb_layout_aspect = fb_aspect;
 
-	// Video CD pictures are 4:3 regardless of the PAL/NTSC storage size.
 	dst_h = fb_h;
-	dst_w = fb_h * 4 / 3;
+	dst_w = (int)(fb_h * fb_aspect + 0.5);
 	if (dst_w > fb_w)
 	{
 		dst_w = fb_w;
-		dst_h = fb_w * 3 / 4;
+		dst_h = (int)(fb_w / fb_aspect + 0.5);
 	}
 	dst_x = (fb_w - dst_w) / 2;
 	dst_y = (fb_h - dst_h) / 2;
@@ -390,7 +395,10 @@ static void fb_layout(int w, int h)
 	free(frame_rgb);
 	free(line_buf);
 	free(x_map);
-	frame_rgb = (uint8_t *)malloc((size_t)w * h * 4);
+	// 64-byte aligned: FFmpeg's NEON colour conversion (MediaCenter) stores
+	// with 128-bit alignment hints and faults on a plain malloc block.
+	frame_rgb = NULL;
+	if (posix_memalign((void **)&frame_rgb, 64, (size_t)w * h * 4)) frame_rgb = NULL;
 	line_buf = (uint32_t *)malloc((size_t)dst_w * 4);
 	x_map = (int *)malloc((size_t)dst_w * sizeof(int));
 	for (int x = 0; x < dst_w; x++) x_map[x] = x * w / dst_w;
@@ -660,9 +668,12 @@ typedef struct
 	int chapters;
 	int audio_mode; // 0 stereo, 1 left channel, 2 right channel
 	int has_menu;   // disc menus: show "Y Menu"
+	const char *audio_label; // replaces the channel name when set
 	int menu;       // a menu is on screen
 	int sel, sel_min, sel_max;
 } osd_info_t;
+
+static const char *exit_question = "Uscire dal Video CD?";
 
 static void osd_layout(void)
 {
@@ -722,7 +733,7 @@ static void osd_build(const osd_info_t *info)
 		snprintf(buf, sizeof(buf), "Capitolo %d/%d", info->chapter, info->chapters);
 		x = ovl_text(x + 16 * ui, status_y, buf);
 	}
-	if (info->state != ST_STOP) ovl_text(x + 16 * ui, status_y, audio[info->audio_mode % 3]);
+	if (info->state != ST_STOP) ovl_text(x + 16 * ui, status_y, info->audio_label ? info->audio_label : audio[info->audio_mode % 3]);
 	format_time(info->time, t1, sizeof(t1));
 	format_time(info->duration, t2, sizeof(t2));
 	snprintf(buf, sizeof(buf), "%s / %s", t1, t2);
@@ -743,7 +754,7 @@ static void osd_build(const osd_info_t *info)
 	// Button legend, or the exit confirmation.
 	if (info->confirm_exit)
 	{
-		const char *q = "Uscire dal Video CD?";
+		const char *q = exit_question;
 		int w = text_width(q) + 16 * ui + legend_item(0, 0, "A", "Conferma", 0) + 16 * ui + text_width("Altro tasto: Annulla");
 		x = (fb_w - w) / 2;
 		x = ovl_text(x, legend_y + 3 * ui, q) + 16 * ui;

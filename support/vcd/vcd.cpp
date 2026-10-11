@@ -11,7 +11,7 @@
 
 int vcd_player_installed(void)
 {
-	return access(VCD_PLAYER_PATH, X_OK) == 0;
+	return access(MEDIACENTER_PATH, X_OK) == 0 || access(VCD_PLAYER_PATH, X_OK) == 0;
 }
 
 int vcd_disc_detect(void)
@@ -24,10 +24,14 @@ int vcd_disc_detect(void)
 
 int vcd_launch_player(const char *device)
 {
-	char command[256];
-	if (device && *device) snprintf(command, sizeof(command), "%s %s >/tmp/vcd_player.log 2>&1", VCD_PLAYER_PATH, device);
-	else snprintf(command, sizeof(command), "%s >/tmp/vcd_player.log 2>&1", VCD_PLAYER_PATH);
+	int mc = access(MEDIACENTER_PATH, X_OK) == 0;
+	const char *path = mc ? MEDIACENTER_PATH : VCD_PLAYER_PATH;
+	const char *process = mc ? MEDIACENTER_PROCESS : VCD_PLAYER_PROCESS;
 
-	printf("DISC: Video CD detected, launching %s\n", VCD_PLAYER_PATH);
-	return menu_launch_graphical_script_command(command, "Video CD", VCD_PLAYER_PROCESS);
+	char command[256];
+	if (device && *device) snprintf(command, sizeof(command), "%s %s >/tmp/%s.log 2>&1", path, device, process);
+	else snprintf(command, sizeof(command), "%s >/tmp/%s.log 2>&1", path, process);
+
+	printf("DISC: Video CD detected, launching %s\n", path);
+	return menu_launch_graphical_script_command(command, "Video CD", process);
 }
