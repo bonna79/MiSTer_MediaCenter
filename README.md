@@ -41,7 +41,7 @@ Il pacchetto contiene due programmi:
 
 Limiti noti:
 
-- I video H.264 in alta definizione (720p e oltre) sono troppo pesanti per l'ARM. DivX, Xvid e MPEG-4 a risoluzione DVD funzionano bene.
+- I video H.264 in alta definizione (720p e oltre) sono troppo pesanti per l'ARM. Vengono riprodotti in modalità leggera, con l'audio sempre fluido, ma il video può saltare dei fotogrammi. Per una riproduzione fluida conviene convertirli, per esempio con HandBrake, in H.264 a 720x576 o in Xvid. DivX, Xvid e MPEG-4 a risoluzione DVD funzionano bene.
 - I Super Video CD (MPEG-2) non vengono riprodotti.
 - I CD-R con file DivX o MP3 non partono da soli: si aprono da **Scripts → mediacenter → Disco nel lettore**.
 - L'uscita VGA a 15 kHz non è ancora stata provata.
@@ -161,6 +161,7 @@ Apri una segnalazione nella pagina [Issues](../../issues) e allega:
 | `MC_ARMSCALE=1` | Ingrandisce l'immagine con l'ARM invece che con lo scaler dell'FPGA |
 | `MC_NOVSYNC=1` | Disegna senza aspettare la sincronia verticale |
 | `MC_DEBUG=1` | Scrive nel log gli eventi della navigazione nei DVD |
+| `MC_FULLQUALITY=1` | Disattiva la modalità leggera dei video H.264/HEVC in alta definizione (deblocking spento e, sopra i 30 fps, solo le immagini di riferimento) |
 
 Per misurare la velocità di decodifica usa `/media/fat/linux/mediacenter --bench <file>` oppure `--bench /dev/sr0`. Se il risultato supera il 100% del tempo reale, il file si può riprodurre.
 

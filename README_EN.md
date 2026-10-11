@@ -43,7 +43,7 @@ The player's on-screen texts are in Italian.
 
 Known limits:
 
-- High-definition H.264 video (720p and above) is too heavy for the ARM. DivX, Xvid and MPEG-4 at DVD resolution play well.
+- High-definition H.264 video (720p and above) is too heavy for the ARM. It plays in light mode, with smooth audio, but the video may drop frames. For smooth playback convert it, for example with HandBrake, to H.264 at 720x576 or to Xvid. DivX, Xvid and MPEG-4 at DVD resolution play well.
 - Super Video CDs (MPEG-2) are not played.
 - CD-Rs with DivX or MP3 files do not start by themselves: open them from **Scripts → mediacenter → Disco nel lettore** (disc in the drive).
 - The 15 kHz VGA output has not been tested yet.
@@ -163,6 +163,7 @@ Open a report on the [Issues](../../issues) page and attach:
 | `MC_ARMSCALE=1` | Enlarges the picture on the ARM instead of the FPGA scaler |
 | `MC_NOVSYNC=1` | Draws without waiting for vertical sync |
 | `MC_DEBUG=1` | Writes DVD navigation events to the log |
+| `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking and, above 30 fps, only reference pictures) |
 
 To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. If the result is above 100% of real time, the file can be played.
 

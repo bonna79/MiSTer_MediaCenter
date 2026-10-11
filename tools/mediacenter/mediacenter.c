@@ -29,7 +29,7 @@
 #include <libswscale/swscale.h>
 
 #define MC_AUDIO_RATE 48000
-#define MC_AUDIO_LEAD 0.15
+#define MC_AUDIO_LEAD 0.3
 #define MC_VQ_MAX 40  // pictures the queue can hold
 #define MC_VQ_FILE 12 // pictures decoded ahead for files
 #define MC_PENDING_SECONDS 4
@@ -169,6 +169,9 @@ static double ts_seconds(int64_t ts, AVRational tb)
 	return ts == AV_NOPTS_VALUE ? NAN : ts * av_q2d(tb);
 }
 
+// Pictures the video decoder always skips (light mode for 50/60 fps HD).
+static enum AVDiscard skip_base = AVDISCARD_DEFAULT;
+
 static AVCodecContext *open_decoder(int stream)
 {
 	AVStream *st = mc.fmt->streams[stream];
@@ -184,6 +187,22 @@ static AVCodecContext *open_decoder(int stream)
 	ctx->pkt_timebase = st->time_base;
 	ctx->thread_count = 2; // both Cortex-A9 cores
 	ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+	// Light mode: H.264/HEVC above DVD size is beyond the Cortex-A9. The
+	// deblocking filter is a large part of the work and its absence is hard
+	// to see at TV distance; MC_FULLQUALITY keeps it.
+	int heavy = (codec->id == AV_CODEC_ID_H264 || codec->id == AV_CODEC_ID_HEVC || codec->id == AV_CODEC_ID_VP9) &&
+		st->codecpar->width * st->codecpar->height > 720 * 576;
+	if (heavy && !getenv("MC_FULLQUALITY"))
+	{
+		ctx->skip_loop_filter = AVDISCARD_ALL;
+		ctx->flags2 |= AV_CODEC_FLAG2_FAST;
+		// Above 30 pictures per second, show only the pictures other
+		// pictures refer to: about half of them, still a smooth 25-30 fps.
+		double fps = av_q2d(st->avg_frame_rate);
+		if (fps > 31) skip_base = AVDISCARD_NONREF;
+		ctx->skip_frame = skip_base;
+		fprintf(stderr, "mediacenter: %dx%d %s, light decoding\n", st->codecpar->width, st->codecpar->height, codec->name);
+	}
 	if (avcodec_open2(ctx, codec, NULL) < 0)
 	{
 		avcodec_free_context(&ctx);
@@ -251,6 +270,7 @@ static void media_close(void)
 
 static int media_open(const char *path)
 {
+	skip_base = AVDISCARD_DEFAULT;
 	media_close();
 	if (avformat_open_input(&mc.fmt, path, NULL, NULL) < 0)
 	{
@@ -481,6 +501,8 @@ static void fill(void)
 	for (int i = 0; i < 200 && need_more(); i++)
 	{
 		if (!decode_step()) break;
+		// a slow video picture must not leave the sound output empty
+		feed_audio_output();
 	}
 }
 
@@ -884,8 +906,13 @@ static int media_play(int in_playlist)
 			// until the decoder catches up with the clock.
 			if (mc.vdec)
 			{
-				int behind = mc.vq_count == 0 && !isnan(mc.last_vpts) && mc.last_vpts < mc.clock - 0.3;
-				mc.vdec->skip_frame = behind ? AVDISCARD_NONREF : AVDISCARD_DEFAULT;
+				// Far behind: decode only key pictures until it catches up, so
+				// the audio keeps being decoded in time.
+				double lag = isnan(mc.last_vpts) ? 0 : mc.clock - mc.last_vpts;
+				enum AVDiscard skip = skip_base;
+				if (mc.vq_count == 0 && lag > 0.3 && skip < AVDISCARD_NONREF) skip = AVDISCARD_NONREF;
+				if (mc.vq_count == 0 && lag > 1.5) skip = AVDISCARD_NONKEY;
+				mc.vdec->skip_frame = skip;
 			}
 
 			int video_done = mc.vstream < 0 || (mc.flushed && !mc.vq_count);
