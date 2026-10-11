@@ -18,6 +18,7 @@
 #undef main
 
 #include <dirent.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
 
 #include <libavcodec/avcodec.h>
@@ -1027,6 +1028,49 @@ static int reopen_screen(void);
 
 // Plays the disc in the drive: a Video CD with the Video CD player, a
 // DVD-Video with the DVD player. Returns 0 when it was one of them.
+static int browse(const char *root);
+
+// A data disc (CD or DVD, -R or +R) with video and music files: the files
+// are browsed like on a USB stick. The disc is mounted read-only unless
+// Linux already did it.
+#define DISC_MOUNT "/tmp/mediacenter_disc"
+
+static int browse_data_disc(const char *device)
+{
+	char dir[256] = "";
+	FILE *m = fopen("/proc/mounts", "r");
+	if (m)
+	{
+		char dev[256], mnt[256];
+		while (fscanf(m, "%255s %255s %*[^\n]", dev, mnt) == 2)
+		{
+			if (!strcmp(dev, device)) { snprintf(dir, sizeof(dir), "%s", mnt); break; }
+		}
+		fclose(m);
+	}
+	int mounted = 0;
+	if (!dir[0])
+	{
+		mkdir(DISC_MOUNT, 0755);
+		// UDF first: it keeps long names that the ISO 9660 side may cut
+		static const char *const fs[] = { "udf", "iso9660" };
+		for (unsigned i = 0; i < sizeof(fs) / sizeof(fs[0]) && !mounted; i++)
+		{
+			mounted = !mount(device, DISC_MOUNT, fs[i], MS_RDONLY, NULL);
+		}
+		if (!mounted)
+		{
+			fprintf(stderr, "mediacenter: %s is not a Video CD, a DVD or a data disc (%s)\n", device, strerror(errno));
+			return -1;
+		}
+		snprintf(dir, sizeof(dir), "%s", DISC_MOUNT);
+	}
+	if (reopen_screen()) return -1;
+	browse(dir);
+	if (mounted) umount(DISC_MOUNT);
+	return 0;
+}
+
 static int play_disc_in_drive(const char *device)
 {
 	char path[32];
@@ -1050,10 +1094,13 @@ static int play_disc_in_drive(const char *device)
 
 	if (!kind)
 	{
-		if (!dvd_detect(device)) return -1;
-		if (reopen_screen()) return -1;
-		dvd_play(device);
-		return 0;
+		if (dvd_detect(device))
+		{
+			if (reopen_screen()) return -1;
+			dvd_play(device);
+			return 0;
+		}
+		return browse_data_disc(device);
 	}
 
 	// The Video CD player opens the framebuffer and the controls itself and
@@ -1205,7 +1252,7 @@ static int run_browser(void)
 			if (play_disc_in_drive(NULL))
 			{
 				draw_browser("Scegli la sorgente", labels, NULL, num_sources, sel, NULL);
-				fb_text(24, fb_h / 2, fb_w >= 1280 ? 2 : 1, "Nessun Video CD o DVD nel lettore", fb_rgb(255, 200, 80));
+				fb_text(24, fb_h / 2, fb_w >= 1280 ? 2 : 1, "Nessun disco leggibile nel lettore", fb_rgb(255, 200, 80));
 				sleep(2);
 			}
 			quit_requested = 0;
