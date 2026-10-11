@@ -487,6 +487,45 @@ static void fill(void)
 // draws subtitles and menu buttons on frame_rgb here.
 static void (*frame_overlay)(void) = NULL;
 
+// Interlaced pictures (DVD, MPEG-2) carry two fields taken at different
+// moments: in fast motion the lines of one field do not match the other and
+// show as combs, made worse by the vertical scaling dropping lines. Each line
+// is averaged with the next one, which hides the combs at little cost.
+static void deinterlace_rgb(void)
+{
+	for (int y = 0; y + 1 < src_h; y++)
+	{
+		uint32_t *a = (uint32_t *)(frame_rgb + (size_t)y * src_w * 4);
+		const uint32_t *b = a + src_w;
+		for (int x = 0; x < src_w; x++)
+		{
+			uint32_t p = a[x], q = b[x];
+			a[x] = (p & q) + (((p ^ q) & 0xFEFEFEFEu) >> 1);
+		}
+	}
+}
+
+// The picture is written straight into the visible framebuffer: starting
+// right after the vertical blank keeps the copy ahead of the scan, so the
+// screen never shows half of one picture and half of the next (tearing).
+static int fb_vsync_fd = -2;
+
+static void fb_wait_vsync(void)
+{
+	if (fb_vsync_fd == -2)
+	{
+		fb_vsync_fd = getenv("MC_NOVSYNC") ? -1 : open("/dev/fb0", O_RDWR | O_CLOEXEC);
+	}
+	if (fb_vsync_fd < 0) return;
+	int zero = 0;
+	if (ioctl(fb_vsync_fd, FBIO_WAITFORVSYNC, &zero) == -1)
+	{
+		fprintf(stderr, "mediacenter: no vsync (%s), drawing without it\n", strerror(errno));
+		close(fb_vsync_fd);
+		fb_vsync_fd = -1;
+	}
+}
+
 // Converts and draws a decoded picture.
 static void draw_video_frame(AVFrame *f)
 {
@@ -521,8 +560,10 @@ static void draw_video_frame(AVFrame *f)
 		sws_scale(mc.sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, dst, dst_stride);
 		for (int y = 0; y < f->height; y++) memcpy(frame_rgb + (size_t)y * stride, tmp + (size_t)y * tstride, stride);
 	}
+	if (f->flags & AV_FRAME_FLAG_INTERLACED) deinterlace_rgb();
 	if (frame_overlay) frame_overlay();
 	have_frame = 1;
+	fb_wait_vsync();
 	fb_present();
 }
 

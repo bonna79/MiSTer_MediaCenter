@@ -423,12 +423,32 @@ static inline uint32_t blend_px(uint32_t px, uint8_t v, uint8_t a)
 static const uint32_t *video_line(int y, int *prev_sy)
 {
 	if (!have_frame || !frame_rgb || !line_buf || y < dst_y || y >= dst_y + dst_h) return NULL;
-	int sy = (y - dst_y) * src_h / dst_h;
-	if (sy != *prev_sy)
+	// Source position in 1/256 of a line. A screen row that falls between two
+	// picture lines shows their average: with plain line repetition some
+	// lines appear twice as thick and edges get a visible stair pattern.
+	int pos = (int)(((int64_t)(y - dst_y) * src_h * 256 + 128) / dst_h) - 128;
+	if (pos < 0) pos = 0;
+	int sy = pos >> 8, frac = pos & 255;
+	int mix = frac >= 64 && frac < 192 && sy + 1 < src_h;
+	if (!mix && frac >= 192 && sy + 1 < src_h) sy++;
+	int key = sy * 2 + mix;
+	if (key != *prev_sy)
 	{
 		const uint32_t *src = (const uint32_t *)(frame_rgb + (size_t)sy * src_w * 4);
-		for (int x = 0; x < dst_w; x++) line_buf[x] = src[x_map[x]] | 0xFF000000u;
-		*prev_sy = sy;
+		if (mix)
+		{
+			const uint32_t *nxt = src + src_w;
+			for (int x = 0; x < dst_w; x++)
+			{
+				uint32_t p = src[x_map[x]], q = nxt[x_map[x]];
+				line_buf[x] = ((p & q) + (((p ^ q) & 0xFEFEFEFEu) >> 1)) | 0xFF000000u;
+			}
+		}
+		else
+		{
+			for (int x = 0; x < dst_w; x++) line_buf[x] = src[x_map[x]] | 0xFF000000u;
+		}
+		*prev_sy = key;
 	}
 	return line_buf;
 }
