@@ -23,6 +23,7 @@
 #include "physical_disc.h"
 #include "physical_disc_launch.h"
 #include "physical_disc_acoustic.h"
+#include "../vcd/vcd.h"
 
 #ifdef HAS_RCHEEVOS
 #include "../../achievements.h"
@@ -49,8 +50,13 @@ static int menu_detecting = 0;
 static int menu_environment_ready = 0;
 static int menu_boot_checked = 0;
 static int menu_ignore_boot_disc = 0;
+static unsigned long menu_boot_wait_until = 0;
 static int menu_discovery_suspended = 0;
 #define PHYSICAL_DISC_HANDLED_FILE "/tmp/physical_disc_menu_handled"
+// Created at the first menu check after power-on (/tmp is cleared on every
+// boot), so returning to the menu from a core is never taken for a power-on.
+#define PHYSICAL_DISC_BOOTED_FILE "/tmp/physical_disc_menu_booted"
+#define PHYSICAL_DISC_BOOT_WAIT_MS 30000
 #define PHYSICAL_DISC_MGL_DIR "/media/fat/_Physical Disc Cores"
 #define MISTER_HIFI_SCRIPT "/media/fat/Scripts/misterhifi.sh"
 #define PHYSICAL_DISC_DVD_MOUNT "/tmp/physical_disc_dvd"
@@ -589,11 +595,41 @@ int physical_disc_launch_menu_tick(void)
 	int disc_present = physical_disc_disc_present();
 	if (!menu_boot_checked)
 	{
+		const int power_on = !FileExists(PHYSICAL_DISC_BOOTED_FILE);
+
+		// PHYSICAL_DISC_BOOT=1: right after power-on the drive may still be
+		// spinning up the disc that was left inside. Wait for it (up to 30 s)
+		// instead of taking it for an empty drive.
+		if (cfg.physical_disc_boot && power_on && !disc_present &&
+		    physical_disc_tray_status() == PHYSICAL_DISC_TRAY_NOTREADY)
+		{
+			if (!menu_boot_wait_until) menu_boot_wait_until = GetTimer(PHYSICAL_DISC_BOOT_WAIT_MS);
+			if (!CheckTimer(menu_boot_wait_until))
+			{
+				physical_disc_close();
+				menu_detecting = 0;
+				return 0;
+			}
+		}
+
 		menu_boot_checked = 1;
+		FILE *bf = fopen(PHYSICAL_DISC_BOOTED_FILE, "w");
+		if (bf) fclose(bf);
+
 		if (disc_present)
 		{
-			menu_ignore_boot_disc = 1;
-			printf("DISC: startup disc detected, Auto Disc Discovery waits for a new insertion\n");
+			if (cfg.physical_disc_boot && power_on)
+			{
+				// launch the disc left in the drive, like a console switched on
+				// with a disc inside
+				printf("DISC: disc in the drive at power-on, launching it (PHYSICAL_DISC_BOOT=1)\n");
+				unlink(PHYSICAL_DISC_HANDLED_FILE);
+			}
+			else
+			{
+				menu_ignore_boot_disc = 1;
+				printf("DISC: startup disc detected, Auto Disc Discovery waits for a new insertion\n");
+			}
 		}
 	}
 
@@ -649,6 +685,18 @@ int physical_disc_launch_menu_tick(void)
 		physical_disc_close();
 		menu_detecting = 0;
 		return 0;
+	}
+
+	// Video CD: no core can decode MPEG-1, so the disc goes to the optional
+	// HPS player. Skipped entirely when the player is not installed.
+	if (vcd_player_installed() && vcd_disc_detect())
+	{
+		char device[64];
+		snprintf(device, sizeof(device), "%s", physical_disc_device());
+		menu_write_handled(fingerprint);
+		physical_disc_close();
+		menu_detecting = 0;
+		return vcd_launch_player(device);
 	}
 
 	physical_disc_disc_t type = physical_disc_identify();
