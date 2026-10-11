@@ -27,5 +27,7 @@ int vcd_launch_player(const char *device);
 // MiSTer MediaCenter also plays DVD-Video discs, menus included.
 int mediacenter_installed(void);
 int mediacenter_launch_dvd(const char *device);
+// Data disc with video or music files: MediaCenter opens its file list.
+int mediacenter_launch_disc(const char *device);
 
 #endif

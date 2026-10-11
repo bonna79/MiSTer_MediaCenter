@@ -49,3 +49,12 @@ int mediacenter_launch_dvd(const char *device)
 	printf("DISC: DVD-Video detected, launching %s\n", MEDIACENTER_PATH);
 	return menu_launch_graphical_script_command(command, "DVD", MEDIACENTER_PROCESS);
 }
+
+int mediacenter_launch_disc(const char *device)
+{
+	char command[256];
+	snprintf(command, sizeof(command), "%s %s >/tmp/%s.log 2>&1", MEDIACENTER_PATH,
+		device && *device ? device : "/dev/sr0", MEDIACENTER_PROCESS);
+	printf("DISC: launching %s for the files on the disc\n", MEDIACENTER_PATH);
+	return menu_launch_graphical_script_command(command, "MediaCenter", MEDIACENTER_PROCESS);
+}

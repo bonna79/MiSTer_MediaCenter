@@ -621,7 +621,14 @@ static void fb_native(int w, int h, double aspect)
 // Converts and draws a decoded picture.
 static void draw_video_frame(AVFrame *f)
 {
-	if (native_fb) fb_native(f->width, f->height, fb_aspect);
+	if (native_fb)
+	{
+		// Small pictures (DivX, Video CD) get whole multiples of their lines
+		// so the controls still fit and the scaler has less to enlarge.
+		int mx = f->width < 480 ? 2 : 1, my = 1;
+		while (f->height * (my + 1) <= 1080 && f->height * my < 400) my++;
+		fb_native(f->width * mx, f->height * my, fb_aspect);
+	}
 	if (!fb_mem) return;
 	fb_layout(f->width, f->height);
 	if (!frame_rgb || !line_buf || !x_map) return;
@@ -1239,7 +1246,10 @@ static int play_file(const char *path, int in_playlist)
 {
 	if (is_dvd_path(path)) return dvd_play(path);
 	if (media_open(path)) return END_DONE;
+	native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");
 	int r = media_play(in_playlist);
+	native_fb = 0;
+	fb_native(0, 0, 0);
 	media_close();
 	return r;
 }

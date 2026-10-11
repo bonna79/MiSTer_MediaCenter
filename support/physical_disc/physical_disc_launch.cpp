@@ -2,6 +2,7 @@
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -83,34 +84,82 @@ static int run_quiet(const char *program, const char *arg1, const char *arg2,
 
 static char dvd_device[64];
 
-static int menu_is_dvd_video(void)
+// What a DVD in the drive holds.
+enum
+{
+	DVD_KIND_OTHER = 0,  // not a DVD, or nothing MiSTer plays
+	DVD_KIND_VIDEO,      // DVD-Video
+	DVD_KIND_MEDIA,      // data disc with video or music files (MediaCenter)
+};
+
+static int is_media_name(const char *name)
+{
+	static const char *const ext[] = {
+		"avi", "divx", "xvid", "mkv", "mp4", "m4v", "mov", "mpg", "mpeg", "vob",
+		"ts", "m2ts", "wmv", "flv", "webm", "ogv",
+		"mp3", "mp2", "mp1", "ogg", "oga", "flac", "wav", "m4a", "aac", "wma",
+	};
+	const char *dot = strrchr(name, '.');
+	if (!dot || name[0] == '.') return 0;
+	for (unsigned i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+		if (!strcasecmp(dot + 1, ext[i])) return 1;
+	return 0;
+}
+
+// Media files in dir or in its folders (one level down).
+static int dir_has_media(const char *dir, int depth)
+{
+	DIR *d = opendir(dir);
+	if (!d) return 0;
+	int found = 0;
+	struct dirent *de;
+	while (!found && (de = readdir(d)))
+	{
+		if (de->d_name[0] == '.') continue;
+		if (de->d_type == DT_DIR)
+		{
+			if (depth > 0)
+			{
+				char sub[512];
+				snprintf(sub, sizeof(sub), "%s/%s", dir, de->d_name);
+				found = dir_has_media(sub, depth - 1);
+			}
+		}
+		else found = is_media_name(de->d_name);
+	}
+	closedir(d);
+	return found;
+}
+
+static int menu_dvd_kind(void)
 {
 	// Avoid mounting every game CD merely to rule out DVD-Video.
-	if (!physical_disc_is_dvd_media()) return 0;
+	if (!physical_disc_is_dvd_media()) return DVD_KIND_OTHER;
 
 	const char *active_device = physical_disc_device();
-	if (!active_device || !*active_device) return 0;
+	if (!active_device || !*active_device) return DVD_KIND_OTHER;
 	char device[64];
 	snprintf(device, sizeof(device), "%s", active_device);
 	snprintf(dvd_device, sizeof(dvd_device), "%s", active_device);
 
-	// DVD-Video detection is deliberately limited to a temporary read-only
-	// mount. Playback and all other DVD drive handling belong to DVD_Player.
+	// Detection is limited to a temporary read-only mount; the player opens
+	// the drive itself.
 	mkdir(PHYSICAL_DISC_DVD_MOUNT, 0755);
 	run_quiet("umount", PHYSICAL_DISC_DVD_MOUNT, NULL, NULL, NULL);
 	physical_disc_close();
-	if (!run_quiet("mount", "-o", "ro", device, PHYSICAL_DISC_DVD_MOUNT)) return 0;
+	if (!run_quiet("mount", "-o", "ro", device, PHYSICAL_DISC_DVD_MOUNT)) return DVD_KIND_OTHER;
 
 	char path[512];
 	snprintf(path, sizeof(path), "%s/VIDEO_TS/VIDEO_TS.IFO", PHYSICAL_DISC_DVD_MOUNT);
-	int is_dvd = FileExists(path);
-	if (!is_dvd)
+	int kind = FileExists(path) ? DVD_KIND_VIDEO : DVD_KIND_OTHER;
+	if (!kind)
 	{
 		snprintf(path, sizeof(path), "%s/video_ts/video_ts.ifo", PHYSICAL_DISC_DVD_MOUNT);
-		is_dvd = FileExists(path);
+		if (FileExists(path)) kind = DVD_KIND_VIDEO;
 	}
+	if (!kind && mediacenter_installed() && dir_has_media(PHYSICAL_DISC_DVD_MOUNT, 1)) kind = DVD_KIND_MEDIA;
 	run_quiet("umount", PHYSICAL_DISC_DVD_MOUNT, NULL, NULL, NULL);
-	return is_dvd;
+	return kind;
 }
 
 enum
@@ -664,10 +713,27 @@ int physical_disc_launch_menu_tick(void)
 	}
 
 	// DVDs do not expose the CD-style TOC used by the existing console-disc
-	// detector. Recognize DVD-Video before entering that CD-only path.
-	if (disc_present && menu_is_dvd_video())
+	// detector. Recognize DVD-Video and data DVDs with media files before
+	// entering that CD-only path. A DVD is mounted and examined once per
+	// insertion: mounting it on every poll kept the drive reading and froze
+	// the menu for the length of each mount.
+	static int dvd_examined = 0;
+	if (!disc_present) dvd_examined = 0;
+	if (disc_present && dvd_examined)
 	{
-		const unsigned int dvd_fingerprint = 0x44564456u; // "DVDV"
+		physical_disc_close();
+		menu_detecting = 0;
+		return 0;
+	}
+	int dvd_kind = DVD_KIND_OTHER;
+	if (disc_present && physical_disc_is_dvd_media())
+	{
+		dvd_examined = 1;
+		dvd_kind = menu_dvd_kind();
+	}
+	if (dvd_kind != DVD_KIND_OTHER)
+	{
+		const unsigned int dvd_fingerprint = dvd_kind == DVD_KIND_VIDEO ? 0x44564456u : 0x4456444du; // "DVDV" / "DVDM"
 		if (menu_read_handled() == dvd_fingerprint)
 		{
 			menu_detecting = 0;
@@ -675,6 +741,11 @@ int physical_disc_launch_menu_tick(void)
 		}
 		menu_write_handled(dvd_fingerprint);
 		menu_detecting = 0;
+		if (dvd_kind == DVD_KIND_MEDIA)
+		{
+			printf("DISC: data DVD with media files, opening MediaCenter\n");
+			return mediacenter_launch_disc(dvd_device);
+		}
 		return menu_launch_dvd_player();
 	}
 
