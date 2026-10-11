@@ -44,7 +44,7 @@ To enable it, copy `vcd_player` (built with `make vcd_player`, or taken from the
 
 Then, with Auto Disc Detection enabled, insert a Video CD while the MiSTer menu is showing. Playback starts automatically and plays every MPEG track of the disc in order. At the end of the disc, or when the OSD/Menu button is pressed, the player closes and the menu returns.
 
-#### controls
+### Video CD controls
 
 Pressing any button of the gamepad shows the controls and a progress bar at the bottom of the screen. They disappear 10 seconds after the last button press. The buttons are those of the MiSTer menu mapping:
 
@@ -61,7 +61,7 @@ Pressing any button of the gamepad shows the controls and a progress bar at the 
 
 Chapters are the entry points stored on the disc (`ENTRIES.VCD`), or the MPEG tracks when the disc has none.
 
-#### 2.0 menus (PBC)
+### Video CD 2.0 menus (PBC)
 
 Video CD 2.0 discs with playback control (`PSD.VCD`) start from the disc's own menu, which is drawn by the disc as a picture with numbered choices. The controls stay on screen while a menu is shown:
 
