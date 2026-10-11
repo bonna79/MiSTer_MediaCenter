@@ -81,6 +81,8 @@ static int run_quiet(const char *program, const char *arg1, const char *arg2,
 	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+static char dvd_device[64];
+
 static int menu_is_dvd_video(void)
 {
 	// Avoid mounting every game CD merely to rule out DVD-Video.
@@ -90,6 +92,7 @@ static int menu_is_dvd_video(void)
 	if (!active_device || !*active_device) return 0;
 	char device[64];
 	snprintf(device, sizeof(device), "%s", active_device);
+	snprintf(dvd_device, sizeof(dvd_device), "%s", active_device);
 
 	// DVD-Video detection is deliberately limited to a temporary read-only
 	// mount. Playback and all other DVD drive handling belong to DVD_Player.
@@ -115,6 +118,7 @@ enum
 	DVD_SELECT_AUTO = 0,
 	DVD_SELECT_HYBRID,
 	DVD_SELECT_FPGA,
+	DVD_SELECT_MEDIACENTER,
 	DVD_SELECT_INVALID,
 };
 
@@ -124,6 +128,7 @@ static int menu_dvd_selection(void)
 	if (!name || !*name) return DVD_SELECT_AUTO;
 	if (!strcasecmp(name, "HYBRID")) return DVD_SELECT_HYBRID;
 	if (!strcasecmp(name, "FPGA")) return DVD_SELECT_FPGA;
+	if (!strcasecmp(name, "MEDIACENTER")) return DVD_SELECT_MEDIACENTER;
 	return DVD_SELECT_INVALID;
 }
 
@@ -133,9 +138,21 @@ static int menu_launch_dvd_player(void)
 	int selection = menu_dvd_selection();
 	int fpga = selection == DVD_SELECT_FPGA;
 
+	// MiSTer MediaCenter plays DVD-Video itself, with menus, when installed.
+	if ((selection == DVD_SELECT_AUTO || selection == DVD_SELECT_MEDIACENTER) && mediacenter_installed())
+	{
+		return mediacenter_launch_dvd(dvd_device);
+	}
+	if (selection == DVD_SELECT_MEDIACENTER)
+	{
+		printf("DISC: DVD=MEDIACENTER but %s is not installed\n", MEDIACENTER_PATH);
+		Info("MediaCenter not installed", 5000);
+		return 0;
+	}
+
 	if (selection == DVD_SELECT_INVALID)
 	{
-		printf("DISC: invalid DVD setting '%s'; expected HYBRID or FPGA\n", cfg.physical_disc_dvd);
+		printf("DISC: invalid DVD setting '%s'; expected MEDIACENTER, HYBRID or FPGA\n", cfg.physical_disc_dvd);
 		Info("Invalid DVD setting", 5000);
 		return 0;
 	}

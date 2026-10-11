@@ -130,17 +130,22 @@ $(VCD_PLAYER): tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h
 
 # MiSTer MediaCenter: the media player application (tools/mediacenter), which
 # contains the Video CD player. Needs a static FFmpeg built with
-# tools/mediacenter/build_ffmpeg.sh; FFMPEG is its install prefix.
+# tools/mediacenter/build_ffmpeg.sh and static libdvdread/libdvdnav built with
+# tools/mediacenter/build_dvdnav.sh; FFMPEG and DVDNAV are their install
+# prefixes. Linked dynamically against the C library so that libdvdcss can be
+# loaded at run time.
 FFMPEG ?= ffmpeg-arm
+DVDNAV ?= dvdnav-arm
 MEDIACENTER = $(BUILDDIR)/mediacenter
 
 .PHONY: mediacenter
 mediacenter: $(MEDIACENTER)
 
-$(MEDIACENTER): tools/mediacenter/mediacenter.c tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h tools/vcd_player/vcd_font.h
+$(MEDIACENTER): tools/mediacenter/mediacenter.c tools/mediacenter/dvd.c tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h tools/vcd_player/vcd_font.h
 	@mkdir -p $(BUILDDIR)
 	$(Q)$(info $@)
-	$(Q)$(CC) -O2 -fno-tree-vectorize -g -Wall -std=gnu99 -static -I$(FFMPEG)/include -o $@ $< \
-		-L$(FFMPEG)/lib -lavformat -lavcodec -lswscale -lswresample -lavutil -lm -lpthread
+	$(Q)$(CC) -O2 -fno-tree-vectorize -g -Wall -std=gnu99 -I$(FFMPEG)/include -I$(DVDNAV)/include -o $@ $< \
+		-L$(FFMPEG)/lib -L$(DVDNAV)/lib -Wl,-Bstatic -ldvdnav -ldvdread -lavformat -lavcodec -lswscale -lswresample -lavutil \
+		-Wl,-Bdynamic -ldl -lm -lpthread
 	$(Q)cp $@ $@.elf
 	$(Q)$(STRIP) $@

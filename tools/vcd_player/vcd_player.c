@@ -671,6 +671,9 @@ typedef struct
 	const char *audio_label; // replaces the channel name when set
 	int menu;       // a menu is on screen
 	int sel, sel_min, sel_max;
+	const char *state_label; // replaces the state name when set
+	legend_t *legend;        // replaces the playback legend when set
+	int legend_n;
 } osd_info_t;
 
 static const char *exit_question = "Uscire dal Video CD?";
@@ -727,7 +730,7 @@ static void osd_build(const osd_info_t *info)
 	static const char *const audio[] = { "Audio Stereo", "Audio Sinistro", "Audio Destro" };
 	int ih = 8 * ui;
 	icon_with_shadow(mx, status_y, ih, info->state);
-	x = ovl_text(mx + icon_width(info->state, ih) + 4 * ui, status_y, names[info->state]);
+	x = ovl_text(mx + icon_width(info->state, ih) + 4 * ui, status_y, info->state_label ? info->state_label : names[info->state]);
 	if (info->chapters > 0 && info->chapter > 0)
 	{
 		snprintf(buf, sizeof(buf), "Capitolo %d/%d", info->chapter, info->chapters);
@@ -760,6 +763,10 @@ static void osd_build(const osd_info_t *info)
 		x = ovl_text(x, legend_y + 3 * ui, q) + 16 * ui;
 		x += legend_item(x, legend_y, "A", "Conferma", 1) + 16 * ui;
 		ovl_text(x, legend_y + 3 * ui, "Altro tasto: Annulla");
+	}
+	else if (info->legend)
+	{
+		legend_row(legend_y, info->legend, info->legend_n);
 	}
 	else
 	{
@@ -800,8 +807,17 @@ static void input_open(void)
 }
 
 // Next key press, 0 when there is none.
+// Test builds feed keys from a script instead of the controller (>= 0: a key
+// or none; < 0: read the controller).
+static int (*input_hook)(double now) = NULL;
+
 static int input_key(double now)
 {
+	if (input_hook)
+	{
+		int code = input_hook(now);
+		if (code >= 0) return code;
+	}
 	if (input_fd < 0)
 	{
 		if (now < input_retry) return 0;

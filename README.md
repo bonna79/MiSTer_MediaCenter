@@ -10,13 +10,12 @@ Il lettore Video CD deriva dal ramo `video-cd-boot-launch` di Main_MiSTer_Physic
 
 | Funzione | Stato | Come funziona |
 | --- | --- | --- |
-| DVD-Video, anche commerciali | Sì | Riconosce il disco e apre il core DVD ([MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD)); i DVD protetti sono letti dal suo Main `MiSTer_DVDcss` con libdvdcss |
+| DVD-Video, anche commerciali | In prova | Programma `mediacenter`: menu del disco con i pulsanti, capitoli, tracce audio, sottotitoli; i DVD protetti con libdvdcss. Senza `mediacenter` si apre il core DVD ([MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD)) |
 | Video CD 1.0/1.1/2.0 | Sì | Lettore integrato `vcd_player` sull'ARM: menu PBC, avanti/indietro, pausa, stop, capitoli, canale audio |
 | Super Video CD | Parziale | Senza `vcd_player` o per gli SVCD (MPEG-2) si apre il core FPGA DVD |
 | CD audio | Sì | Apre il core scelto con `AUDIOCD=` oppure [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi) |
 | File video DivX/Xvid/MP4/MKV/MPEG/VOB da SD, USB e rete | In prova | Programma `mediacenter` sull'ARM, decodifica FFmpeg; SD e 720p MPEG-4, l'H.264 HD è troppo pesante |
 | Audio MP1/MP2/MP3, Ogg, FLAC, WAV, AAC | In prova | Stesso programma; i file di una cartella si ascoltano come un album |
-| DVD-Video nello stesso programma | In sviluppo | Prossimo passo: libdvdnav + libdvdcss in `mediacenter`, con lo stesso menu |
 
 ## Installazione
 
@@ -35,7 +34,9 @@ main=MiSTer_MediaCenter
 2. Copia `mediacenter` in `/media/fat/linux/mediacenter`.
 3. Copia `mediacenter.sh` in `/media/fat/Scripts/`.
 
-Da **Scripts → mediacenter** si apre l'elenco delle sorgenti: disco nel lettore, `/media/fat/Video`, `/media/fat/Music`, la SD, le chiavette USB e la cartella di rete `cifs`. Quando `mediacenter` è installato, anche i Video CD inseriti si aprono con lui (altrimenti con `vcd_player`).
+Da **Scripts → mediacenter** si apre l'elenco delle sorgenti: disco nel lettore, `/media/fat/Video`, `/media/fat/Music`, la SD, le chiavette USB e la cartella di rete `cifs`. Quando `mediacenter` è installato, anche i Video CD e i DVD inseriti si aprono con lui. Nell'elenco, le immagini `.iso` e le cartelle con dentro `VIDEO_TS` si aprono come DVD.
+
+Per i DVD protetti (CSS) serve `libdvdcss.so.2` in `/media/fat/dvdcss/`, lo stesso percorso usato da MiSTer_DVD e dal suo script `install_dvdcss`. Senza, si leggono solo i DVD non protetti.
 
 | Tasto | Elenco | Riproduzione |
 | --- | --- | --- |
@@ -48,9 +49,11 @@ Da **Scripts → mediacenter** si apre l'elenco delle sorgenti: disco nel lettor
 | L / R | | Indietro / avanti veloce |
 | X | Esci | Torna all'elenco (conferma con A) |
 
-Per misurare le prestazioni di un file: `/media/fat/linux/mediacenter --bench <file>`. Stampa la velocità di decodifica rispetto al tempo reale: sopra il 100% il file è riproducibile.
+Durante un DVD i tasti sono gli stessi, con queste differenze: **A** cambia i sottotitoli (spenti, poi ogni lingua) e **Y** apre il menu del disco. Nel menu del disco la croce sceglie il pulsante, **A** o **Start** lo conferma e **Y** torna al film.
 
-Per i DVD commerciali e i Video CD installa il core [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) e segui la sua guida: aggiunge la sezione `[DVD]` con `main=MiSTer_DVDcss` e lo script `install_dvdcss`.
+Per misurare le prestazioni di un file o di un DVD: `/media/fat/linux/mediacenter --bench <file>` oppure `--bench /dev/sr0`. Stampa la velocità di decodifica rispetto al tempo reale: sopra il 100% il file è riproducibile.
+
+In alternativa a `mediacenter`, per i DVD e i Video CD si può usare il core [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) e segui la sua guida: aggiunge la sezione `[DVD]` con `main=MiSTer_DVDcss` e lo script `install_dvdcss`.
 
 ## Lettore Video CD (in inglese, dal progetto originale)
 
@@ -109,7 +112,7 @@ Audio is sent to the MiSTer audio output through `aplay`. If `aplay` is not avai
 
 | Voce | Valori | Effetto |
 | --- | --- | --- |
-| `DVD=` | `HYBRID`, `FPGA` | Core da aprire per i DVD-Video; senza voce sceglie da solo |
+| `DVD=` | `MEDIACENTER`, `HYBRID`, `FPGA` | Programma o core da aprire per i DVD-Video; senza voce usa `mediacenter` se c'è, altrimenti un core DVD |
 | `PHYSICAL_DISC_BOOT=` | `0`, `1` | Avvia il disco già inserito all'accensione |
 | `AUDIOCD=` | `PSX`, `A0CD-Saturn`, `MISTERHIFI`, … | Programma da aprire per i CD audio |
 
@@ -119,12 +122,15 @@ I Video CD usano `/media/fat/linux/mediacenter` se è installato, poi `/media/fa
 
 Il workflow `.github/workflows/build.yml` compila il Main a ogni push con GCC ARM 10.2 (`arm-none-linux-gnueabihf`) e pubblica il binario come artifact. In locale: `make` con quel compilatore nel `PATH`.
 
-`mediacenter` richiede FFmpeg 6.1.2 compilato in statico per l'ARM:
+`mediacenter` richiede FFmpeg 6.1.2, libdvdread 6.1.3 e libdvdnav 6.1.1 compilati in statico per l'ARM:
 
 ```sh
 git clone --depth 1 -b n6.1.2 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
 tools/mediacenter/build_ffmpeg.sh ffmpeg-src ffmpeg-arm
-make mediacenter FFMPEG=$PWD/ffmpeg-arm
+curl -fsSL https://download.videolan.org/pub/videolan/libdvdread/6.1.3/libdvdread-6.1.3.tar.bz2 | tar -xj
+curl -fsSL https://download.videolan.org/pub/videolan/libdvdnav/6.1.1/libdvdnav-6.1.1.tar.bz2 | tar -xj
+tools/mediacenter/build_dvdnav.sh libdvdread-6.1.3 libdvdnav-6.1.1 dvdnav-arm
+make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
 ```
 
 ## Provenienza e licenza

@@ -5,12 +5,13 @@
 // shared, and Video CDs are still played by the Video CD player.
 //
 //   mediacenter              file browser: disc, SD card and USB sources
-//   mediacenter /dev/srN     play the disc in the drive (Auto Disc Detection)
+//   mediacenter /dev/srN     play the disc in the drive: Video CD or DVD-Video
 //   mediacenter <file>       play one file and exit
 //
 // Files are decoded in software with FFmpeg: MPEG-1/2, MPEG-4 Part 2 (DivX,
 // Xvid), H.264, WMV and VC-1 video; MP1/MP2/MP3, AC-3, DTS, AAC, Vorbis, FLAC,
 // WMA and PCM audio; AVI, Matroska, MP4, MPEG-PS/TS, Ogg and ASF containers.
+// DVD-Video discs, menus included, play through libdvdnav (dvd.c).
 
 #define main vcd_main
 #include "../vcd_player/vcd_player.c"
@@ -95,7 +96,7 @@ static void fit_text(char *dst, size_t len, const char *src, int max)
 // File types
 // ---------------------------------------------------------------------------
 
-static const char *const video_ext[] = { "avi", "divx", "xvid", "mkv", "mp4", "m4v", "mov", "mpg", "mpeg", "vob", "dat", "ts", "m2ts", "mts", "ogm", "ogv", "wmv", "asf", NULL };
+static const char *const video_ext[] = { "avi", "divx", "xvid", "mkv", "mp4", "m4v", "mov", "mpg", "mpeg", "vob", "dat", "ts", "m2ts", "mts", "ogm", "ogv", "wmv", "asf", "iso", NULL };
 static const char *const audio_ext[] = { "mp3", "mp2", "mp1", "mpa", "ogg", "oga", "flac", "wav", "m4a", "aac", "ac3", "dts", "wma", "mka", NULL };
 
 static int has_ext(const char *name, const char *const *list)
@@ -323,9 +324,10 @@ static int media_open(const char *path)
 	return 0;
 }
 
-static void push_audio(AVFrame *f)
+// Converts decoded audio to the output format and keeps it until it is due;
+// pts is the time of its first sample (NAN: right after the previous one).
+static void push_audio_at(AVFrame *f, double pts)
 {
-	double pts = ts_seconds(f->best_effort_timestamp, mc.fmt->streams[mc.astream]->time_base) - mc.start;
 	if (isnan(pts)) pts = mc.audio_end;
 
 	int room = mc.pend_cap - mc.pend_len;
@@ -336,6 +338,11 @@ static void push_audio(AVFrame *f)
 	if (n <= 0) return;
 	mc.pend_len += n;
 	mc.audio_end = mc.pend_pts + mc.pend_len / (double)MC_AUDIO_RATE;
+}
+
+static void push_audio(AVFrame *f)
+{
+	push_audio_at(f, ts_seconds(f->best_effort_timestamp, mc.fmt->streams[mc.astream]->time_base) - mc.start);
 }
 
 // Sends the decoded audio that is due (up to MC_AUDIO_LEAD ahead) to aplay.
@@ -383,15 +390,10 @@ static void feed_audio_output(void)
 	mc.pend_pts += due / (double)MC_AUDIO_RATE;
 }
 
-static void queue_video(AVFrame *f)
+// Queues a decoded picture to show at pts (NAN: one frame after the previous).
+static void queue_video_at(AVFrame *f, double pts, double frame_time)
 {
-	double pts = ts_seconds(f->best_effort_timestamp, mc.fmt->streams[mc.vstream]->time_base) - mc.start;
-	if (isnan(pts))
-	{
-		AVRational fr = mc.fmt->streams[mc.vstream]->avg_frame_rate;
-		double step = (fr.num > 0 && fr.den > 0) ? 1.0 / av_q2d(fr) : 0.04;
-		pts = isnan(mc.last_vpts) ? 0 : mc.last_vpts + step;
-	}
+	if (isnan(pts)) pts = isnan(mc.last_vpts) ? 0 : mc.last_vpts + frame_time;
 	mc.last_vpts = pts;
 	if (mc.vq_count >= MC_VQ_MAX) return;
 	AVFrame *copy = av_frame_clone(f);
@@ -399,6 +401,13 @@ static void queue_video(AVFrame *f)
 	mc.vq[mc.vq_count].frame = copy;
 	mc.vq[mc.vq_count].pts = pts;
 	mc.vq_count++;
+}
+
+static void queue_video(AVFrame *f)
+{
+	AVRational fr = mc.fmt->streams[mc.vstream]->avg_frame_rate;
+	double step = (fr.num > 0 && fr.den > 0) ? 1.0 / av_q2d(fr) : 0.04;
+	queue_video_at(f, ts_seconds(f->best_effort_timestamp, mc.fmt->streams[mc.vstream]->time_base) - mc.start, step);
 }
 
 static void receive_frames(AVCodecContext *ctx, int video)
@@ -473,6 +482,10 @@ static void fill(void)
 	}
 }
 
+// Called after a picture is converted and before it is shown: the DVD player
+// draws subtitles and menu buttons on frame_rgb here.
+static void (*frame_overlay)(void) = NULL;
+
 // Converts and draws a decoded picture.
 static void draw_video_frame(AVFrame *f)
 {
@@ -507,6 +520,7 @@ static void draw_video_frame(AVFrame *f)
 		sws_scale(mc.sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, dst, dst_stride);
 		for (int y = 0; y < f->height; y++) memcpy(frame_rgb + (size_t)y * stride, tmp + (size_t)y * tstride, stride);
 	}
+	if (frame_overlay) frame_overlay();
 	have_frame = 1;
 	fb_present();
 }
@@ -797,6 +811,8 @@ static int media_play(int in_playlist)
 	return quit_requested ? END_QUIT : result;
 }
 
+#include "dvd.c"
+
 // ---------------------------------------------------------------------------
 // Browser
 // ---------------------------------------------------------------------------
@@ -962,16 +978,38 @@ static int wait_key(void)
 	return 0;
 }
 
-// Plays a Video CD with the Video CD player. Returns 0 when it was one.
+static int reopen_screen(void);
+
+// Plays the disc in the drive: a Video CD with the Video CD player, a
+// DVD-Video with the DVD player. Returns 0 when it was one of them.
 static int play_disc_in_drive(const char *device)
 {
+	char path[32];
+	if (!device || !*device)
+	{
+		// the first drive present
+		device = NULL;
+		for (int i = 0; i < 8 && !device; i++)
+		{
+			snprintf(path, sizeof(path), "/dev/sr%d", i);
+			if (!access(path, R_OK)) device = path;
+		}
+		if (!device) return -1;
+	}
 	int fd = open_drive(device);
 	if (fd < 0) return -1;
 	cd_fd = fd;
 	const char *kind = (read_toc() == 0) ? detect_vcd_kind() : NULL;
 	close(cd_fd);
 	cd_fd = -1;
-	if (!kind) return -1;
+
+	if (!kind)
+	{
+		if (!dvd_detect(device)) return -1;
+		if (reopen_screen()) return -1;
+		dvd_play(device);
+		return 0;
+	}
 
 	// The Video CD player opens the framebuffer and the controls itself and
 	// releases them when it ends.
@@ -981,7 +1019,7 @@ static int play_disc_in_drive(const char *device)
 	input_fd = -1;
 
 	char *argv[3] = { (char *)"vcd_player", (char *)device, NULL };
-	int argc = device && *device ? 2 : 1;
+	int argc = 2;
 	fb_aspect = 4.0 / 3.0;
 	vcd_main(argc, argv);
 
@@ -999,8 +1037,22 @@ static int reopen_screen(void)
 	return 0;
 }
 
+// A DVD copied to the card: an .iso image or a folder holding VIDEO_TS.
+static int is_dvd_path(const char *path)
+{
+	char ifo[1100];
+	struct stat st;
+	if (stat(path, &st)) return 0;
+	if (!S_ISDIR(st.st_mode)) return has_ext(path, (const char *const[]){ "iso", NULL });
+	snprintf(ifo, sizeof(ifo), "%s/VIDEO_TS/VIDEO_TS.IFO", path);
+	if (!access(ifo, R_OK)) return 1;
+	snprintf(ifo, sizeof(ifo), "%s/VIDEO_TS.IFO", path);
+	return !access(ifo, R_OK);
+}
+
 static int play_file(const char *path, int in_playlist)
 {
+	if (is_dvd_path(path)) return dvd_play(path);
 	if (media_open(path)) return END_DONE;
 	int r = media_play(in_playlist);
 	media_close();
@@ -1053,6 +1105,13 @@ static int browse(const char *root)
 		{
 			if (items[sel].dir)
 			{
+				char path[1280];
+				snprintf(path, sizeof(path), "%s/%s", cwd, items[sel].name);
+				if (is_dvd_path(path))
+				{
+					if (play_file(path, 0) == END_QUIT) return 1;
+					continue;
+				}
 				size_t len = strlen(cwd);
 				snprintf(cwd + len, sizeof(cwd) - len, "/%s", items[sel].name);
 				sel = 0;
@@ -1101,7 +1160,7 @@ static int run_browser(void)
 			if (play_disc_in_drive(NULL))
 			{
 				draw_browser("Scegli la sorgente", labels, NULL, num_sources, sel, NULL);
-				fb_text(24, fb_h / 2, fb_w >= 1280 ? 2 : 1, "Nessun Video CD nel lettore", fb_rgb(255, 200, 80));
+				fb_text(24, fb_h / 2, fb_w >= 1280 ? 2 : 1, "Nessun Video CD o DVD nel lettore", fb_rgb(255, 200, 80));
 				sleep(2);
 			}
 			quit_requested = 0;
@@ -1118,6 +1177,7 @@ static int run_browser(void)
 // can play on this CPU.
 static int bench(const char *path)
 {
+	if (!strncmp(path, "/dev/", 5) || is_dvd_path(path)) return dvd_bench(path);
 	if (media_open(path)) return 1;
 	int frames = 0;
 	double t0 = now_seconds();
@@ -1151,6 +1211,98 @@ static int bench(const char *path)
 	return 0;
 }
 
+// Headless test mode for development (no screen, no controller):
+//   MC_TEST="<seconds>;<t>:<key>,...;<t>,..." mediacenter <file|dvd>
+// plays for <seconds> into a 640x480 memory framebuffer, presses the keys at
+// the given times (enter, esc, up, down, left, right, space, tab, play, pause,
+// pgup, pgdn) and saves the screen as /tmp/mc_<t>.ppm at the listed times.
+static double test_start, test_end;
+static char test_keys[512], test_shots[512];
+
+static int test_key_code(const char *name)
+{
+	static const struct { const char *name; int code; } keys[] = {
+		{ "enter", KEY_ENTER }, { "esc", KEY_ESC }, { "up", KEY_UP }, { "down", KEY_DOWN },
+		{ "left", KEY_LEFT }, { "right", KEY_RIGHT }, { "space", KEY_SPACE }, { "tab", KEY_TAB },
+		{ "play", KEY_PLAY }, { "pause", KEY_PAUSE }, { "pgup", KEY_PAGEUP }, { "pgdn", KEY_PAGEDOWN },
+	};
+	for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+		if (!strcmp(name, keys[i].name)) return keys[i].code;
+	return 0;
+}
+
+static int test_input(double now)
+{
+	double t = now - test_start;
+	if (t >= test_end) quit_requested = 1;
+
+	// screenshots
+	char *p = test_shots;
+	while (*p)
+	{
+		char *end;
+		double at = strtod(p, &end);
+		if (end == p) break;
+		char *next = *end == ',' ? end + 1 : end;
+		if (t >= at)
+		{
+			char name[64];
+			snprintf(name, sizeof(name), "/tmp/mc_%g.ppm", at);
+			FILE *f = fopen(name, "wb");
+			if (f)
+			{
+				fprintf(f, "P6 %d %d 255\n", fb_w, fb_h);
+				for (int y = 0; y < fb_h; y++)
+					for (int x = 0; x < fb_w; x++)
+					{
+						const uint8_t *px = fb_mem + (size_t)y * fb_stride + x * 4;
+						uint8_t rgb[3] = { px[fb_bgr ? 2 : 0], px[1], px[fb_bgr ? 0 : 2] };
+						fwrite(rgb, 1, 3, f);
+					}
+				fclose(f);
+				printf("test: %.1f s screen saved to %s\n", t, name);
+			}
+			memmove(p, next, strlen(next) + 1);
+			continue;
+		}
+		p = next;
+	}
+
+	// keys, in order
+	char *end;
+	double at = strtod(test_keys, &end);
+	if (end != test_keys && *end == ':' && t >= at)
+	{
+		char name[16];
+		int n = 0;
+		end++;
+		while (*end && *end != ',' && n < 15) name[n++] = *end++;
+		name[n] = 0;
+		memmove(test_keys, *end ? end + 1 : end, strlen(*end ? end + 1 : end) + 1);
+		printf("test: %.1f s key %s\n", t, name);
+		return test_key_code(name);
+	}
+	return 0;
+}
+
+static int test_setup(const char *spec)
+{
+	if (sscanf(spec, "%lf", &test_end) != 1) return -1;
+	const char *k = strchr(spec, ';');
+	const char *sh = k ? strchr(k + 1, ';') : NULL;
+	if (k) snprintf(test_keys, sizeof(test_keys), "%.*s", (int)(sh ? sh - k - 1 : (int)strlen(k + 1)), k + 1);
+	if (sh) snprintf(test_shots, sizeof(test_shots), "%s", sh + 1);
+	fb_w = 640;
+	fb_h = 480;
+	fb_stride = fb_w * 4;
+	fb_len = (size_t)fb_stride * fb_h;
+	fb_bgr = 1;
+	fb_mem = (uint8_t *)calloc(1, fb_len);
+	test_start = now_seconds();
+	input_hook = test_input;
+	return fb_mem ? 0 : -1;
+}
+
 int main(int argc, char *argv[])
 {
 	signal(SIGINT, on_signal);
@@ -1170,6 +1322,16 @@ int main(int argc, char *argv[])
 	if (arg && !strncmp(arg, "/dev/", 5))
 	{
 		return play_disc_in_drive(arg) ? 1 : 0;
+	}
+
+	const char *test = getenv("MC_TEST");
+	if (test)
+	{
+		if (test_setup(test)) return 1;
+		osd_layout();
+		int r = play_file(arg, 0);
+		printf("test: ended with %d\n", r);
+		return 0;
 	}
 
 	if (fb_open())

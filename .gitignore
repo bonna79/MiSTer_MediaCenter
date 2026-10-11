@@ -31,3 +31,6 @@ MiSTer
 /bin
 ffmpeg-arm/
 ffmpeg-src/
+dvdnav-arm/
+libdvdread-*/
+libdvdnav-*/

@@ -24,4 +24,8 @@ int vcd_disc_detect(void);
 // Queues the player as a graphical script (drive must be closed first).
 int vcd_launch_player(const char *device);
 
+// MiSTer MediaCenter also plays DVD-Video discs, menus included.
+int mediacenter_installed(void);
+int mediacenter_launch_dvd(const char *device);
+
 #endif
