@@ -137,7 +137,7 @@ Durante la riproduzione `mediacenter` porta il framebuffer di Linux alla dimensi
 
 ### Compilazione
 
-Il workflow `.github/workflows/build.yml` compila tutto a ogni push con GCC ARM 10.2 (`arm-none-linux-gnueabihf`). Quando si crea un tag `v*`, pubblica una release con lo zip.
+Il workflow `.github/workflows/build.yml` compila tutto a ogni push con GCC ARM 10.2 (`arm-none-linux-gnueabihf`). Un commit con `[release]` nel messaggio, oppure un tag `v*`, pubblica una release con lo zip, con la versione scritta in `VERSION`.
 
 In locale, `make` compila il Main. `mediacenter` richiede FFmpeg 6.1.2, libdvdread 6.1.3 e libdvdnav 6.1.1 compilati in statico per l'ARM:
 

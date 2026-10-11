@@ -74,7 +74,7 @@ jobs:
             Scripts/mediacenter.sh
 
       - name: Package release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         run: |
           mkdir -p pkg/linux pkg/Scripts
           cp bin/MiSTer_MediaCenter pkg/
@@ -82,10 +82,13 @@ jobs:
           cp Scripts/mediacenter.sh pkg/Scripts/
           cp LICENSE pkg/linux/mediacenter-LICENSE
           (cd pkg && zip -r ../MiSTer_MediaCenter.zip .)
+          echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.VERSION }}
+          name: MiSTer MediaCenter ${{ env.VERSION }}
           files: MiSTer_MediaCenter.zip
           body_path: RELEASE_NOTES.md
