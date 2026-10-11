@@ -165,7 +165,7 @@ Open a report on the [Issues](../../issues) page and attach:
 | `MC_DEBUG=1` | Writes DVD navigation events to the log |
 | `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking and, above 30 fps, only reference pictures) |
 
-To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. If the result is above 100% of real time, the file can be played.
+To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. It analyses at most the first minute of the file (Ctrl+C stops it earlier). If the result is above 100% of real time, the file can be played.
 
 During playback `mediacenter` sets the Linux framebuffer to the size of the picture with the `fb_cmd3` command, which only exists in this Main. The scaler then stretches it to the screen with the correct aspect ratio. With another Main, the ARM enlarges the picture.
 

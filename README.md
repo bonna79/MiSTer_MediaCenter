@@ -163,7 +163,7 @@ Apri una segnalazione nella pagina [Issues](../../issues) e allega:
 | `MC_DEBUG=1` | Scrive nel log gli eventi della navigazione nei DVD |
 | `MC_FULLQUALITY=1` | Disattiva la modalità leggera dei video H.264/HEVC in alta definizione (deblocking spento e, sopra i 30 fps, solo le immagini di riferimento) |
 
-Per misurare la velocità di decodifica usa `/media/fat/linux/mediacenter --bench <file>` oppure `--bench /dev/sr0`. Se il risultato supera il 100% del tempo reale, il file si può riprodurre.
+Per misurare la velocità di decodifica usa `/media/fat/linux/mediacenter --bench <file>` oppure `--bench /dev/sr0`. Analizza al massimo il primo minuto del file (Ctrl+C lo ferma prima). Se il risultato supera il 100% del tempo reale, il file si può riprodurre.
 
 Durante la riproduzione `mediacenter` imposta il framebuffer di Linux alla dimensione dell'immagine con il comando `fb_cmd3`, che esiste solo in questo Main. Lo scaler poi lo allarga allo schermo con le proporzioni corrette. Con un altro Main l'immagine viene ingrandita dall'ARM.
 

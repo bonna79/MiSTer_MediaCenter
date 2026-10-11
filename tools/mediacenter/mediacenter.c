@@ -1404,8 +1404,11 @@ static int bench(const char *path)
 	int frames = 0;
 	double t0 = now_seconds();
 	uint8_t *rgb = NULL;
-	for (int more = 1; more;)
+	// The first 60 s of media are enough to judge; Ctrl+C stops earlier.
+	for (int more = 1; more && !quit_requested;)
 	{
+		double media = !isnan(mc.last_vpts) ? mc.last_vpts : mc.audio_end;
+		if (media >= 60.0) break;
 		more = decode_step();
 		// include the colour conversion, which the player does for every
 		// picture it shows
