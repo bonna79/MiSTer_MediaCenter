@@ -26,7 +26,12 @@ Il lettore Video CD deriva dal ramo `video-cd-boot-launch` di Main_MiSTer_Physic
 ```ini
 [menu]
 main=MiSTer_MediaCenter
+
+[A0CD-*]
+main=MiSTer_MediaCenter
 ```
+
+La sezione `[A0CD-*]` vale per i core di `_Physical Disc Cores` (PSX, Saturn, Mega CD, PC Engine CD…). Se in `MiSTer.ini` c'è ancora `main=MiSTer_Physical-CD`, sostituiscilo: altrimenti quei core ripartono con il vecchio Main.
 
 ### Programma `mediacenter`
 
@@ -131,6 +136,18 @@ curl -fsSL https://download.videolan.org/pub/videolan/libdvdread/6.1.3/libdvdrea
 curl -fsSL https://download.videolan.org/pub/videolan/libdvdnav/6.1.1/libdvdnav-6.1.1.tar.bz2 | tar -xj
 tools/mediacenter/build_dvdnav.sh libdvdread-6.1.3 libdvdnav-6.1.1 dvdnav-arm
 make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
+```
+
+## Karaoke CD+G (Mega CD)
+
+I dischi karaoke CD+G mostrano testi e immagini con il core Mega CD, attraverso il lettore CD del BIOS, come sulla console vera. Apri l'MGL del Mega CD da **`_Physical Disc Cores`**, oppure metti `AUDIOCD=A0CD-MegaCD` perché il riconoscimento automatico apra i CD audio e CD+G con il core Mega CD. Il lettore USB deve saper leggere il subcanale grezzo.
+
+Se la grafica non compare, aggiungi `MEGACD_SUBCODE_LOG=1` alla sezione del Mega CD in `MiSTer.ini`: scrive `/media/fat/logs/megacd_subcode.log` e `/media/fat/logs/megacd_subcode_raw.bin`. Se la grafica ha difetti, prova `MEGACD_CDDA_PACED=1` nella stessa sezione.
+
+```ini
+[A0CD-MegaCD]
+main=MiSTer_MediaCenter
+MEGACD_SUBCODE_LOG=1
 ```
 
 ## Provenienza e licenza
