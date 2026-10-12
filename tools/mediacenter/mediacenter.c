@@ -744,6 +744,70 @@ static int native_ok = 1;        // cleared when Main ignores the command
 static int fb_fake = 0;          // test mode: memory framebuffer
 static int def_w, def_h;         // the normal framebuffer
 
+// With a MiSTer_MediaCenter Main, a DVD-size or light-mode frame buffer has
+// three pages: each picture is drawn into a page the scaler is not showing
+// and then shown at the next vsync, so the picture never tears. fb_mem is
+// the page shown last.
+#define FB_PAGES 3
+static uint8_t *fb_map;          // the whole mapping, all the pages
+static size_t fb_map_len;
+static int fb_pages = 1, fb_page;
+static int fb_cmd_fd = -1;
+
+static int fb_open_pages(int page_h)
+{
+	if (fb_open()) return -1;
+	fb_map = fb_mem;
+	fb_map_len = fb_len;
+	fb_pages = 1;
+	fb_page = 0;
+	if (page_h && fb_h == page_h * FB_PAGES)
+	{
+		fb_pages = FB_PAGES;
+		fb_h = page_h;
+		fb_len = (size_t)fb_stride * fb_h;
+	}
+	return 0;
+}
+
+static void fb_close(void)
+{
+	if (fb_mem && !fb_fake) munmap(fb_map ? fb_map : fb_mem, fb_map ? fb_map_len : fb_len);
+	fb_mem = fb_map = NULL;
+	fb_pages = 1;
+}
+
+static void fb_clear(void)
+{
+	if (fb_map && !fb_fake) memset(fb_map, 0, fb_map_len);
+	else if (fb_mem) memset(fb_mem, 0, fb_len);
+}
+
+// Draws the picture into the next page and shows it.
+static void fb_present_paged(void)
+{
+	if (fb_pages < 2)
+	{
+		fb_wait_vsync();
+		fb_present();
+		return;
+	}
+	fb_page = (fb_page + 1) % fb_pages;
+	fb_mem = fb_map + (size_t)fb_page * fb_len;
+	fb_present();
+	if (fb_cmd_fd < 0) fb_cmd_fd = open("/dev/MiSTer_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	char cmd[32];
+	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 page %d\n", fb_page);
+	if (fb_cmd_fd < 0 || write(fb_cmd_fd, cmd, n) != n)
+	{
+		// Main does not take it: back to a single page
+		fb_page = 0;
+		fb_mem = fb_map;
+		fb_pages = 1;
+		fb_present();
+	}
+}
+
 static void screen_rebuild(void)
 {
 	free(ovl_a); free(ovl_v); free(full_line);
@@ -797,7 +861,8 @@ static void fb_native(int w, int h, double aspect)
 			int f = open("/dev/fb0", O_RDWR | O_CLOEXEC);
 			struct fb_var_screeninfo var;
 			if (f >= 0 && !ioctl(f, FBIOGET_VSCREENINFO, &var))
-				changed = (int)var.xres == want_w && (int)var.yres == want_h;
+				changed = (int)var.xres == want_w &&
+					((int)var.yres == want_h || (w && (int)var.yres == want_h * FB_PAGES));
 			if (f >= 0) close(f);
 		}
 		if (!changed)
@@ -806,16 +871,16 @@ static void fb_native(int w, int h, double aspect)
 			native_ok = 0;
 			return;
 		}
-		munmap(fb_mem, fb_len);
-		fb_mem = NULL;
-		if (fb_open())
+		fb_close();
+		if (fb_open_pages(w ? want_h : 0))
 		{
 			fprintf(stderr, "mediacenter: framebuffer lost\n");
 			quit_requested = 1;
 			return;
 		}
 	}
-	fprintf(stderr, "mediacenter: framebuffer %dx%d%s\n", fb_w, fb_h, w ? " stretched by the scaler" : "");
+	fprintf(stderr, "mediacenter: framebuffer %dx%d%s%s\n", fb_w, fb_h, w ? " stretched by the scaler" : "",
+		fb_pages > 1 ? ", 3 pages" : "");
 	native_w = w;
 	native_h = h;
 	native_aspect = aspect;
@@ -879,8 +944,7 @@ static void draw_video_frame(AVFrame *f)
 	if (f->flags & AV_FRAME_FLAG_INTERLACED) deinterlace_rgb();
 	if (frame_overlay) frame_overlay();
 	have_frame = 1;
-	fb_wait_vsync();
-	fb_present();
+	fb_present_paged();
 }
 
 // Takes the frames that are due; returns the most recent one (owned by the
@@ -926,11 +990,13 @@ static void media_seek(double t)
 	audio_flush();
 }
 
-// Shows the first picture at or after t (fast forward / rewind).
-static void media_preview(double t)
+// Shows the first picture at or after t (fast forward / rewind). Returns its
+// time, NAN when there is none.
+static double media_preview(double t)
 {
+	double shown = NAN;
 	media_seek(t);
-	if (mc.vstream < 0) return;
+	if (mc.vstream < 0) return shown;
 	// the video thread is idle after the seek: decode here
 	vt.direct = 1;
 	for (int i = 0; i < 400 && !mc.vq_count; i++)
@@ -941,10 +1007,26 @@ static void media_preview(double t)
 	if (mc.vq_count)
 	{
 		AVFrame *f = mc.vq[0].frame;
+		shown = mc.vq[0].pts;
 		draw_video_frame(f);
 		vq_clear();
 	}
 	mc.pend_len = 0;
+	return shown;
+}
+
+// Plays on from t after fast forward / rewind. The seek lands on the key
+// picture before t: play from there, or every picture up to the next key
+// one (seconds away in H.264) would count as late and be skipped while the
+// sound plays on.
+static void media_resume(double t)
+{
+	double shown = media_preview(t);
+	if (!isnan(shown) && shown < t && shown > t - 30)
+	{
+		mc.clock = vt.clock = shown;
+		mc.audio_end = shown;
+	}
 }
 
 static int chapter_index(double t)
@@ -966,7 +1048,7 @@ static double chapter_start(int c)
 
 static void draw_audio_screen(void)
 {
-	memset(fb_mem, 0, fb_len);
+	fb_clear();
 	int s = fb_w >= 1280 ? 3 : 2;
 	char line[128];
 	fit_text(line, sizeof(line), mc.title, fb_w / (GLYPH_W * s) - 4);
@@ -993,7 +1075,7 @@ static int media_play(int in_playlist)
 	exit_question = "Tornare all'elenco?";
 
 	if (mc.astream >= 0 && audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
-	memset(fb_mem, 0, fb_len);
+	fb_clear();
 	if (mc.audio_only) draw_audio_screen();
 	vt_start();
 	// The loop that reads the file and sends the sound runs ahead of the
@@ -1024,7 +1106,7 @@ static int media_play(int in_playlist)
 			case KEY_PLAY:
 			case KEY_PLAYCD:
 				if (p.state == ST_STOP) media_seek(0);
-				else if (p.state == ST_FF || p.state == ST_REW) media_seek(p.ff_time);
+				else if (p.state == ST_FF || p.state == ST_REW) media_resume(p.ff_time);
 				p.state = ST_PLAY;
 				break;
 			case KEY_PAUSE:
@@ -1032,7 +1114,7 @@ static int media_play(int in_playlist)
 			case KEY_PLAYPAUSE:
 				if (p.state == ST_PLAY) p.state = ST_PAUSE;
 				else if (p.state == ST_PAUSE) p.state = ST_PLAY;
-				else if (p.state == ST_FF || p.state == ST_REW) { media_seek(p.ff_time); p.state = ST_PAUSE; }
+				else if (p.state == ST_FF || p.state == ST_REW) { media_resume(p.ff_time); p.state = ST_PAUSE; }
 				break;
 			case KEY_ESC:
 			case KEY_STOP:
@@ -1070,7 +1152,7 @@ static int media_play(int in_playlist)
 			{
 				int want = (code == KEY_PAGEDOWN || code == KEY_FASTFORWARD) ? ST_FF : ST_REW;
 				if (p.state == ST_STOP) break;
-				if (p.state == want) { media_seek(p.ff_time); p.state = ST_PLAY; break; }
+				if (p.state == want) { media_resume(p.ff_time); p.state = ST_PLAY; break; }
 				if (p.state != ST_FF && p.state != ST_REW) p.ff_time = mc.clock;
 				audio_flush();
 				p.state = want;
@@ -1301,7 +1383,7 @@ static void scan_sources(void)
 
 static void draw_browser(const char *title, const char *const *labels, const int *dirs, int count, int sel, const char *message)
 {
-	memset(fb_mem, 0, fb_len);
+	fb_clear();
 	int s = fb_w >= 1280 ? 2 : 1;
 	int line_h = 12 * s;
 	int mx = 24 * s;
@@ -1446,8 +1528,7 @@ static int play_disc_in_drive(const char *device)
 
 	// The Video CD player opens the framebuffer and the controls itself and
 	// releases them when it ends.
-	if (fb_mem) munmap(fb_mem, fb_len);
-	fb_mem = NULL;
+	fb_close();
 	if (input_fd >= 0) close(input_fd);
 	input_fd = -1;
 
@@ -1456,7 +1537,7 @@ static int play_disc_in_drive(const char *device)
 	fb_aspect = 4.0 / 3.0;
 	vcd_main(argc, argv);
 
-	fb_mem = NULL;
+	fb_mem = fb_map = NULL;
 	input_fd = -1;
 	src_w = src_h = 0;
 	return 0;
@@ -1464,7 +1545,7 @@ static int play_disc_in_drive(const char *device)
 
 static int reopen_screen(void)
 {
-	if (!fb_mem && fb_open()) return -1;
+	if (!fb_mem && fb_open_pages(0)) return -1;
 	if (!ovl_a) osd_layout();
 	input_open();
 	return 0;
@@ -1774,7 +1855,7 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 
-	if (fb_open())
+	if (fb_open_pages(0))
 	{
 		fprintf(stderr, "mediacenter: 32-bit /dev/fb0 not available\n");
 		return 1;
@@ -1786,11 +1867,8 @@ int main(int argc, char *argv[])
 	if (arg) rc = play_file(arg, 0) == END_DONE ? 0 : 0;
 	else rc = run_browser();
 
-	if (fb_mem)
-	{
-		memset(fb_mem, 0, fb_len);
-		munmap(fb_mem, fb_len);
-	}
+	fb_clear();
+	fb_close();
 	if (input_fd >= 0) close(input_fd);
 	return rc;
 }

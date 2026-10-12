@@ -81,9 +81,14 @@ wire        hdone, vdone;
 mc_div hdiv(.clk(clk_vid), .start(div_go), .num({w, 16'd0}), .den(11'd640), .q(hq), .done(hdone));
 mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(act_h), .q(vq), .done(vdone));
 
+// The frame buffer's address is taken once per field: a player that draws
+// into pages and switches between them never shows two pictures at once.
+reg [31:0] base;
+
 always @(posedge clk_vid) begin
 	if(hdone) hstep <= hq;
 	if(vdone) vstep <= vq;
+	if(div_go || !active) base <= fb_base;
 end
 
 // The line about to be shown, as a line of the whole picture.
@@ -171,7 +176,7 @@ always @(posedge clk_sys) begin
 				start  <= 2;
 			end
 		2: begin
-				laddr    = fb_base + offset;
+				laddr    = base + offset;
 				ddr_addr <= laddr[31:3];
 				wbank    <= bank;
 				waddr    <= 0;

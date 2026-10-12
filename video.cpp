@@ -71,6 +71,17 @@ static uint8_t vrr_min_fr = 0;
 static uint8_t vrr_max_fr = 0;
 
 static volatile uint32_t *fb_base = 0;
+
+// fb_cmd3 frame buffers have pages: the scaler shows one while the next
+// picture is drawn into another ("fb_cmd3 page <n>" shows page n).
+#define FB_PAGES 3
+static struct
+{
+	int on, pages;
+	uint16_t fmt, width, height, left, right, top, bottom, stride;
+	uint32_t len;
+} fb_paged;
+
 static int fb_enabled = 0;
 static int fb_width = 0;
 static int fb_height = 0;
@@ -3558,6 +3569,7 @@ void video_fb_enable(int enable, int n)
 {
 	PROFILE_FUNCTION();
 
+	fb_paged.on = 0;
 	if (fb_base)
 	{
 		int res = spi_uio_cmd_cont(UIO_SET_FBUF);
@@ -4259,11 +4271,39 @@ int video_chvt(int num)
 	return cur_vt ? cur_vt : 1;
 }
 
+static void fb_set_page(int n)
+{
+	if (!fb_paged.on || n < 0 || n >= fb_paged.pages) return;
+	uint32_t addr = FB_ADDR + 4096 + fb_paged.len * n;
+	spi_uio_cmd_cont(UIO_SET_FBUF);
+	spi_w(fb_paged.fmt);
+	spi_w((uint16_t)addr);
+	spi_w(addr >> 16);
+	spi_w(fb_paged.width);
+	spi_w(fb_paged.height);
+	spi_w(fb_paged.left);
+	spi_w(fb_paged.right);
+	spi_w(fb_paged.top);
+	spi_w(fb_paged.bottom);
+	spi_w(fb_paged.stride);
+	DisableIO();
+}
+
 void video_cmd(char *cmd)
 {
 	if (video_fb_state())
 	{
+		// Page switches come once per picture: the last one queued wins.
+		if (!strncmp(cmd, "fb_cmd3 page ", 13))
+		{
+			const char *last = cmd, *p;
+			while ((p = strstr(last + 1, "page "))) last = p;
+			fb_set_page(atoi(strstr(last, "page ") + 5));
+			return;
+		}
+
 		int accept = 0;
+		int paged = 0;
 		int fmt = 0, rb = 0, div = -1, width = -1, height = -1;
 		uint16_t hmin, hmax, vmin, vmax;
 		if (sscanf(cmd, "fb_cmd0 %d %d %d", &fmt, &rb, &div) == 3)
@@ -4299,6 +4339,7 @@ void video_cmd(char *cmd)
 		// fb_cmd3 default: back to the normal frame buffer.
 		if (!strcmp(cmd, "fb_cmd3 default"))
 		{
+			fb_paged.on = 0;
 			if (is_menu()) user_io_status_set("[9]", 0);
 			video_fb_enable(1, 0);
 			return;
@@ -4322,6 +4363,7 @@ void video_cmd(char *cmd)
 				hmax = hmin + win_w - 1;
 				vmax = vmin + win_h - 1;
 				accept = 1;
+				paged = 1;
 				// the menu core letterboxes a wide picture on its 15 kHz output
 				if (is_menu()) user_io_status_set("[9]", aw * 2 > ah * 3);
 			}
@@ -4419,10 +4461,24 @@ void video_cmd(char *cmd)
 			spi_w(stride);         // stride
 			DisableIO();
 
+			// Linux gets all the pages as one tall frame buffer.
+			uint32_t len = (uint32_t)stride * height;
+			fb_paged.on = paged && len * FB_PAGES <= FB_SIZE * 4 - 4096;
+			fb_paged.pages = fb_paged.on ? FB_PAGES : 1;
+			fb_paged.fmt = FB_EN | sc_fmt;
+			fb_paged.width = width;
+			fb_paged.height = height;
+			fb_paged.left = xoff + hmin;
+			fb_paged.right = xoff + hmax;
+			fb_paged.top = yoff + vmin;
+			fb_paged.bottom = yoff + vmax;
+			fb_paged.stride = stride;
+			fb_paged.len = len;
+
 			if (cmd[6] != '2')
 			{
 				static char cmd[256];
-				sprintf(cmd, "echo %d %d %d %d %d >/sys/module/MiSTer_fb/parameters/mode", fmt, rb, width, height, stride);
+				sprintf(cmd, "echo %d %d %d %d %d >/sys/module/MiSTer_fb/parameters/mode", fmt, rb, width, height * fb_paged.pages, stride);
 				system(cmd);
 			}
 		}
