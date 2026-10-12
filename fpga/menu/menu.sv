@@ -446,13 +446,14 @@ always @(posedge CLK_VIDEO) begin
 	if (hc == 672) begin
 		HSync <= 1;
 
+		// set and cleared at the end of a line: lines 0 to 287 (239) shown
 		if(PAL) begin
-			if(vc == (forced_scandoubler ? 576 : 288)) VBlank <= 1;
-				else if (vc == 0) VBlank <= 0;
+			if(vc == (forced_scandoubler ? 575 : 287)) VBlank <= 1;
+				else if (vc == last_line) VBlank <= 0;
 		end
 		else begin
-			if(vc == (forced_scandoubler ? 480 : 240)) VBlank <= 1;
-				else if (vc == 0) VBlank <= 0;
+			if(vc == (forced_scandoubler ? 479 : 239)) VBlank <= 1;
+				else if (vc == last_line) VBlank <= 0;
 		end
 	end
 	
