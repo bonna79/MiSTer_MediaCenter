@@ -42,4 +42,6 @@ char *getappname();
 
 void fpga_wait_to_reset();
 
+#define MEDIACENTER_MENU_RBF "/media/fat/linux/menu_mediacenter.rbf"
+
 #endif

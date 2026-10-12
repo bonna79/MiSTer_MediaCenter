@@ -1,0 +1,281 @@
+// Linux frame buffer on the menu core's own (15 kHz) video output.
+//
+// A frame buffer that fits the 640 pixels wide output is shown 1:1 and
+// centered, like the stock console output. A larger one (MiSTer MediaCenter
+// playing a DVD or a video file) is scaled to fill the output: the source
+// pixel and line of every output pixel are picked by nearest neighbour, so an
+// interlaced output (480i/576i) gets the frame buffer's own lines in each
+// field. With "wide" a 16:9 picture is letterboxed on the 4:3 screen.
+
+module mc_out
+(
+	input             clk_sys,
+	input             ddr_grant,
+	output reg [28:0] ddr_addr,
+	output reg  [7:0] ddr_burst,
+	output reg        ddr_rd = 0,
+	input             ddr_busy,
+	input      [63:0] ddr_dout,
+	input             ddr_dout_ready,
+	output            ddr_idle,
+
+	input       [5:0] fb_fmt,
+	input      [31:0] fb_base,
+	input      [11:0] fb_width,
+	input      [11:0] fb_height,
+	input      [13:0] fb_stride,
+
+	input             clk_vid,
+	input             ce_pix,
+	input             show,
+	input             scaled,   // fill the output instead of 1:1
+	input             wide,     // 16:9 picture: letterbox
+	input             ilace,    // interlaced output: two fields per frame
+	input             field,    // field being shown (1: odd lines)
+	input       [9:0] hc,
+	input       [9:0] vc,
+	input       [9:0] height,   // active lines of one field
+	output reg [23:0] rgb,
+	output reg        active = 0
+);
+
+localparam WIDTH = 640;
+localparam BURST = 32;
+
+reg  [5:0] fmt;
+reg [11:0] w, h;
+reg  [9:0] out_h, cols, lines, left, top;
+reg  [1:0] show_s = 0;
+reg        scale, ilc, wd;
+
+// lines of the whole output picture (both fields when interlaced)
+wire [10:0] pic_h  = ilc ? {out_h, 1'b0} : {1'b0, out_h};
+// lines used by the picture: 3/4 of them for a letterboxed 16:9 picture
+wire [10:0] act_h  = wd ? (pic_h - (pic_h >> 2)) : pic_h;
+wire [10:0] act_y0 = wd ? (pic_h >> 3) : 11'd0;
+
+always @(posedge clk_vid) begin
+	fmt    <= fb_fmt;
+	w      <= fb_width;
+	h      <= fb_height;
+	out_h  <= height;
+	scale  <= scaled;
+	ilc    <= ilace;
+	wd     <= wide;
+	cols   <= w[9:0];
+	lines  <= h[9:0];
+	left   <= (WIDTH[9:0] - cols) >> 1;
+	top    <= (out_h - lines) >> 1;
+	show_s <= {show_s[0], show};
+	active <= show_s[1] && fmt[2:0] == 3'b110 && w && h && (scale ? w <= 12'd2048 : (w <= WIDTH && h <= out_h));
+end
+
+// Scale factors, 16.16 fixed point: source pixels per output pixel and source
+// lines per output line. Divided again at every frame start (slowly, bit by
+// bit) so they follow a frame buffer change.
+reg [27:0] hstep = 0, vstep = 0;
+wire       div_go = ce_pix && hc == 0 && vc == out_h;
+wire [27:0] hq, vq;
+wire        hdone, vdone;
+
+mc_div hdiv(.clk(clk_vid), .start(div_go), .num({w, 16'd0}), .den(11'd640), .q(hq), .done(hdone));
+mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(act_h), .q(vq), .done(vdone));
+
+always @(posedge clk_vid) begin
+	if(hdone) hstep <= hq;
+	if(vdone) vstep <= vq;
+end
+
+// The line about to be shown, as a line of the whole picture.
+function [10:0] pic_line(input [9:0] y, input f);
+	pic_line = ilc ? {y, f} : {1'b0, y};
+endfunction
+
+reg        req_t = 0;
+reg [11:0] req_line;
+reg        req_bank;
+
+always @(posedge clk_vid) begin
+	reg  [9:0] ny;
+	reg        nf;
+	reg [10:0] py, ay;
+	reg [38:0] sy;
+
+	if(ce_pix && !hc && active && (vc + 1'd1 < out_h || vc == out_h)) begin
+		// fetch the next line; at the end of the field, the first line of
+		// the next one
+		ny = (vc == out_h) ? 10'd0 : vc + 1'd1;
+		nf = (vc == out_h) ? ~field : field;
+		if(scale) begin
+			py = pic_line(ny, ilc & nf);
+			ay = py - act_y0;
+			sy = ay * vstep;
+			if(py >= act_y0 && ay < act_h && sy[27:16] < h) begin
+				req_line <= sy[27:16];
+				req_bank <= ny[0];
+				req_t    <= ~req_t;
+			end
+		end
+		else if(ny >= top && ny - top < lines) begin
+			req_line <= ny - top;
+			req_bank <= ny[0];
+			req_t    <= ~req_t;
+		end
+	end
+end
+
+reg  [2:0] req_s = 0;
+reg  [1:0] start = 0;
+reg        fetch = 0;
+reg [11:0] line;
+reg        bank, wbank;
+reg [25:0] offset;
+reg [10:0] words;
+reg  [9:0] waddr;
+reg  [7:0] beats = 0;
+reg        bwe = 0;
+reg [10:0] baddr;
+reg [63:0] bdata;
+
+assign ddr_idle = ~fetch & ~|start & ~ddr_rd;
+
+wire [12:0] colsp1 = w + 1'd1;
+
+always @(posedge clk_sys) begin
+	reg [31:0] laddr;
+
+	req_s <= {req_s[1:0], req_t};
+	bwe   <= 0;
+
+	if(ddr_rd && !ddr_busy) begin
+		ddr_rd   <= 0;
+		ddr_addr <= ddr_addr + ddr_burst;
+	end
+
+	if(ddr_dout_ready && fetch && beats) begin
+		bwe   <= 1;
+		baddr <= {wbank, waddr};
+		bdata <= ddr_dout;
+		waddr <= waddr + 1'd1;
+		beats <= beats - 1'd1;
+	end
+
+	case(start)
+		0: if(!fetch && req_s[2] != req_s[1] && ddr_grant) begin
+				line  <= req_line;
+				bank  <= req_bank;
+				start <= 1;
+			end
+		1: begin
+				offset <= line * fb_stride;
+				start  <= 2;
+			end
+		2: begin
+				laddr    = fb_base + offset;
+				ddr_addr <= laddr[31:3];
+				wbank    <= bank;
+				waddr    <= 0;
+				words    <= colsp1[11:1];
+				fetch    <= 1;
+				start    <= 0;
+			end
+	endcase
+
+	if(fetch && !start && !ddr_rd && !beats && ddr_grant) begin
+		if(!words) fetch <= 0;
+		else begin
+			ddr_burst <= (words > BURST) ? BURST[7:0] : words[7:0];
+			beats     <= (words > BURST) ? BURST[7:0] : words[7:0];
+			words     <= (words > BURST) ? words - BURST[10:0] : 11'd0;
+			ddr_rd    <= 1;
+		end
+	end
+end
+
+reg [63:0] buffer[2048];
+always @(posedge clk_sys) if(bwe) buffer[baddr] <= bdata;
+
+reg [63:0] q;
+reg        hi, shown;
+
+// the current line's source line is inside the picture (letterbox bars)
+reg        line_on;
+always @(posedge clk_vid) begin
+	reg [10:0] py, ay;
+	reg [38:0] sy;
+
+	py = pic_line(vc, ilc & field);
+	ay = py - act_y0;
+	sy = ay * vstep;
+	line_on <= py >= act_y0 && ay < act_h && sy[27:16] < h;
+end
+
+always @(posedge clk_vid) begin
+	reg  [9:0] sx;
+	reg [37:0] px;
+	reg [31:0] p;
+
+	if(scale) begin
+		px = hc * hstep;
+		sx = px[26:16];
+		q     <= buffer[{vc[0], px[26:17]}];
+		hi    <= px[16];
+		shown <= active && hc < WIDTH && vc < out_h && line_on;
+	end
+	else begin
+		sx     = hc - left;
+		q     <= buffer[{vc[0], 1'b0, sx[9:1]}];
+		hi    <= sx[0];
+		shown <= active && hc >= left && sx < cols && vc >= top && vc - top < lines;
+	end
+
+	p = hi ? q[63:32] : q[31:0];
+	if(!shown)      rgb <= 0;
+	else if(fmt[4]) rgb <= p[23:0];
+	else            rgb <= {p[7:0], p[15:8], p[23:16]};
+end
+
+endmodule
+
+// Unsigned divider, one quotient bit per clock: q = num / den.
+module mc_div
+(
+	input             clk,
+	input             start,
+	input      [27:0] num,
+	input      [10:0] den,
+	output reg [27:0] q,
+	output reg        done = 0
+);
+
+reg [27:0] n;
+reg [11:0] r;
+reg  [4:0] cnt = 0;
+
+always @(posedge clk) begin
+	reg [11:0] t;
+
+	done <= 0;
+	if(start) begin
+		n   <= num;
+		r   <= 0;
+		q   <= 0;
+		cnt <= 5'd28;
+	end
+	else if(cnt) begin
+		t = {r[10:0], n[27]};
+		n <= {n[26:0], 1'b0};
+		if(den && t >= den) begin
+			r <= t - den;
+			q <= {q[26:0], 1'b1};
+		end
+		else begin
+			r <= t;
+			q <= {q[26:0], 1'b0};
+		end
+		cnt <= cnt - 1'd1;
+		if(cnt == 1) done <= 1;
+	end
+end
+
+endmodule

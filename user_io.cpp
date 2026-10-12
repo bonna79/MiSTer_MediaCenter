@@ -1380,6 +1380,17 @@ int user_io_get_width()
 	return fio_size;
 }
 
+// The menu core is MiSTer MediaCenter's one ("MC" in its version string).
+static int menu_is_mediacenter()
+{
+	for (int i = 0;; i++)
+	{
+		char *p = user_io_get_confstr(i);
+		if (!p) return 0;
+		if (p[0] == 'V' && strstr(p, ",vMC")) return 1;
+	}
+}
+
 void user_io_init(const char *path, const char *xml)
 {
 	char *name;
@@ -1549,6 +1560,14 @@ void user_io_init(const char *path, const char *xml)
 			}
 			else if (is_menu())
 			{
+				// MiSTer MediaCenter's menu core is in place of the stock one
+				// (loaded at boot): load it once.
+				if (!menu_is_mediacenter() && !access(MEDIACENTER_MENU_RBF, R_OK) && access("/tmp/mediacenter_menu", F_OK))
+				{
+					FILE *f = fopen("/tmp/mediacenter_menu", "w");
+					if (f) fclose(f);
+					fpga_load_rbf("menu.rbf");
+				}
 				user_io_status_set("[4]", (cfg.menu_pal) ? 1 : 0);
 				if (cfg.fb_terminal) video_menu_bg(user_io_status_get("[3:1]"));
 				else user_io_status_set("[3:1]", 0);

@@ -442,6 +442,10 @@ int fpga_load_rbf(const char *name, const char *cfg, const char *xml)
 	if(name[0] == '/') strcpy(path, name);
 	else sprintf(path, "%s/%s", !strcasecmp(name, "menu.rbf") ? getStorageDir(0) : getRootDir(), name);
 
+	// MiSTer MediaCenter's menu core: the stock one plus a 15 kHz output that
+	// shows the player's pictures (480i/576i for DVDs) on a CRT.
+	if (!strcasecmp(name, "menu.rbf") && !access(MEDIACENTER_MENU_RBF, R_OK)) strcpy(path, MEDIACENTER_MENU_RBF);
+
 	int rbf = open(path, O_RDONLY);
 	if (rbf < 0)
 	{

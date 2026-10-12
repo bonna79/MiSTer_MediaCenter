@@ -4299,6 +4299,7 @@ void video_cmd(char *cmd)
 		// fb_cmd3 default: back to the normal frame buffer.
 		if (!strcmp(cmd, "fb_cmd3 default"))
 		{
+			if (is_menu()) user_io_status_set("[9]", 0);
 			video_fb_enable(1, 0);
 			return;
 		}
@@ -4321,6 +4322,8 @@ void video_cmd(char *cmd)
 				hmax = hmin + win_w - 1;
 				vmax = vmin + win_h - 1;
 				accept = 1;
+				// the menu core letterboxes a wide picture on its 15 kHz output
+				if (is_menu()) user_io_status_set("[9]", aw * 2 > ah * 3);
 			}
 		}
 
