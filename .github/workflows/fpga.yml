@@ -10,16 +10,17 @@ on:
 jobs:
   menu_core:
     runs-on: ubuntu-22.04
-    container: theypsilon/quartus-lite-c5:17.0.2
     steps:
       - uses: actions/checkout@v4
 
+      # The Quartus image is too old to run the actions themselves, so only
+      # the compile runs in it.
       - name: Compile with Quartus
-        working-directory: fpga/menu
         run: |
-          quartus_sh --flow compile menu.qpf
-          grep -A4 "Fitter Resource Usage Summary" output_files/menu.fit.summary || cat output_files/menu.fit.summary
-          cp output_files/menu.rbf ../../menu_mediacenter.rbf
+          docker run --rm -v "$PWD/fpga/menu:/build" -w /build theypsilon/quartus-lite-c5:17.0.2 \
+            quartus_sh --flow compile menu.qpf
+          cat fpga/menu/output_files/menu.fit.summary
+          cp fpga/menu/output_files/menu.rbf menu_mediacenter.rbf
 
       - uses: actions/upload-artifact@v4
         with:
