@@ -1078,6 +1078,8 @@ static int media_play(int in_playlist)
 	fb_clear();
 	if (mc.audio_only) draw_audio_screen();
 	vt_start();
+	frames_shown = frames_dropped = 0;
+	double played = 0;
 	// The loop that reads the file and sends the sound runs ahead of the
 	// video decoding threads, so the sound keeps flowing on a heavy stream.
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5);
@@ -1182,6 +1184,7 @@ static int media_play(int in_playlist)
 		if (p.state == ST_PLAY)
 		{
 			mc.clock += elapsed;
+			played += elapsed;
 			fill();
 			feed_audio_output();
 			if (vt.on)
@@ -1274,6 +1277,13 @@ static int media_play(int in_playlist)
 	}
 
 	vt_end();
+	if (mc.vstream >= 0 && played > 1)
+	{
+		double fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
+		printf("mediacenter: %.0f s played, pictures shown %d (%.1f per second", played, frames_shown, frames_shown / played);
+		if (fps > 0) printf(" of %.2f, %.1f%% not shown", fps, 100.0 * (1.0 - frames_shown / (played * fps)));
+		printf("), dropped late %d\n", frames_dropped);
+	}
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
 	audio_close();
 	exit_question = "Uscire dal Video CD?";
