@@ -1017,7 +1017,7 @@ static int dvd_play(const char *device)
 	have_frame = 0;
 	exit_question = "Uscire dal DVD?";
 	if (audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
-	memset(fb_mem, 0, fb_len);
+	fb_clear();
 	native_fb = !getenv("MC_ARMSCALE");
 
 	frames_shown = frames_dropped = 0;
@@ -1120,7 +1120,7 @@ static int dvd_play(const char *device)
 				dvd.halt = 1;
 				dvd.still = dvd.wait = 0;
 				DVD_UNLOCK();
-				memset(fb_mem, 0, fb_len);
+				fb_clear();
 				have_frame = 0;
 				break;
 			case KEY_RIGHT:
