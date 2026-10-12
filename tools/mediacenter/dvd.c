@@ -87,6 +87,7 @@ typedef struct
 	double seek_to;
 	int seeking;       // a seek was made: hold after its first picture
 	int ff_hold;       // the picture after a seek is decoded
+	int scanning;      // fast forward / rewind on: seeks hold after a picture
 	int req_audio;     // the user changed the audio stream
 
 	AVFrame *last;     // the picture on screen, redrawn when the overlay changes
@@ -234,7 +235,7 @@ static void dvd_video_frame(AVFrame *f)
 	double step = (fr.num > 0 && fr.den > 0) ? 1.0 / av_q2d(fr) : 0.04;
 	DVD_LOCK();
 	queue_video_at(f, pts, step);
-	if (dvd.seeking) { dvd.seeking = 0; dvd.ff_hold = 1; }
+	if (dvd.seeking) { dvd.seeking = 0; dvd.ff_hold = dvd.scanning; }
 	DVD_UNLOCK();
 }
 
@@ -959,7 +960,8 @@ static void *dvd_reader(void *arg)
 			DVD_LOCK();
 			dvd.hop = 1;
 			dvd.ff_hold = 0;
-			dvd.seeking = seek;
+			// a seek still pending when the scan ended must not hold playback
+			dvd.seeking = seek && dvd.scanning;
 			DVD_UNLOCK();
 		}
 		if (audio)
@@ -1002,6 +1004,19 @@ static void dvd_jumped(void)
 	DVD_LOCK();
 	dvd.req_flush = 1;
 	dvd.still = dvd.wait = dvd.stopped = dvd.halt = 0;
+	DVD_UNLOCK();
+}
+
+// Fast forward / rewind ends: play on from the picture on screen. A seek the
+// reader has not made yet is dropped, one it is making no longer holds.
+static void dvd_scan_end(void)
+{
+	DVD_LOCK();
+	dvd.scanning = 0;
+	dvd.req_seek = 0;
+	dvd.seeking = 0;
+	dvd.ff_hold = 0;
+	dvd.hop = 1;
 	DVD_UNLOCK();
 }
 
@@ -1088,10 +1103,7 @@ static int dvd_play(const char *device)
 				}
 				else if (p.state == ST_FF || p.state == ST_REW)
 				{
-					DVD_LOCK();
-					dvd.ff_hold = 0;
-					dvd.hop = 1;
-					DVD_UNLOCK();
+					dvd_scan_end();
 				}
 				p.state = ST_PLAY;
 				break;
@@ -1102,10 +1114,7 @@ static int dvd_play(const char *device)
 				else if (p.state == ST_PAUSE) p.state = ST_PLAY;
 				else if (p.state == ST_FF || p.state == ST_REW)
 				{
-					DVD_LOCK();
-					dvd.ff_hold = 0;
-					dvd.hop = 1;
-					DVD_UNLOCK();
+					dvd_scan_end();
 					p.state = ST_PAUSE;
 				}
 				break;
@@ -1119,6 +1128,7 @@ static int dvd_play(const char *device)
 				dvd.req_flush = 1;
 				dvd.halt = 1;
 				dvd.still = dvd.wait = 0;
+				dvd.scanning = dvd.req_seek = dvd.seeking = dvd.ff_hold = 0;
 				DVD_UNLOCK();
 				memset(fb_mem, 0, fb_len);
 				have_frame = 0;
@@ -1140,15 +1150,15 @@ static int dvd_play(const char *device)
 				if (p.state == ST_STOP || !dvdnav_is_domain_vts(dvd.nav)) break;
 				if (p.state == want)
 				{
-					DVD_LOCK();
-					dvd.ff_hold = 0;
-					dvd.hop = 1;
-					DVD_UNLOCK();
+					dvd_scan_end();
 					p.state = ST_PLAY;
 					break;
 				}
 				if (p.state != ST_FF && p.state != ST_REW) p.ff_time = title_time;
 				audio_flush();
+				DVD_LOCK();
+				dvd.scanning = 1;
+				DVD_UNLOCK();
 				p.state = want;
 				p.ff_step = 0.3; // first jump right away
 				break;
@@ -1273,7 +1283,14 @@ static int dvd_play(const char *device)
 				dvd.seek_to = p.ff_time;
 				dvd.req_seek = 1;
 				DVD_UNLOCK();
-				if (p.ff_time <= 0 || (dvd.duration > 0 && p.ff_time >= dvd.duration - 1)) p.state = ST_PLAY;
+				if (p.ff_time <= 0 || (dvd.duration > 0 && p.ff_time >= dvd.duration - 1))
+				{
+					// the start or the end: play from there
+					DVD_LOCK();
+					dvd.scanning = 0;
+					DVD_UNLOCK();
+					p.state = ST_PLAY;
+				}
 			}
 		}
 
