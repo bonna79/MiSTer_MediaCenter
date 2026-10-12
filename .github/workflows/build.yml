@@ -68,7 +68,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: mediacenter
+          name: mediacenter_arm
           path: |
             bin/mediacenter
             Scripts/mediacenter.sh
