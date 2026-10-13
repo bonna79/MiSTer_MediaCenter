@@ -39,7 +39,16 @@ The player's on-screen texts are in Italian.
 
 Known limits:
 
-- High-definition H.264 video (720p and above) is too heavy for the ARM. It plays in light mode, with smooth audio, but the video may drop frames. For smooth playback convert it, for example with HandBrake, to H.264 at 720x576 or to Xvid. DivX, Xvid and MPEG-4 at DVD resolution play well.
+- High-definition video (MKV and MP4) plays, with smooth audio, but the ARM cannot show every frame. Tests on a real MiSTer, with the figure the player writes to `/tmp/mediacenter.log`:
+
+  | Video | Frames not shown |
+  | --- | --- |
+  | DVD (MPEG-2 720x576) | about 1% |
+  | H.264 8-bit 1280x720 | about 10%, looks smooth |
+  | H.264 8-bit 1440x810 | about 65%, stutters |
+  | H.264 10-bit (Hi10p) 1280x720 | about 78%, stutters |
+
+  The recommended maximum is **H.264 8-bit, 1280x720, 24-25 frames per second**. For fully smooth playback go down to 1024x576 or 960x540, or to DVD resolution in H.264 or Xvid. Avoid 10-bit H.264 (Hi10p) and HEVC/H.265. Convert with HandBrake: H.264 encoder, High profile, 8-bit.
 - Super Video CDs (MPEG-2) are not played.
 - CD-Rs with DivX or MP3 files do not start by themselves: open them from **Scripts → mediacenter → Disco nel lettore** (disc in the drive).
 - The 15 kHz VGA output has not been tested yet.

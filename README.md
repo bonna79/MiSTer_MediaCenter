@@ -37,7 +37,16 @@ Dentro i core delle console lavora il Main di [MiSTer Physical Disc](https://git
 
 Limiti noti:
 
-- I video H.264 in alta definizione (720p e oltre) sono troppo pesanti per l'ARM. Vengono riprodotti in modalità leggera, con l'audio sempre fluido, ma il video può saltare dei fotogrammi. Per una riproduzione fluida conviene convertirli, per esempio con HandBrake, in H.264 a 720x576 o in Xvid. DivX, Xvid e MPEG-4 a risoluzione DVD funzionano bene.
+- I video in alta definizione (MKV e MP4) si riproducono, con l'audio sempre fluido, ma l'ARM non riesce a mostrare tutti i fotogrammi. Prove su un MiSTer vero, con il numero che il player scrive in `/tmp/mediacenter.log`:
+
+  | Video | Fotogrammi non mostrati |
+  | --- | --- |
+  | DVD (MPEG-2 720x576) | circa 1% |
+  | H.264 8 bit 1280x720 | circa 10%, sembra fluido |
+  | H.264 8 bit 1440x810 | circa 65%, scatta |
+  | H.264 10 bit (Hi10p) 1280x720 | circa 78%, scatta |
+
+  Il massimo consigliato è **H.264 8 bit, 1280x720, 24-25 fotogrammi al secondo**. Per una riproduzione del tutto fluida conviene scendere a 1024x576 o 960x540, oppure a risoluzione DVD in H.264 o Xvid. Non usare H.264 a 10 bit (Hi10p) né HEVC/H.265. Si convertono con HandBrake: codifica H.264, profilo High, 8 bit.
 - I Super Video CD (MPEG-2) non vengono riprodotti.
 - I CD-R con file DivX o MP3 non partono da soli: si aprono da **Scripts → mediacenter → Disco nel lettore**.
 - L'uscita VGA a 15 kHz non è ancora stata provata.
