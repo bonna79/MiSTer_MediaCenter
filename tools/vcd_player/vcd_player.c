@@ -1372,7 +1372,9 @@ static void read_pbc(void)
 	int len = 0;
 	read_raw(VCD_INFO_LBA, 1, raw);
 	const uint8_t *p = sector_payload(raw, &len);
-	if (len < 2048 || memcmp(p, "VIDEO_CD", 8) || p[8] < 2) return; // VCD 2.0 only
+	// Video CD 2.0, or a Super Video CD (INFO.SVD has the same layout)
+	int svd = len >= 2048 && (!memcmp(p, "SUPERVCD", 8) || !memcmp(p, "HQ-VCD  ", 8));
+	if (len < 2048 || (!svd && (memcmp(p, "VIDEO_CD", 8) || p[8] < 2))) return;
 
 	int size = (p[44] << 24) | (p[45] << 16) | (p[46] << 8) | p[47];
 	if (size <= 0 || size > 256 * 1024) return;
@@ -1393,7 +1395,8 @@ static void read_pbc(void)
 	if (pbc_first == PSD_OFS_DISABLED) return;
 
 	int sectors = (size + 2047) / 2048;
-	psd = (uint8_t *)calloc((size_t)sectors * 2048, 1);
+	// zeros past the end: a short list at the end is read as far as d + 20
+	psd = (uint8_t *)calloc((size_t)sectors * 2048 + 64, 1);
 	if (!psd) return;
 	for (int i = 0; i < sectors; i++)
 	{
@@ -1410,7 +1413,7 @@ static const uint8_t *psd_list(int ofs)
 {
 	if (ofs < 0 || ofs >= PSD_OFS_MULTI_DEF_NO_NUM) return NULL;
 	long pos = (long)ofs * psd_mult;
-	if (pos + 20 > psd_size) return NULL;
+	if (pos + 8 > psd_size) return NULL; // the shortest list (end) is 8 bytes
 	return psd + pos;
 }
 

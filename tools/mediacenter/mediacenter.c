@@ -1093,7 +1093,14 @@ static void draw_audio_screen(void)
 	}
 }
 
-enum { END_DONE, END_NEXT, END_PREV, END_BACK, END_QUIT };
+enum { END_DONE, END_NEXT, END_PREV, END_BACK, END_QUIT, END_GOTO };
+
+// Hooks for the Super Video CD menus (svcd_pbc): keys, the end of the
+// stream and the on-screen controls.
+static int (*play_key_hook)(int code);          // 1: key used; 2: used, playback ends with END_GOTO
+static int (*play_end_hook)(void);              // 0: end; 1: play again; 2: keep the last picture
+static void (*play_osd_hook)(osd_info_t *info); // menu choice on the controls
+static int play_osd_keep = 0;                   // controls always on screen (a menu)
 
 // Plays the open file. Returns how playback ended.
 static int media_play(int in_playlist)
@@ -1103,7 +1110,7 @@ static int media_play(int in_playlist)
 	p.state = ST_PLAY;
 	p.osd_until = now_seconds() + 3.0;
 	have_frame = 0;
-	exit_question = "Tornare all'elenco?";
+	exit_question = svcd_on ? "Uscire dal Super Video CD?" : "Tornare all'elenco?";
 
 	if (mc.astream >= 0 && audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	fb_clear();
@@ -1133,6 +1140,16 @@ static int media_play(int in_playlist)
 				p.confirm_exit = 0;
 				if (code == KEY_ENTER) result = END_BACK;
 				continue;
+			}
+			if (play_key_hook)
+			{
+				int h = play_key_hook(code);
+				if (h == 2)
+				{
+					result = END_GOTO;
+					break;
+				}
+				if (h) continue;
 			}
 			switch (code)
 			{
@@ -1251,8 +1268,14 @@ static int media_play(int in_playlist)
 			{
 				if (show) draw_video_frame(show);
 				av_frame_free(&show);
-				result = in_playlist && (mc.audio_only || svcd_on) ? END_NEXT : END_DONE;
-				break;
+				int e = play_end_hook ? play_end_hook() : 0;
+				if (e == 1) media_seek(0);           // a moving menu picture plays again
+				else if (e == 2) mc.clock -= elapsed; // a menu: the last picture stays
+				else
+				{
+					result = in_playlist && (mc.audio_only || svcd_on) ? END_NEXT : END_DONE;
+					break;
+				}
 			}
 		}
 		else if (p.state == ST_FF || p.state == ST_REW)
@@ -1271,7 +1294,7 @@ static int media_play(int in_playlist)
 		}
 
 		if (p.confirm_exit && t >= p.osd_until) p.confirm_exit = 0;
-		int show_osd = p.state == ST_STOP || t < p.osd_until || mc.audio_only;
+		int show_osd = p.state == ST_STOP || t < p.osd_until || mc.audio_only || play_osd_keep;
 		if (show_osd && (p.dirty || t - osd_built >= 0.25))
 		{
 			osd_info_t info;
@@ -1285,6 +1308,7 @@ static int media_play(int in_playlist)
 			info.audio_mode = audio_mode;
 			info.audio_label = mc.audio_label[0] ? mc.audio_label : NULL;
 			if (mc.astream < 0) info.audio_label = "Senza audio";
+			if (play_osd_hook) play_osd_hook(&info);
 			osd_build(&info);
 			osd_built = t;
 			p.dirty = 1;
@@ -1725,11 +1749,14 @@ static void svcd_track_chapters(int track)
 	if (svcd_chapters == 1) svcd_chapters = 0; // only the track start
 }
 
-static int svcd_play_track(int track, int num, int total)
+// Plays sectors start..end of the disc (a track, or menu segments). With a
+// track its chapters are known; seek_lba starts at an entry point.
+// Returns how playback ended, -1 when there is nothing to play.
+static int svcd_play_range(int start, int end, int track, int seek_lba, const char *name, int in_playlist)
 {
 	feed_t *f = &svcd_feed;
-	f->start = tracks[track].start;
-	f->end = tracks[track].end;
+	f->start = start;
+	f->end = end;
 	f->pos = 0;
 	f->size = (size_t)(f->end - f->start) * FORM2_DATA;
 
@@ -1739,25 +1766,25 @@ static int svcd_play_track(int track, int num, int total)
 	if (!media_io)
 	{
 		av_free(io_buf);
-		return END_DONE;
+		return -1;
 	}
 
-	char name[64];
-	snprintf(name, sizeof(name), "Super Video CD %d/%d", num, total);
-	int r = END_NEXT;
+	int r = -1;
 	if (!media_open(name))
 	{
 		snprintf(mc.title, sizeof(mc.title), "%s", name);
-		svcd_track_chapters(track);
-		media_seek(0);
-		fprintf(stderr, "mediacenter: Super Video CD track %d (%d/%d), %d chapter(s)\n", track, num, total, svcd_chapters);
+		if (track) svcd_track_chapters(track);
+		double t = seek_lba >= 0 ? svcd_pack_time(seek_lba, end) - mc.start : 0;
+		if (t >= 0.5) media_seek(t); // otherwise from the first picture already read
+		fprintf(stderr, "mediacenter: %s, sectors %d-%d, %d chapter(s)%s\n", name, start, end, svcd_chapters,
+			seek_lba >= 0 ? ", from an entry point" : "");
 		native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");
-		r = media_play(1);
+		r = media_play(in_playlist);
 		native_fb = 0;
 		fb_native(0, 0, 0);
 		media_close();
 	}
-	else fprintf(stderr, "mediacenter: Super Video CD track %d has no MPEG stream\n", track);
+	else fprintf(stderr, "mediacenter: %s has no MPEG stream\n", name);
 
 	av_freep(&media_io->buffer);
 	avio_context_free(&media_io);
@@ -1765,7 +1792,212 @@ static int svcd_play_track(int track, int num, int total)
 	return r;
 }
 
-// Plays the MPEG tracks of the disc in order, like a playlist.
+// ---------------------------------------------------------------------------
+// Super Video CD menus (PBC): the lists of PSD.SVD, read by read_pbc() as for
+// a Video CD 2.0, played item by item through media_play().
+// ---------------------------------------------------------------------------
+
+static struct
+{
+	const uint8_t *list; // current list
+	int item, n;         // play list: item playing, number of items
+	int sel;             // menu: current choice
+	int loops;           // menu: plays of its picture still to do (0 = always)
+	int holding;         // the last picture stays on screen
+	double until;        // ... until then (0 = until a key)
+	int goto_ofs;        // list chosen with a key
+} spbc;
+
+static int spbc_jump(int ofs)
+{
+	if (ofs == PSD_OFS_DISABLED || !psd_list(ofs)) return 1;
+	spbc.goto_ofs = ofs;
+	return 2;
+}
+
+static int spbc_is_menu(void)
+{
+	return spbc.list && spbc.list[0] != 0x10;
+}
+
+static int spbc_key(int code)
+{
+	const uint8_t *d = spbc.list;
+	if (!d) return 0;
+	// B: back to the first list, as a player's stop button does
+	if (code == KEY_ESC || code == KEY_STOP || code == KEY_STOPCD) return spbc_jump(pbc_first);
+
+	if (spbc_is_menu())
+	{
+		int nos = d[2], bsn = d[3];
+		switch (code)
+		{
+		case KEY_UP:
+			if (nos) spbc.sel = bsn + (spbc.sel - bsn + nos - 1) % nos;
+			return 1;
+		case KEY_DOWN:
+			if (nos) spbc.sel = bsn + (spbc.sel - bsn + 1) % nos;
+			return 1;
+		case KEY_ENTER:
+			if (spbc.sel - bsn < nos && 20 + 2 * (spbc.sel - bsn) + 2 <= psd_size - (d - psd))
+				return spbc_jump(be16(d + 20 + 2 * (spbc.sel - bsn)));
+			return 1;
+		case KEY_PLAY:
+		case KEY_PLAYCD:
+		{
+			int ofs = be16(d + 12); // default
+			if (ofs == PSD_OFS_MULTI_DEF || ofs == PSD_OFS_MULTI_DEF_NO_NUM) ofs = be16(d + 20);
+			return spbc_jump(ofs);
+		}
+		case KEY_RIGHT: return spbc_jump(be16(d + 8));  // next
+		case KEY_LEFT:  return spbc_jump(be16(d + 6));  // previous
+		case KEY_SPACE: return spbc_jump(be16(d + 10)); // return
+		case KEY_PAGEUP:
+		case KEY_PAGEDOWN:
+		case KEY_FASTFORWARD:
+		case KEY_REWIND:
+			return 1; // no fast forward / rewind in menus
+		}
+		return 0;
+	}
+
+	// Play list
+	switch (code)
+	{
+	case KEY_SPACE:
+		return spbc_jump(be16(d + 8)); // return, usually the menu
+	case KEY_PLAY:
+	case KEY_PLAYCD:
+	case KEY_RIGHT:
+		return spbc.holding ? spbc_jump(be16(d + 6)) : 0; // waiting at the end: next
+	case KEY_LEFT:
+		return spbc.holding ? spbc_jump(be16(d + 4)) : 0; // previous
+	}
+	return 0;
+}
+
+static int spbc_end(void)
+{
+	const uint8_t *d = spbc.list;
+	if (!d) return 0;
+	int menu = spbc_is_menu();
+	if (!menu && spbc.item < spbc.n - 1) return 0; // next item of the list
+	if (menu && !spbc.holding && mc.duration >= 1.0 && spbc.loops != 1)
+	{
+		if (spbc.loops > 1) spbc.loops--;
+		return 1;
+	}
+	if (!spbc.holding)
+	{
+		// wait and timeout: seconds, 255 = until a key
+		spbc.holding = 1;
+		double w = pbc_wait_seconds(menu ? d[16] : d[12]);
+		if (menu && be16(d + 14) == PSD_OFS_DISABLED) w = -1;
+		spbc.until = w >= 0 ? now_seconds() + w : 0;
+	}
+	if (spbc.until && now_seconds() >= spbc.until) return 0;
+	return 2;
+}
+
+static void spbc_osd(osd_info_t *info)
+{
+	const uint8_t *d = spbc.list;
+	info->has_menu = 1;
+	if (!spbc_is_menu()) return;
+	info->menu = 1;
+	info->sel = spbc.sel;
+	info->sel_min = d[3];
+	info->sel_max = d[3] + d[2] - 1;
+}
+
+static int spbc_item(int item)
+{
+	char name[64];
+	if (item >= 2 && item <= 99)
+	{
+		if (item > track_last || !tracks[item].data) return -1;
+		snprintf(name, sizeof(name), "Super Video CD - traccia %d", item - 1);
+		return svcd_play_range(tracks[item].start, tracks[item].end, item, -1, name, 1);
+	}
+	if (item >= 100 && item < 600)
+	{
+		int e = item - 100;
+		if (e >= num_entry_items || !entry_items[e].track) return -1;
+		int t = entry_items[e].track;
+		snprintf(name, sizeof(name), "Super Video CD - traccia %d", t - 1);
+		return svcd_play_range(tracks[t].start, tracks[t].end, t, entry_items[e].lba, name, 1);
+	}
+	if (item >= 1000 && item < 1000 + seg_count)
+	{
+		// a play item can span several segments: the following ones are
+		// marked as continuations
+		int s = item - 1000, n = 1;
+		while (s + n < seg_count && (seg_info[s + n] & 0x20)) n++;
+		return svcd_play_range(seg_first + s * SEGMENT_SECTORS, seg_first + (s + n) * SEGMENT_SECTORS, 0, -1,
+			"Super Video CD - menu", 1);
+	}
+	return -1;
+}
+
+static int svcd_pbc(void)
+{
+	int ofs = pbc_first, jumps = 0, r = END_DONE;
+	play_key_hook = spbc_key;
+	play_end_hook = spbc_end;
+	play_osd_hook = spbc_osd;
+	while (!quit_requested)
+	{
+		const uint8_t *d = psd_list(ofs);
+		if (!d || (d[0] != 0x10 && d[0] != 0x18 && d[0] != 0x1A)) break; // end list
+		if (++jumps > 64)
+		{
+			fprintf(stderr, "mediacenter: the menus loop without playing anything\n");
+			break;
+		}
+		memset(&spbc, 0, sizeof(spbc));
+		spbc.list = d;
+		spbc.goto_ofs = -1;
+		int next;
+		if (d[0] == 0x10)
+		{
+			spbc.n = d[1];
+			fprintf(stderr, "mediacenter: play list (lid %d), %d item(s)\n", be16(d + 2) & 0x7FFF, d[1]);
+			r = END_DONE;
+			for (spbc.item = 0; spbc.item < spbc.n && !quit_requested; spbc.item++)
+			{
+				if (14 + spbc.item * 2 + 2 > psd_size - (d - psd)) break;
+				r = spbc_item(be16(d + 14 + spbc.item * 2));
+				if (r >= 0) jumps = 0;
+				if (r == END_QUIT || r == END_BACK || r == END_GOTO) break;
+			}
+			next = be16(d + 6);
+		}
+		else
+		{
+			spbc.sel = d[3];
+			spbc.loops = d[17] & 0x7F;
+			fprintf(stderr, "mediacenter: menu (lid %d), choices %d-%d\n", be16(d + 4) & 0x7FFF, d[3], d[3] + d[2] - 1);
+			play_osd_keep = 1;
+			r = spbc_item(be16(d + 18));
+			play_osd_keep = 0;
+			if (r >= 0) jumps = 0;
+			next = be16(d + 14); // timeout
+		}
+		if (r == END_QUIT || r == END_BACK) break;
+		if (r == END_GOTO) ofs = spbc.goto_ofs;
+		else if (next != PSD_OFS_DISABLED) ofs = next;
+		else break;
+	}
+	play_key_hook = NULL;
+	play_end_hook = NULL;
+	play_osd_hook = NULL;
+	memset(&spbc, 0, sizeof(spbc));
+	printf("mediacenter: end of the Super Video CD menus\n");
+	return quit_requested ? END_QUIT : r;
+}
+
+// Plays the disc: through its menus when it has them, otherwise the MPEG
+// tracks in order, like a playlist.
 static int svcd_play(void)
 {
 	int list[MAX_TRACKS + 1], n = 0;
@@ -1777,15 +2009,23 @@ static int svcd_play(void)
 		return END_DONE;
 	}
 	read_entries();
+	read_pbc();
 
 	svcd_on = 1;
-	int i = 0, r = END_DONE;
-	while (i >= 0 && i < n && !quit_requested)
+	int r = END_DONE;
+	if (pbc_ok) r = svcd_pbc();
+	else
 	{
-		r = svcd_play_track(list[i], i + 1, n);
-		if (r == END_QUIT || r == END_BACK) break;
-		if (r == END_PREV) i = i > 0 ? i - 1 : 0;
-		else i++;
+		int i = 0;
+		while (i >= 0 && i < n && !quit_requested)
+		{
+			char name[64];
+			snprintf(name, sizeof(name), "Super Video CD %d/%d", i + 1, n);
+			r = svcd_play_range(tracks[list[i]].start, tracks[list[i]].end, list[i], -1, name, 1);
+			if (r == END_QUIT || r == END_BACK) break;
+			if (r == END_PREV) i = i > 0 ? i - 1 : 0;
+			else i++;
+		}
 	}
 	svcd_on = 0;
 	return quit_requested ? END_QUIT : r;
