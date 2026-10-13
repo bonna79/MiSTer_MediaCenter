@@ -1705,8 +1705,8 @@ void user_io_init(const char *path, const char *xml)
 
 		send_rtc(3);
 
-		// release reset (the physical disc PSX core keeps it until its disc is mounted)
-		if (!is_minimig() && !is_st() && !physical_disc_launch_psx_boot_hold()) user_io_status_set("[0]", 0);
+		// release reset
+		if (!is_minimig() && !is_st()) user_io_status_set("[0]", 0);
 		if (xml && isXmlName(xml) == 1) arcade_check_error();
 
 		char cfg_errs[512];

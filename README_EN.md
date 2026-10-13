@@ -17,14 +17,10 @@ The MiSTer's ARM processor reads and decodes discs and files. The FPGA scaler en
 
 The package contains two programs:
 
-- **`MiSTer_MediaCenter`** is the Main, the MiSTer's main program. It includes every Physical Disc feature:
-  - automatic start of PSX, Saturn, Mega CD, PC Engine CD and the other `_Physical Disc Cores` discs;
-  - Q subchannel;
-  - PSX LibCrypt protection read from the original disc;
-  - CD+G on the Mega CD.
-
-  On top of that, it recognizes Video CDs, DVD-Video and data DVDs and opens them with the player.
+- **`MiSTer_MediaCenter`** is the Main, the MiSTer's main program, used in the menu. When you insert a disc it recognizes it: Video CDs, DVD-Video and data DVDs open with the player, games start with the right `_Physical Disc Cores` core.
 - **`mediacenter`** is the player itself, which runs on the ARM.
+
+Inside the console cores, Anime0t4ku's [MiSTer Physical Disc](https://github.com/Anime0t4ku) Main (`MiSTer_Physical-CD`) does the work; install it separately. It reads the game disc and handles the Q subchannel, PSX LibCrypt, CD+G on the Mega CD and CHD images. The two Mains live side by side: the MiSTer switches between them by itself, following the `main=` lines in `MiSTer.ini`.
 
 The player's on-screen texts are in Italian.
 
@@ -39,7 +35,7 @@ The player's on-screen texts are in Italian.
 | MP1, MP2, MP3, Ogg, FLAC, WAV and AAC music | From **Scripts → mediacenter** | The tracks of a folder play one after the other, like an album |
 | DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → mediacenter** | Same as a DVD |
 | Audio CDs | Start by themselves, with the core set in `AUDIOCD=` or with [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi) | |
-| PSX, Saturn, Mega CD, PC Engine CD… games | Start by themselves, with the `_Physical Disc Cores` | Q subchannel, LibCrypt, CD+G |
+| PSX, Saturn, Mega CD, PC Engine CD… games | Start by themselves, with the `_Physical Disc Cores` | Handled by the Physical Disc Main (Q subchannel, LibCrypt, CD+G) |
 
 Known limits:
 
@@ -89,11 +85,12 @@ PHYSICAL_DISC_BOOT=1
 main=MiSTer_MediaCenter
 
 [A0CD-*]
-main=MiSTer_MediaCenter
+main=MiSTer_Physical-CD
 ```
 
-- **`[menu]`** uses the new Main in the MiSTer menu, which is where discs are recognized.
-- **`[A0CD-*]`** uses the same Main with the `_Physical Disc Cores` too (PSX, Saturn, Mega CD…). If the file still says `main=MiSTer_Physical-CD`, or names another Physical Disc Main, replace it with `MiSTer_MediaCenter`. Otherwise those cores restart with the old Main.
+- **`[menu]`** uses MiSTer MediaCenter in the MiSTer menu, which is where discs are recognized.
+- **`[A0CD-*]`** uses the Physical Disc Main inside the `_Physical Disc Cores` (PSX, Saturn, Mega CD…). Without this line games start but the disc is not read, and a notice appears on screen. If the Physical Disc Main file on your SD card has another name, use that.
+- Each section takes a single `main=` line: if there are two, only the last one counts.
 - **`PHYSICAL_DISC_BOOT=1`** is optional: it also starts the disc that is already in the drive when you switch the MiSTer on.
 
 Other optional settings:
@@ -124,26 +121,9 @@ Use the controller, with the MiSTer menu buttons.
 
 In a DVD menu the D-pad chooses the button, **A** or **Start** confirms it and **Y** returns to the film. In a Video CD menu the ▲▼ arrows choose the entry and **A** plays it.
 
-## CD+G karaoke (Mega CD)
-
-CD+G karaoke discs show lyrics and pictures with the Mega CD core, through the BIOS CD player, as on the original console. There are two ways to start them:
-
-- open the Mega CD MGL file from **`_Physical Disc Cores`**;
-- or set `AUDIOCD=A0CD-MegaCD` in `MiSTer.ini`, so audio CDs and CD+G discs open with the Mega CD core by themselves.
-
-The USB drive must be able to read the raw subchannel.
-
-If the graphics do not appear, add `MEGACD_SUBCODE_LOG=1` to the Mega CD section. It writes `/media/fat/logs/megacd_subcode.log` and `/media/fat/logs/megacd_subcode_raw.bin`, to attach to your report. If the graphics show defects, try `MEGACD_CDDA_PACED=1` in the same section.
-
-```ini
-[A0CD-MegaCD]
-main=MiSTer_MediaCenter
-MEGACD_SUBCODE_LOG=1
-```
-
 ## Copying discs to CD-R
 
-Dumping games to CHD files and writing them back to CD-R, keeping the Q subchannel and the PSX LibCrypt protection, is not MediaCenter's job. [MiSTer-Disc-Tools](https://github.com/bonna79/MiSTer-Disc-Tools) does it: it is a separate program, installed on its own, that works together with this Main.
+Dumping games to CHD files and writing them back to CD-R, keeping the Q subchannel and the PSX LibCrypt protection, is not MediaCenter's job. [MiSTer-Disc-Tools](https://github.com/bonna79/MiSTer-Disc-Tools) does it: it is a separate program, installed on its own. CHD images with subchannel are played with the Physical Disc Main.
 
 ## Reporting a problem
 

@@ -1,41 +1,7 @@
 #ifndef PHYSICAL_DISC_MGL_H
 #define PHYSICAL_DISC_MGL_H
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 void physical_disc_launch_startup(void);
-
-// Called by user_io_init() right before it releases the core reset. Returns 1
-// when the current core is the physical disc PlayStation core: the reset is
-// then kept asserted and physical_disc_launch_startup() releases it once the
-// disc has been read (or immediately when there is no disc), so the BIOS boots
-// only once.
-int physical_disc_launch_psx_boot_hold(void);
-
-
-
-void physical_disc_launch_poll(void);
-
-
 
 int physical_disc_launch_menu_tick(void);
 
@@ -43,9 +9,7 @@ void physical_disc_launch_suspend_menu_discovery(void);
 
 void physical_disc_launch_resume_menu_discovery(void);
 
-
 int physical_disc_launch_busy(void);
-
 
 void physical_disc_launch_cancel(void);
 
@@ -53,30 +17,12 @@ void physical_disc_launch_reset(void);
 
 int physical_disc_launch_consume_startup_osd_suppression(void);
 
-
-
 int physical_disc_launch_load_disc(void);
-
-
 
 #define PHYSICAL_DISC_MENU_SENTINEL "\x01physical_disc"
 
-
-
 int physical_disc_menu_row(char *out, int outsz);
 
-
 int physical_disc_is_menu_row(const char *name);
-
-
-
-
-int physical_disc_mount_current_core(void);
-
-
-
-
-
-int physical_disc_swap_current_core(void);
 
 #endif

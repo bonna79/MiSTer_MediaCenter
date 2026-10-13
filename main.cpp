@@ -144,7 +144,6 @@ int main(int argc, char *argv[])
 		user_io_poll();
 		frame_timer();
 		input_poll(0);
-		physical_disc_launch_poll();
 		HandleUI();
 		OsdUpdate();
 	}

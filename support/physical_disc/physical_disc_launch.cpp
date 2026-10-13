@@ -14,38 +14,11 @@
 #include "../../hardware.h"
 #include "../../file_io.h"
 #include "../arcade/mra_loader.h"
-#include "../megacd/megacd.h"
-#include "../psx/psx.h"
-#include "../saturn/saturn.h"
-#include "../neogeo/neogeocd.h"
-#include "../3do/3do.h"
-#include "../pcecd/pcecd.h"
-#include "../cdi/cdi.h"
 #include "physical_disc.h"
 #include "physical_disc_launch.h"
 #include "physical_disc_acoustic.h"
 #include "../vcd/vcd.h"
 
-#ifdef HAS_RCHEEVOS
-#include "../../achievements.h"
-#endif
-
-enum
-{
-	SPINUP_IDLE = 0,
-	SPINUP_SETTLING = 1,
-	SPINUP_READY = 2,
-};
-
-static unsigned long mount_retry_at = 0;
-static unsigned long mount_giveup_at = 0;
-static unsigned long spinup_settle_at = 0;
-static int spinup_stage = SPINUP_IDLE;
-static int spinup_probe_lba = 0;
-static toc_t spinup_toc;
-static uint8_t spinup_probe_buf[PHYSICAL_DISC_RAW];
-static int suppress_pce_boot_osd = 0;
-static unsigned long suppress_neogeo_boot_osd_until = 0;
 static unsigned long menu_poll_at = 0;
 static int menu_detecting = 0;
 static int menu_environment_ready = 0;
@@ -261,218 +234,18 @@ static int menu_launch_vcd_player(void)
 	return 1;
 }
 
-static int sector_has_data(const uint8_t *data)
-{
-	for (int i = 0; i < PHYSICAL_DISC_RAW; i++)
-	{
-		if (data[i]) return 1;
-	}
-	return 0;
-}
-
-static void begin_mount_window(void)
-{
-	unsigned int wait_seconds = cfg.physical_disc_mount_delay;
-	if (wait_seconds < 8) wait_seconds = 8;
-	mount_giveup_at = GetTimer(wait_seconds * 1000);
-}
-
-static void clear_spinup_state(void)
-{
-	spinup_stage = SPINUP_IDLE;
-	spinup_probe_lba = 0;
-	spinup_settle_at = 0;
-}
-
-int physical_disc_mount_current_core(void)
-{
-	int known = 1;
-	int ok = 0;
-
-	if (is_megacd()) ok = mcd_set_image(0, PHYSICAL_DISC_SENTINEL);
-	else if (is_psx()) ok = psx_mount_cd(1, 1, PHYSICAL_DISC_SENTINEL);
-	else if (is_saturn()) ok = saturn_set_image(0, PHYSICAL_DISC_SENTINEL);
-	else if (is_neogeo())
-	{
-		neocd_set_en(1);
-		ok = neocd_set_image(PHYSICAL_DISC_SENTINEL);
-	}
-	else if (is_3do()) ok = p3do_set_image(0, PHYSICAL_DISC_SENTINEL);
-	else if (is_pce())
-	{
-		pcecd_set_image(0, PHYSICAL_DISC_SENTINEL);
-		ok = pcecdd.loaded;
-		if (ok)
-		{
-			pcecd_reset();
-			user_io_send_buttons(1);
-		}
-	}
-	else if (is_cdi()) ok = cdi_mount_cd(0, PHYSICAL_DISC_SENTINEL);
-	else known = 0;
-
-	if (!known)
-	{
-		printf("DISC: core '%s' has no physical disc support yet\n", user_io_get_core_name());
-		return 0;
-	}
-
-#ifdef HAS_RCHEEVOS
-	if (ok > 0) achievements_load_game(PHYSICAL_DISC_SENTINEL, 0);
-#endif
-
-	return ok;
-}
-
-int physical_disc_swap_current_core(void)
-{
-	if (is_psx())
-	{
-		psx_swap_disc();
-		return 1;
-	}
-
-	printf("DISC: swap_disc is a PSX-only manual path; '%s' auto-detects physical swaps if it supports them\n", user_io_get_core_name());
-	return 0;
-}
-
-int physical_disc_launch_psx_boot_hold(void)
-{
-	const char *name = user_io_get_core_name();
-	if (!name || strncasecmp(name, "A0CD-", 5) || !is_psx()) return 0;
-
-	psx_boot_hold(1);
-	return 1;
-}
-
+// Inside the console cores (A0CD-*) the disc is read by Anime0t4ku's
+// MiSTer Physical Disc Main, set with "[A0CD-*] main=" in MiSTer.ini:
+// user_io_init() switches to it before this runs. MiSTer MediaCenter's Main
+// only recognises the disc in the menu and loads the core.
 void physical_disc_launch_startup(void)
 {
 	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
 	const char *name = user_io_get_core_name();
 	if (!name || strncasecmp(name, "A0CD-", 5)) return;
-	if (!strcasecmp(name, "A0CD-SNES") || !strcasecmp(name, "A0CD-MDPlus"))
-	{
-		int suppress_startup_osd = !strcasecmp(name, "A0CD-MDPlus");
-		physical_disc_launch_cancel();
-		physical_disc_close();
-		mount_retry_at = 0;
-		mount_giveup_at = 0;
-		if (suppress_startup_osd) suppress_pce_boot_osd = 1;
-		return;
-	}
-	physical_disc_prepare_environment();
 
-	suppress_pce_boot_osd = is_pce();
-	suppress_neogeo_boot_osd_until = 0;
-
-	begin_mount_window();
-
-	if (is_3do())
-	{
-		clear_spinup_state();
-		mount_retry_at = GetTimer(1);
-		return;
-	}
-
-	// PSX autoboot: user_io_init() kept the core in reset (see
-	// physical_disc_launch_psx_boot_hold) so the BIOS boots once with the game
-	// already mounted instead of starting, being reset by the mount and booting
-	// again. Without a disc there is nothing to wait for: release the core now
-	// and it boots to the normal logo and BIOS menu as before.
-	// With a disc, psx_mount_cd() releases the hold; it is also released below
-	// on failure.
-	if (is_psx() && (physical_disc_open(NULL) || !physical_disc_disc_present())) psx_boot_hold(0);
-
-	do
-	{
-		if (physical_disc_mount_current_core())
-		{
-			if (!strcasecmp(name, "A0CD-NeoGeoCD")) suppress_neogeo_boot_osd_until = GetTimer(3000);
-			mount_retry_at = 0;
-			mount_giveup_at = 0;
-			return;
-		}
-		usleep(100000);
-	}
-	while (!CheckTimer(mount_giveup_at));
-
-	psx_boot_hold(0); // mount failed: never leave the core stuck in reset
-	mount_retry_at = GetTimer(100);
-}
-
-void physical_disc_launch_poll(void)
-{
-	if (!mount_retry_at || !CheckTimer(mount_retry_at)) return;
-
-	if (is_3do())
-	{
-		if (spinup_stage == SPINUP_IDLE)
-		{
-			memset(&spinup_toc, 0, sizeof(spinup_toc));
-			if (!physical_disc_open(NULL) && !physical_disc_load_toc(&spinup_toc))
-			{
-				spinup_stage = SPINUP_SETTLING;
-				spinup_probe_lba = spinup_toc.tracks[0].start;
-				spinup_settle_at = GetTimer(500);
-				mount_retry_at = GetTimer(10);
-				return;
-			}
-			physical_disc_close();
-		}
-		else if (spinup_stage == SPINUP_SETTLING)
-		{
-			if (!CheckTimer(spinup_settle_at))
-			{
-				mount_retry_at = GetTimer(10);
-				return;
-			}
-
-			if (spinup_probe_lba < spinup_toc.tracks[0].start + 32)
-			{
-				if (physical_disc_read_sector(spinup_probe_lba, spinup_probe_buf, NULL) ||
-					(spinup_probe_lba == spinup_toc.tracks[0].start && !sector_has_data(spinup_probe_buf)))
-				{
-					physical_disc_close();
-					clear_spinup_state();
-					mount_retry_at = GetTimer(100);
-					return;
-				}
-				spinup_probe_lba++;
-				mount_retry_at = GetTimer(1);
-				return;
-			}
-
-			spinup_stage = SPINUP_READY;
-		}
-
-		if (spinup_stage == SPINUP_READY && physical_disc_mount_current_core())
-		{
-			mount_retry_at = 0;
-			mount_giveup_at = 0;
-			clear_spinup_state();
-			return;
-		}
-	}
-	else if (physical_disc_mount_current_core())
-	{
-		const char *name = user_io_get_core_name();
-		if (name && !strcasecmp(name, "A0CD-NeoGeoCD")) suppress_neogeo_boot_osd_until = GetTimer(3000);
-		mount_retry_at = 0;
-		mount_giveup_at = 0;
-		return;
-	}
-
-	if (!mount_giveup_at || CheckTimer(mount_giveup_at))
-	{
-		physical_disc_close();
-		mount_retry_at = 0;
-		mount_giveup_at = 0;
-		clear_spinup_state();
-		Info("Disc could not be read", 5000);
-		return;
-	}
-
-	mount_retry_at = GetTimer(100);
+	printf("DISC: %s reads the disc with the MiSTer Physical Disc Main: set main= in the [A0CD-*] section of MiSTer.ini\n", name);
+	Info("Set main= for [A0CD-*] in MiSTer.ini", 5000);
 }
 
 int physical_disc_is_menu_row(const char *name)
@@ -561,44 +334,20 @@ int physical_disc_launch_load_disc(void)
 
 int physical_disc_launch_busy(void)
 {
-	return mount_retry_at != 0 || menu_detecting;
+	return menu_detecting;
 }
 
 void physical_disc_launch_cancel(void)
 {
-	suppress_pce_boot_osd = 0;
-	suppress_neogeo_boot_osd_until = 0;
-	if (spinup_stage) physical_disc_close();
-	mount_retry_at = 0;
-	mount_giveup_at = 0;
-	clear_spinup_state();
 }
 
 void physical_disc_launch_reset(void)
 {
-	const char *name = user_io_get_core_name();
-	if (!name || strncasecmp(name, "A0CD-", 5) || !strcasecmp(name, "A0CD-SNES") || !strcasecmp(name, "A0CD-MDPlus")) return;
-
-	physical_disc_launch_cancel();
-	physical_disc_close();
-	physical_disc_acoustic_config(cfg.physical_disc_acoustic);
-
-	begin_mount_window();
-	clear_spinup_state();
-	mount_retry_at = GetTimer(100);
 }
 
 int physical_disc_launch_consume_startup_osd_suppression(void)
 {
-	if (suppress_neogeo_boot_osd_until)
-	{
-		if (CheckTimer(suppress_neogeo_boot_osd_until)) suppress_neogeo_boot_osd_until = 0;
-		else return 1;
-	}
-
-	if (!suppress_pce_boot_osd) return 0;
-	suppress_pce_boot_osd = 0;
-	return 1;
+	return 0;
 }
 
 void physical_disc_launch_suspend_menu_discovery(void)

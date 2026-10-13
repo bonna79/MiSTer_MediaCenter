@@ -30,7 +30,6 @@
 #include "audio.h"
 #include "joymapping.h"
 #include "support.h"
-#include "support/physical_disc/physical_disc.h"
 #include "profiling.h"
 #include "gamecontroller_db.h"
 #include "str_util.h"
@@ -6274,33 +6273,11 @@ int input_test(int getchar)
 						else if (!strcmp(cmd + 7, "unmute")) set_volume(0x80);
 						else if (cmd[7] >= '0' && cmd[7] <= '7') set_volume(0x40 - 0x30 + cmd[7]);
 					}
-					else if (!strncmp(cmd, "mount_phys", 10) &&
-						(cmd[10] == '\0' || cmd[10] == ' ' || cmd[10] == '\t'))
+					else if ((!strncmp(cmd, "mount_phys", 10) && (cmd[10] == '\0' || cmd[10] == ' ' || cmd[10] == '\t')) ||
+						(!strncmp(cmd, "swap_disc", 9) && (cmd[9] == '\0' || cmd[9] == ' ' || cmd[9] == '\t')))
 					{
-
-
-
-
-						const char *p = cmd + 10;
-						while (*p == ' ' || *p == '\t') p++;
-
-						char dev[64] = "";
-						if (*p >= '0' && *p <= '9') snprintf(dev, sizeof(dev), "/dev/sr%c", *p);
-						physical_disc_set_device(dev);
-
-
-
-						physical_disc_mount_current_core();
-					}
-					else if (!strncmp(cmd, "swap_disc", 9) &&
-						(cmd[9] == '\0' || cmd[9] == ' ' || cmd[9] == '\t'))
-					{
-
-
-
-
-
-						physical_disc_swap_current_core();
+						// discs inside the console cores belong to the MiSTer Physical Disc Main
+						printf("MiSTer_cmd: %s is handled by the MiSTer Physical Disc Main ([A0CD-*] main= in MiSTer.ini)\n", cmd);
 					}
 				}
 			}

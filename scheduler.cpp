@@ -36,7 +36,6 @@ static void scheduler_co_poll(void)
 			frame_timer();
 			input_poll(0);
 			video_poll();
-			physical_disc_launch_poll();
 		}
 
 		scheduler_yield();
