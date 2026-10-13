@@ -184,8 +184,19 @@ static int read_raw_ioctl(int lba, uint8_t *dst)
 	return 0;
 }
 
+// Tests (MediaCenter's MC_TEST): sectors from a raw 2352-byte image file.
+static int img_fd = -1;
+
 static int read_raw(int lba, int count, uint8_t *dst)
 {
+	if (img_fd >= 0)
+	{
+		ssize_t len = (ssize_t)count * RAW_SECTOR;
+		ssize_t n = pread(img_fd, dst, len, (off_t)lba * RAW_SECTOR);
+		if (n < 0) n = 0;
+		if (n < len) memset(dst + n, 0, len - n);
+		return 0;
+	}
 	for (int attempt = 0; attempt < 3 && !quit_requested; attempt++)
 	{
 		if (!read_raw_sg(lba, count, dst)) return 0;

@@ -29,6 +29,7 @@ Dentro i core delle console lavora il Main di [MiSTer Physical Disc](https://git
 | DVD-Video, anche protetti (CSS) | Parte da solo quando inserisci il disco | Menu del disco, capitoli, tracce audio, sottotitoli, avanti e indietro veloce |
 | DVD dati (DVD-R o DVD+R) con DivX, MP4, MP3… | Quando inserisci il disco si apre da solo l'elenco dei file | Come per i file |
 | Video CD 1.0, 1.1 e 2.0 | Parte da solo quando inserisci il disco | Menu PBC, capitoli, canale audio |
+| Super Video CD (MPEG-2) | Parte da solo quando inserisci il disco | Capitoli, tracce audio, avanti e indietro veloce; i menu PBC non ci sono, le tracce si vedono una dopo l'altra |
 | Video DivX, Xvid, MP4, MKV, MPEG e VOB | Da **Scripts → mediacenter**, scegliendo SD, USB o rete | Tracce audio, capitoli (o salti di 60 secondi), avanti e indietro veloce |
 | Musica MP1, MP2, MP3, Ogg, FLAC, WAV e AAC | Da **Scripts → mediacenter** | I brani di una cartella si ascoltano di seguito, come un album |
 | Immagini DVD `.iso` e cartelle `VIDEO_TS` | Da **Scripts → mediacenter** | Come un DVD |
@@ -47,7 +48,6 @@ Limiti noti:
   | H.264 10 bit (Hi10p) 1280x720 | circa 78%, scatta |
 
   Il massimo consigliato è **H.264 8 bit, 1280x720, 24-25 fotogrammi al secondo**. Per una riproduzione del tutto fluida conviene scendere a 1024x576 o 960x540, oppure a risoluzione DVD in H.264 o Xvid. Non usare H.264 a 10 bit (Hi10p) né HEVC/H.265. Si convertono con HandBrake: codifica H.264, profilo High, 8 bit.
-- I Super Video CD (MPEG-2) non vengono riprodotti.
 - I CD-R con file DivX o MP3 non partono da soli: si aprono da **Scripts → mediacenter → Disco nel lettore**.
 - L'uscita VGA a 15 kHz non è ancora stata provata.
 

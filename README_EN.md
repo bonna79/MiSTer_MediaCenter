@@ -31,6 +31,7 @@ The player's on-screen texts are in Italian.
 | DVD-Video, CSS-protected too | Starts by itself when you insert the disc | Disc menus, chapters, audio tracks, subtitles, fast forward and rewind |
 | Data DVD (DVD-R or DVD+R) with DivX, MP4, MP3… | When you insert the disc, its file list opens by itself | Same as files |
 | Video CD 1.0, 1.1 and 2.0 | Starts by itself when you insert the disc | PBC menus, chapters, audio channel |
+| Super Video CD (MPEG-2) | Starts by itself when you insert the disc | Chapters, audio tracks, fast forward and rewind; no PBC menus, the tracks play one after the other |
 | DivX, Xvid, MP4, MKV, MPEG and VOB video | From **Scripts → mediacenter**, choosing SD, USB or network | Audio tracks, chapters (or 60-second jumps), fast forward and rewind |
 | MP1, MP2, MP3, Ogg, FLAC, WAV and AAC music | From **Scripts → mediacenter** | The tracks of a folder play one after the other, like an album |
 | DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → mediacenter** | Same as a DVD |
@@ -49,7 +50,6 @@ Known limits:
   | H.264 10-bit (Hi10p) 1280x720 | about 78%, stutters |
 
   The recommended maximum is **H.264 8-bit, 1280x720, 24-25 frames per second**. For fully smooth playback go down to 1024x576 or 960x540, or to DVD resolution in H.264 or Xvid. Avoid 10-bit H.264 (Hi10p) and HEVC/H.265. Convert with HandBrake: H.264 encoder, High profile, 8-bit.
-- Super Video CDs (MPEG-2) are not played.
 - CD-Rs with DivX or MP3 files do not start by themselves: open them from **Scripts → mediacenter → Disco nel lettore** (disc in the drive).
 - The 15 kHz VGA output has not been tested yet.
 

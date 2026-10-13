@@ -260,6 +260,13 @@ static int open_audio_track(int index)
 	return 0;
 }
 
+// Super Video CD: the track being played is read from the disc through
+// media_io instead of a file, and its chapters come from ENTRIES.SVD.
+static AVIOContext *media_io = NULL;
+static int svcd_on = 0;
+static double svcd_chapter[MAX_ENTRIES];
+static int svcd_chapters = 0;
+
 static void media_close(void)
 {
 	vq_clear();
@@ -280,6 +287,11 @@ static int media_open(const char *path)
 	skip_base = AVDISCARD_DEFAULT;
 	half_lines = 0;
 	media_close();
+	if (media_io)
+	{
+		mc.fmt = avformat_alloc_context();
+		if (mc.fmt) mc.fmt->pb = media_io;
+	}
 	if (avformat_open_input(&mc.fmt, path, NULL, NULL) < 0)
 	{
 		fprintf(stderr, "mediacenter: cannot open %s\n", path);
@@ -905,7 +917,9 @@ static void draw_video_frame(AVFrame *f)
 	{
 		// Small pictures (DivX, Video CD) get whole multiples of their lines
 		// so the controls still fit and the scaler has less to enlarge.
-		int mx = f->width < 480 ? 2 : 1, my = 1;
+		// Pictures narrower than 640 (Super Video CD 480, some DivX) are
+		// doubled across too, so the controls fit across the screen.
+		int mx = f->width < 640 ? 2 : 1, my = 1;
 		while (!half && h * (my + 1) <= 1080 && h * my < 400) my++;
 		// The scaler only enlarges: a picture wider (or taller) than the
 		// screen is narrowed on the ARM, or its right side would be cut off.
@@ -1035,9 +1049,19 @@ static void media_resume(double t)
 	}
 }
 
+static int num_chapters(void)
+{
+	return svcd_on ? svcd_chapters : (int)mc.fmt->nb_chapters;
+}
+
 static int chapter_index(double t)
 {
 	int c = -1;
+	if (svcd_on)
+	{
+		for (int i = 0; i < svcd_chapters; i++) if (svcd_chapter[i] <= t + 0.5) c = i;
+		return c;
+	}
 	for (unsigned i = 0; i < mc.fmt->nb_chapters; i++)
 	{
 		AVChapter *ch = mc.fmt->chapters[i];
@@ -1048,6 +1072,7 @@ static int chapter_index(double t)
 
 static double chapter_start(int c)
 {
+	if (svcd_on) return svcd_chapter[c];
 	AVChapter *ch = mc.fmt->chapters[c];
 	return ts_seconds(ch->start, ch->time_base) - mc.start;
 }
@@ -1134,10 +1159,11 @@ static int media_play(int in_playlist)
 			case KEY_RIGHT:
 			case KEY_NEXTSONG:
 				if (in_playlist && mc.audio_only) result = END_NEXT;
-				else if (mc.fmt->nb_chapters)
+				else if (num_chapters())
 				{
 					int c = chapter_index(mc.clock) + 1;
-					if (c < (int)mc.fmt->nb_chapters) media_seek(chapter_start(c));
+					if (c < num_chapters()) media_seek(chapter_start(c));
+					else if (in_playlist && svcd_on) result = END_NEXT; // next track
 				}
 				else media_seek(mc.clock + MC_SKIP_SECONDS);
 				break;
@@ -1145,11 +1171,12 @@ static int media_play(int in_playlist)
 			case KEY_PREVIOUSSONG:
 				if (in_playlist && mc.audio_only && mc.clock < 3.0) result = END_PREV;
 				else if (mc.audio_only) media_seek(0);
-				else if (mc.fmt->nb_chapters)
+				else if (num_chapters())
 				{
 					int c = chapter_index(mc.clock);
 					if (c >= 0 && mc.clock - chapter_start(c) < 3.0) c--;
-					media_seek(c >= 0 ? chapter_start(c) : 0);
+					if (c < 0 && in_playlist && svcd_on && mc.clock < 3.0) result = END_PREV; // previous track
+					else media_seek(c >= 0 ? chapter_start(c) : 0);
 				}
 				else media_seek(mc.clock - MC_SKIP_SECONDS);
 				break;
@@ -1224,7 +1251,7 @@ static int media_play(int in_playlist)
 			{
 				if (show) draw_video_frame(show);
 				av_frame_free(&show);
-				result = in_playlist && mc.audio_only ? END_NEXT : END_DONE;
+				result = in_playlist && (mc.audio_only || svcd_on) ? END_NEXT : END_DONE;
 				break;
 			}
 		}
@@ -1253,7 +1280,7 @@ static int media_play(int in_playlist)
 			info.confirm_exit = p.confirm_exit;
 			info.time = (p.state == ST_FF || p.state == ST_REW) ? p.ff_time : mc.clock;
 			info.duration = mc.duration;
-			info.chapters = mc.fmt->nb_chapters;
+			info.chapters = num_chapters();
 			info.chapter = info.chapters ? chapter_index(info.time) + 1 : 0;
 			info.audio_mode = audio_mode;
 			info.audio_label = mc.audio_label[0] ? mc.audio_label : NULL;
@@ -1464,6 +1491,7 @@ static int wait_key(void)
 }
 
 static int reopen_screen(void);
+static int svcd_play(void);
 
 // Plays the disc in the drive: a Video CD with the Video CD player, a
 // DVD-Video with the DVD player. Returns 0 when it was one of them.
@@ -1528,6 +1556,17 @@ static int play_disc_in_drive(const char *device)
 	if (fd < 0) return -1;
 	cd_fd = fd;
 	const char *kind = (read_toc() == 0) ? detect_vcd_kind() : NULL;
+
+	// Super Video CD (MPEG-2): FFmpeg, not the Video CD player.
+	if (kind && strcmp(kind, "Video CD"))
+	{
+		printf("mediacenter: %s, %d track(s)\n", kind, track_last);
+		if (reopen_screen()) return -1;
+		svcd_play();
+		close(cd_fd);
+		cd_fd = -1;
+		return 0;
+	}
 	close(cd_fd);
 	cd_fd = -1;
 
@@ -1590,6 +1629,166 @@ static int play_file(const char *path, int in_playlist)
 	fb_native(0, 0, 0);
 	media_close();
 	return r;
+}
+
+// ---------------------------------------------------------------------------
+// Super Video CD
+// ---------------------------------------------------------------------------
+
+// The MPEG-2 tracks of a Super Video CD are Mode 2 Form 2 sectors: FFmpeg
+// gets the 2324-byte user data of each sector of the track as one file.
+static feed_t svcd_feed;
+
+static int svcd_read(void *opaque, uint8_t *buf, int size)
+{
+	feed_t *f = (feed_t *)opaque;
+	if (f->pos >= f->size || quit_requested) return AVERROR_EOF;
+
+	int first = (int)(f->pos / FORM2_DATA);
+	int count = (f->end - f->start) - first;
+	if (count > READ_BATCH) count = READ_BATCH;
+	int need = (int)((size + f->pos % FORM2_DATA + FORM2_DATA - 1) / FORM2_DATA);
+	if (count > need) count = need;
+	if (count <= 0) return AVERROR_EOF;
+
+	read_raw(f->start + first, count, f->raw);
+	int done = 0;
+	for (int i = 0; i < count && done < size && f->pos < f->size; i++)
+	{
+		sector_block(f->raw + i * RAW_SECTOR, f->block);
+		size_t off = f->pos % FORM2_DATA;
+		size_t n = FORM2_DATA - off;
+		if (n > (size_t)(size - done)) n = size - done;
+		if (n > f->size - f->pos) n = f->size - f->pos;
+		memcpy(buf + done, f->block + off, n);
+		done += (int)n;
+		f->pos += n;
+	}
+	return done ? done : AVERROR_EOF;
+}
+
+static int64_t svcd_seek(void *opaque, int64_t offset, int whence)
+{
+	feed_t *f = (feed_t *)opaque;
+	if (whence == AVSEEK_SIZE) return (int64_t)f->size;
+	whence &= ~AVSEEK_FORCE;
+	if (whence == SEEK_CUR) offset += (int64_t)f->pos;
+	else if (whence == SEEK_END) offset += (int64_t)f->size;
+	else if (whence != SEEK_SET) return -1;
+	if (offset < 0) return -1;
+	f->pos = (size_t)offset < f->size ? (size_t)offset : f->size;
+	return (int64_t)f->pos;
+}
+
+// System clock of the MPEG pack that starts at lba (or within the next few
+// sectors), in seconds; -1 when there is none.
+static double svcd_pack_time(int lba, int end)
+{
+	int count = end - lba;
+	if (count > 8) count = 8;
+	if (count <= 0) return -1;
+	read_raw(lba, count, svcd_feed.raw);
+	for (int i = 0; i < count; i++)
+	{
+		int len = 0;
+		const uint8_t *p = sector_payload(svcd_feed.raw + i * RAW_SECTOR, &len);
+		if (len < 12 || p[0] || p[1] || p[2] != 1 || p[3] != 0xBA) continue;
+		uint64_t scr;
+		if ((p[4] & 0xC0) == 0x40) // MPEG-2
+			scr = ((uint64_t)((p[4] >> 3) & 7) << 30) | ((uint64_t)(p[4] & 3) << 28) | ((uint64_t)p[5] << 20) |
+				((uint64_t)(p[6] >> 3) << 15) | ((uint64_t)(p[6] & 3) << 13) | ((uint64_t)p[7] << 5) | (p[8] >> 3);
+		else if ((p[4] & 0xF0) == 0x20) // MPEG-1
+			scr = ((uint64_t)((p[4] >> 1) & 7) << 30) | ((uint64_t)p[5] << 22) | ((uint64_t)(p[6] >> 1) << 15) |
+				((uint64_t)p[7] << 7) | (p[8] >> 1);
+		else
+			continue;
+		return scr / 90000.0;
+	}
+	return -1;
+}
+
+// Chapters of the track from the ENTRIES.SVD points that fall in it: the time
+// of each is the clock of the MPEG pack it points to.
+static void svcd_track_chapters(int track)
+{
+	svcd_chapters = 0;
+	for (int i = 0; i < num_entries && svcd_chapters < MAX_ENTRIES; i++)
+	{
+		if (entries[i].track != track) continue;
+		double t = svcd_pack_time(entries[i].lba, tracks[track].end);
+		if (t < 0) continue;
+		t -= mc.start;
+		if (t < 0) t = 0;
+		if (svcd_chapters && t <= svcd_chapter[svcd_chapters - 1]) continue;
+		svcd_chapter[svcd_chapters++] = t;
+	}
+	if (svcd_chapters == 1) svcd_chapters = 0; // only the track start
+}
+
+static int svcd_play_track(int track, int num, int total)
+{
+	feed_t *f = &svcd_feed;
+	f->start = tracks[track].start;
+	f->end = tracks[track].end;
+	f->pos = 0;
+	f->size = (size_t)(f->end - f->start) * FORM2_DATA;
+
+	const int io_size = 32 * FORM2_DATA;
+	uint8_t *io_buf = (uint8_t *)av_malloc(io_size);
+	media_io = io_buf ? avio_alloc_context(io_buf, io_size, 0, f, svcd_read, NULL, svcd_seek) : NULL;
+	if (!media_io)
+	{
+		av_free(io_buf);
+		return END_DONE;
+	}
+
+	char name[64];
+	snprintf(name, sizeof(name), "Super Video CD %d/%d", num, total);
+	int r = END_NEXT;
+	if (!media_open(name))
+	{
+		snprintf(mc.title, sizeof(mc.title), "%s", name);
+		svcd_track_chapters(track);
+		media_seek(0);
+		fprintf(stderr, "mediacenter: Super Video CD track %d (%d/%d), %d chapter(s)\n", track, num, total, svcd_chapters);
+		native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");
+		r = media_play(1);
+		native_fb = 0;
+		fb_native(0, 0, 0);
+		media_close();
+	}
+	else fprintf(stderr, "mediacenter: Super Video CD track %d has no MPEG stream\n", track);
+
+	av_freep(&media_io->buffer);
+	avio_context_free(&media_io);
+	svcd_chapters = 0;
+	return r;
+}
+
+// Plays the MPEG tracks of the disc in order, like a playlist.
+static int svcd_play(void)
+{
+	int list[MAX_TRACKS + 1], n = 0;
+	for (int t = 2; t <= track_last && t <= MAX_TRACKS; t++)
+		if (tracks[t].data) list[n++] = t;
+	if (!n)
+	{
+		fprintf(stderr, "mediacenter: the Super Video CD has no MPEG tracks\n");
+		return END_DONE;
+	}
+	read_entries();
+
+	svcd_on = 1;
+	int i = 0, r = END_DONE;
+	while (i >= 0 && i < n && !quit_requested)
+	{
+		r = svcd_play_track(list[i], i + 1, n);
+		if (r == END_QUIT || r == END_BACK) break;
+		if (r == END_PREV) i = i > 0 ? i - 1 : 0;
+		else i++;
+	}
+	svcd_on = 0;
+	return quit_requested ? END_QUIT : r;
 }
 
 // Browses a directory tree below root. Returns 1 to quit the application.
@@ -1866,6 +2065,33 @@ int main(int argc, char *argv[])
 	{
 		if (test_setup(test)) return 1;
 		osd_layout();
+		// cdimage:<raw 2352-byte image>:<lba of track 2>[:<lba of track 3>...]
+		// plays the image as the Super Video CD in the drive
+		if (arg && !strncmp(arg, "cdimage:", 8))
+		{
+			char spec[1024];
+			snprintf(spec, sizeof(spec), "%s", arg + 8);
+			char *save = NULL, *file = strtok_r(spec, ":", &save);
+			img_fd = file ? open(file, O_RDONLY | O_CLOEXEC) : -1;
+			if (img_fd < 0) return 1;
+			struct stat st;
+			fstat(img_fd, &st);
+			track_first = 1;
+			track_last = 1;
+			tracks[1].start = 0;
+			tracks[1].data = 1;
+			for (char *t; (t = strtok_r(NULL, ":", &save)) && track_last < MAX_TRACKS;)
+			{
+				tracks[++track_last].start = atoi(t);
+				tracks[track_last].data = 1;
+			}
+			for (int t = 1; t <= track_last; t++)
+				tracks[t].end = t < track_last ? tracks[t + 1].start : (int)(st.st_size / RAW_SECTOR);
+			printf("test: %s\n", detect_vcd_kind() ? detect_vcd_kind() : "not a Video CD");
+			int r = svcd_play();
+			printf("test: ended with %d\n", r);
+			return 0;
+		}
 		int r = play_file(arg, 0);
 		printf("test: ended with %d\n", r);
 		return 0;
