@@ -907,7 +907,13 @@ static void draw_video_frame(AVFrame *f)
 		// so the controls still fit and the scaler has less to enlarge.
 		int mx = f->width < 480 ? 2 : 1, my = 1;
 		while (!half && h * (my + 1) <= 1080 && h * my < 400) my++;
-		fb_native(f->width * mx, h * my, fb_aspect);
+		// The scaler only enlarges: a picture wider (or taller) than the
+		// screen is narrowed on the ARM, or its right side would be cut off.
+		int fw = f->width * mx, fh = h * my;
+		int sw = native_w ? def_w : fb_w, sh = native_w ? def_h : fb_h;
+		if (sw >= 320 && fw > sw) fw = sw;
+		if (sh >= 240 && fh > sh) fh = sh;
+		fb_native(fw, fh, fb_aspect);
 	}
 	if (!fb_mem) return;
 	fb_layout(f->width, h);
