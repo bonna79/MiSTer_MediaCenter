@@ -1,74 +1,134 @@
-# MiSTer MediaCenter
+# MiSTer MediaCenter (MMC)
 
 [Italiano](README.md) · **English**
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
 
-MiSTer MediaCenter turns the MiSTer FPGA (DE10-Nano) into a media player. A single program, with the same controls everywhere, plays:
+## What it is
 
-- Video CDs;
-- DVD-Video, copy-protected retail discs included, with their menus;
-- DivX, Xvid, MP4, MKV and MPEG video;
-- MP3, Ogg and FLAC music.
+MiSTer MediaCenter (MMC) turns the MiSTer FPGA (DE10-Nano) into a media player for video and audio discs and files. One program, with the same controls, plays DVD-Video, Video CDs, Super Video CDs, DivX/Xvid/MP4 video and music.
+
+It is made for **standard-definition** formats, at DVD resolution or lower, and for two kinds of screen:
+
+- **LCD TVs**, through HDMI, at the TV's resolution;
+- **above all CRT TVs**, through the analog VGA output at **15 kHz**: the video reaches the CRT as its original signal, 480i/576i for DVDs and 240p/288p for the menu, with no conversion.
+
+Both outputs work at the same time: the same video goes to the LCD TV over HDMI and to the CRT over VGA.
+
+The MiSTer's ARM processor reads and decodes discs and files. The FPGA handles the video output: it scales the picture for HDMI and generates the 15 kHz signal for the CRT.
 
 It reads from the USB optical drive, the SD card, USB sticks and network shares.
 
-The MiSTer's ARM processor reads and decodes discs and files. The FPGA scaler enlarges the picture to full screen.
+The package has three parts:
 
-The package contains two programs:
-
-- **`MiSTer_MediaCenter`** is the Main, the MiSTer's main program, used in the menu. When you insert a disc it recognizes it: Video CDs, DVD-Video and data DVDs open with the player, games start with the right `_Physical Disc Cores` core.
-- **`mediacenter`** is the player itself, which runs on the ARM.
-
-Inside the console cores, Anime0t4ku's [MiSTer Physical Disc](https://github.com/Anime0t4ku) Main (`MiSTer_Physical-CD`) does the work; install it separately. It reads the game disc and handles the Q subchannel, PSX LibCrypt, CD+G on the Mega CD and CHD images. The two Mains live side by side: the MiSTer switches between them by itself, following the `main=` lines in `MiSTer.ini`.
+| File | What it does |
+| --- | --- |
+| `MiSTer_MediaCenter` | The Main, the MiSTer's main program, used in the menu. When you insert a disc it recognizes it: video discs and data DVDs open with the player, games start with the right core |
+| `mediacenter` | The player itself, which runs on the ARM |
+| `menu_mediacenter.rbf` | MMC's menu core: the normal MiSTer menu plus the 15 kHz output that brings the video to the CRT |
 
 The player's on-screen texts are in Italian.
+
+## Living alongside MiSTer Physical Disc
+
+MMC works together with Anime0t4ku's [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc) Main (`MiSTer_Physical-CD`), installed separately. Each does its own part:
+
+| Who | Where it works | What it does |
+| --- | --- | --- |
+| **MiSTer MediaCenter** | In the MiSTer menu | Recognizes the inserted disc. DVD-Video, Video CDs, Super Video CDs and data DVDs open with the player; games start with the `_Physical Disc Cores` core |
+| **MiSTer Physical Disc** | Inside the console cores | Reads the game disc: Q subchannel, PSX LibCrypt protection, CD+G karaoke on the Mega CD, CHD images |
+
+The MiSTer switches between the two Mains by itself, following the `main=` lines in `MiSTer.ini`. That is why `MiSTer.ini` must be set up correctly (see [Installation](#3-edit-mediafatmisterini)).
+
+If you insert a DVD while a game is running, go back to the MiSTer menu: MMC recognizes it there and starts it.
 
 ## What it plays
 
 | Disc or file | How it starts | Features |
 | --- | --- | --- |
-| DVD-Video, CSS-protected too | Starts by itself when you insert the disc | Disc menus, chapters, audio tracks, subtitles, fast forward and rewind |
-| Data DVD (DVD-R or DVD+R) with DivX, MP4, MP3… | When you insert the disc, its file list opens by itself | Same as files |
+| DVD-Video, protected originals included (CSS) | Starts by itself when you insert the disc | Disc menus, chapters, audio tracks, subtitles, fast forward and rewind |
 | Video CD 1.0, 1.1 and 2.0 | Starts by itself when you insert the disc | PBC menus, chapters, audio channel |
-| Super Video CD (MPEG-2) | Starts by itself when you insert the disc | PBC menus, chapters, audio tracks, fast forward and rewind; without menus the tracks play one after the other |
+| Super Video CD | Starts by itself when you insert the disc | PBC menus, chapters, audio tracks, fast forward and rewind |
+| Data DVDs (DVD-R or DVD+R) with DivX, MP4, MP3… | The file list opens by itself when you insert the disc | As for files |
 | DivX, Xvid, MP4, MKV, MPEG and VOB video | From **Scripts → mediacenter**, choosing SD, USB or network | Audio tracks, chapters (or 60-second jumps), fast forward and rewind |
+| DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → mediacenter** | As a DVD |
 | MP1, MP2, MP3, Ogg, FLAC, WAV and AAC music | From **Scripts → mediacenter** | The tracks of a folder play one after the other, like an album |
-| DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → mediacenter** | Same as a DVD |
 | Audio CDs | Start by themselves, with the core set in `AUDIOCD=` or with [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi) | |
-| PSX, Saturn, Mega CD, PC Engine CD… games | Start by themselves, with the `_Physical Disc Cores` | Handled by the Physical Disc Main (Q subchannel, LibCrypt, CD+G) |
+| PSX, Saturn, Mega CD, PC Engine CD… games | Start by themselves, with the `_Physical Disc Cores` | Handled by the Physical Disc Main |
 
-Known limits:
+CD-Rs with DivX or MP3 files do not start by themselves: open them from **Scripts → mediacenter → Disco nel lettore**.
 
-- High-definition video (MKV and MP4) plays, with smooth audio, but the ARM cannot show every frame. Tests on a real MiSTer, with the figure the player writes to `/tmp/mediacenter.log`:
+## Formats and recommended resolutions
 
-  | Video | Frames not shown |
-  | --- | --- |
-  | DVD (MPEG-2 720x576) | about 1% |
-  | H.264 8-bit 1280x720 | about 10%, looks smooth |
-  | H.264 8-bit 1440x810 | about 65%, stutters |
-  | H.264 10-bit (Hi10p) 1280x720 | about 78%, stutters |
+MMC is made for standard-definition video. These are the recommended maximum resolutions:
 
-  The recommended maximum is **H.264 8-bit, 1280x720, 24-25 frames per second**. For fully smooth playback go down to 1024x576 or 960x540, or to DVD resolution in H.264 or Xvid. Avoid 10-bit H.264 (Hi10p) and HEVC/H.265. Convert with HandBrake: H.264 encoder, High profile, 8-bit.
-- CD-Rs with DivX or MP3 files do not start by themselves: open them from **Scripts → mediacenter → Disco nel lettore** (disc in the drive).
-- The 15 kHz VGA output has not been tested yet.
+| Format | Recommended maximum resolution | Result |
+| --- | --- | --- |
+| DVD-Video (MPEG-2) | 720x576 (PAL), 720x480 (NTSC) | Perfect |
+| Video CD (MPEG-1) | 352x288 (PAL), 352x240 (NTSC) | Perfect |
+| Super Video CD (MPEG-2) | 480x576 (PAL), 480x480 (NTSC) | Perfect |
+| DivX, Xvid (MPEG-4) | 720x576 | Smooth |
+| MP4, MKV in 8-bit H.264 | 720x576, at most 1024x576 | Smooth |
+| Music | Any | Perfect |
+
+**HD MP4 and MKV video, 720p and above, is not recommended.** It plays, with smooth audio, but the MiSTer cannot show every frame and the picture stutters. Measured on a real MiSTer:
+
+| Video | Frames not shown |
+| --- | --- |
+| DVD (MPEG-2 720x576) | about 1% |
+| 8-bit H.264 1280x720 | about 10% |
+| 8-bit H.264 1440x810 | about 65% |
+| 10-bit H.264 (Hi10p) 1280x720 | about 78% |
+
+The limit is in the hardware, on both sides:
+
+- **ARM:** all decoding runs on the DE10-Nano's 800 MHz ARM Cortex-A9, which has no hardware video decoder. It is enough for DVDs and DivX, not for high-definition H.264.
+- **FPGA:** there is no room for an H.264 decoder, and no free one suited to the MiSTer exists. So the FPGA only handles the video output (scaling for HDMI and the 15 kHz signal), not decoding.
+
+On a CRT, high definition brings nothing anyway: the picture is brought back to 480 or 576 lines.
+
+To watch an HD video, convert it to DVD resolution, for example with HandBrake: H.264 encoder, High profile, 8-bit, or Xvid. Avoid 10-bit H.264 (Hi10p) and HEVC/H.265.
+
+## Video output: HDMI and 15 kHz CRT
+
+- **HDMI (LCD TV):** the FPGA scaler enlarges the video to the resolution set with `video_mode` in `MiSTer.ini`, with the right shape (4:3, 16:9, 2.35:1 with black bars).
+- **15 kHz VGA (CRT TV):** the `menu_mediacenter.rbf` core sends the video to the CRT as its original signal. The menu comes out at 240p/288p; a DVD comes out interlaced at 480i (NTSC) or 576i (PAL), as from a DVD player; a 16:9 film is shown with black bars above and below (letterbox).
+
+For a CRT, add to the `[menu]` section of `MiSTer.ini`:
+
+```ini
+[menu]
+main=MiSTer_MediaCenter
+vga_scaler=0
+forced_scandoubler=0
+```
+
+Also add `composite_sync=1` if your cable or TV uses composite sync (for example with a SCART cable).
+
+The 15 kHz output has not been tested on a real CRT yet. If DVD pictures shake, the field order may need flipping: report it with a photo.
 
 ## Tested on a real MiSTer
 
 | Test | Result |
 | --- | --- |
-| Video CD | Starts by itself when the disc is inserted |
-| Original copy-protected PAL DVD (Star Wars Episode III) | Smooth playback; menus, audio tracks and subtitles work. Only 11 frames dropped out of 19286 (0.06%), no lines in fast scenes |
-| Data DVD-R with DivX files | The file list opens by itself and videos play full screen, with no audio or video defects |
+| Protected original PAL DVD (Star Wars Episode III) | Smooth, 1.4% of frames skipped. Menus, chapters, audio tracks, subtitles, fast forward and rewind work |
+| Video CDs | Perfect, they start by themselves when the disc is inserted |
+| Data DVD-R with DivX and MKV files | The file list opens by itself, full-screen video |
+| 720p H.264 MP4 | Watchable, with 10% of frames skipped |
+| Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
 | Video output used | HDMI at 1280x720 |
+
+Still to test: Super Video CD on a real disc, 15 kHz VGA output on a CRT.
 
 ## Installation
 
 ### 1. Download the files
 
-From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it into the root folder of the SD card (`/media/fat`). The folders in the zip already match the SD card.
+From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout.
 
-To try the latest version, download the files from the [Actions](../../actions) page: open the latest successful build (green tick) and download `MiSTer_MediaCenter` and `mediacenter`.
+The latest version is on the [Actions](../../actions) page. Open the latest successful run (green tick) of **Build MiSTer MediaCenter** and download `MiSTer_MediaCenter` and `mediacenter_arm`. The menu core is in the **Build MediaCenter menu core** run, file `mediacenter_rbf`.
+
+Also install the [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases) Main separately if you want to play original game discs.
 
 ### 2. Check where the files are
 
@@ -77,21 +137,21 @@ To try the latest version, download the files from the [Actions](../../actions) 
 | `MiSTer_MediaCenter` | `/media/fat/MiSTer_MediaCenter` |
 | `mediacenter` | `/media/fat/linux/mediacenter` |
 | `mediacenter.sh` | `/media/fat/Scripts/mediacenter.sh` |
+| `menu_mediacenter.rbf` | `/media/fat/linux/menu_mediacenter.rbf` |
+| `MiSTer_Physical-CD` (Physical Disc Main) | `/media/fat/MiSTer_Physical-CD` |
 
 The original Main (`/media/fat/MiSTer`) is left untouched.
 
-Protected DVDs also need the file `libdvdcss.so.2` in the `/media/fat/dvdcss/` folder. It is the same location used by [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) and its `install_dvdcss` script. It is not included for licensing reasons. Without this file only unprotected DVDs can be played.
+Protected DVDs also need `libdvdcss.so.2` in `/media/fat/dvdcss/`. This is the same location used by [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) and its `install_dvdcss` script. It is not included for licensing reasons. Without it only unprotected DVDs play.
 
 ### 3. Edit `/media/fat/MiSTer.ini`
 
 Add these lines, or correct them if they are already there:
 
 ```ini
-[MiSTer]
-PHYSICAL_DISC_BOOT=1
-
 [menu]
 main=MiSTer_MediaCenter
+PHYSICAL_DISC_BOOT=1
 
 [A0CD-*]
 main=MiSTer_Physical-CD
@@ -99,16 +159,18 @@ main=MiSTer_Physical-CD
 
 - **`[menu]`** uses MiSTer MediaCenter in the MiSTer menu, which is where discs are recognized.
 - **`[A0CD-*]`** uses the Physical Disc Main inside the `_Physical Disc Cores` (PSX, Saturn, Mega CD…). Without this line games start but the disc is not read, and a notice appears on screen. If the Physical Disc Main file on your SD card has another name, use that.
-- Each section takes a single `main=` line: if there are two, only the last one counts.
-- **`PHYSICAL_DISC_BOOT=1`** is optional: it also starts the disc that is already in the drive when you switch the MiSTer on.
+- **Each section takes a single `main=` line:** if there are two, only the last one counts. Do not put both Mains in the same section.
+- **`PHYSICAL_DISC_BOOT=1`** is optional: at power-on it starts the disc already in the drive, like a console switched on with a disc inside.
+- Physical Disc Main options, such as `MEGACD_SUBCODE_LOG` and `MEGACD_CDDA_PACED`, go in the `[A0CD-*]` section.
+- For a CRT, add the lines from [Video output](#video-output-hdmi-and-15-khz-crt) to `[menu]`.
 
-Other optional settings:
+Other optional settings, in the `[menu]` section:
 
 | Setting | Values | Effect |
 | --- | --- | --- |
 | `DVD=` | `MEDIACENTER`, `HYBRID`, `FPGA` | Chooses what opens DVD-Video. When missing, `mediacenter` is used; if `mediacenter` is not installed, the [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) core opens |
-| `AUDIOCD=` | `PSX`, `A0CD-Saturn`, `A0CD-MegaCD`, `MISTERHIFI`, … | Chooses the program or core for audio CDs |
-| `PHYSICAL_DISC_MGL=` | `0`, `1` | With `0`, automatic disc recognition is off |
+| `AUDIOCD=` | `PSX`, `A0CD-Saturn`, `A0CD-MegaCD`, `MISTERHIFI`, … | Chooses the program or core for audio CDs. With `A0CD-MegaCD`, CD+G karaoke discs show on the Mega CD |
+| `PHYSICAL_DISC_MGL=` | `0`, `1` | `0` turns automatic disc detection off |
 
 Restart the MiSTer after the changes.
 
@@ -118,30 +180,30 @@ Use the controller, with the MiSTer menu buttons.
 
 | Button | In the file list | During playback |
 | --- | --- | --- |
-| A | Open | DVD: change subtitles |
-| B | Go back | Stop |
+| A | Opens | DVD: changes subtitles |
+| B | Goes back | Stop; on Super Video CDs goes back to the first menu |
 | Start | | Play |
 | Select | | Pause |
-| ◄ ► | Previous/next page | Previous/next chapter; without chapters, jump 60 seconds; with music, change track |
-| ▲ ▼ | Up and down | Change audio track, or channel (stereo, left, right) |
+| ◄ ► | Previous/next page | Previous/next chapter; without chapters jumps 60 seconds; in music changes track |
+| ▲ ▼ | Up and down | Changes audio track, or the channel (stereo, left, right) |
 | L / R | | Rewind / fast forward |
-| Y | | DVD and Video CD: disc menu |
-| X | Exit | Exit (confirm with A) |
+| Y | | DVD, Video CD and Super Video CD: disc menu |
+| X | Exits | Exits (confirm with A) |
 
-In a DVD menu the D-pad chooses the button, **A** or **Start** confirms it and **Y** returns to the film. In a Video CD menu the ▲▼ arrows choose the entry and **A** plays it.
+In a DVD menu the D-pad picks the button, **A** or **Start** confirms it and **Y** returns to the film. In a Video CD or Super Video CD menu ▲▼ pick the entry, **A** starts it and **Start** opens the default one.
 
 ## Copying discs to CD-R
 
-Dumping games to CHD files and writing them back to CD-R, keeping the Q subchannel and the PSX LibCrypt protection, is not MediaCenter's job. [MiSTer-Disc-Tools](https://github.com/bonna79/MiSTer-Disc-Tools) does it: it is a separate program, installed on its own. CHD images with subchannel are played with the Physical Disc Main.
+Dumping games to CHD files and writing them back to CD-R, keeping the Q subchannel and the PSX LibCrypt protection, is not MMC's job. [MiSTer-Disc-Tools](https://github.com/bonna79/MiSTer-Disc-Tools) does it: it is a separate program, installed on its own. CHD images with subchannel are played with the Physical Disc Main.
 
 ## Reporting a problem
 
 Open a report on the [Issues](../../issues) page and attach:
 
 1. what you did and what happened: disc or file, title, region (PAL or NTSC);
-2. **photos or a video of the screen**, which help a lot to understand the problem;
-3. the `/tmp/mediacenter.log` file. Copy it before switching the MiSTer off, because the `/tmp` folder is emptied at every restart;
-4. the video output (HDMI, VGA, 15 kHz) and the resolution set in `MiSTer.ini`.
+2. **photos or a video of the screen**, which help a lot;
+3. the `/tmp/mediacenter.log` file, copied before switching the MiSTer off, because `/tmp` is cleared at every restart;
+4. the video output (HDMI or 15 kHz VGA) and the `MiSTer.ini` lines you changed.
 
 ## For developers
 
@@ -149,18 +211,19 @@ Open a report on the [Issues](../../issues) page and attach:
 
 | Variable | Effect |
 | --- | --- |
-| `MC_ARMSCALE=1` | Enlarges the picture on the ARM instead of the FPGA scaler |
+| `MC_ARMSCALE=1` | Scales the picture on the ARM instead of the FPGA scaler |
 | `MC_NOVSYNC=1` | Draws without waiting for vertical sync |
-| `MC_DEBUG=1` | Writes DVD navigation events to the log |
+| `MC_DEBUG=1` | Logs DVD navigation events |
 | `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking, half of the lines enlarged by the FPGA scaler and, above 30 fps, only reference pictures) |
+| `MC_TEST=...` | Runs without screen or controller: simulated keys, pictures saved to `/tmp/mc_<seconds>.ppm`. With `cdimage:<.bin file>:<track 2 sector>:...` in place of the file it plays a Super Video CD image as if it were in the drive |
 
-To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. It analyses at most the first minute of the file (Ctrl+C stops it earlier). If the result is above 100% of real time, the file can be played.
+To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. It analyzes at most the first minute of the file (Ctrl+C stops it earlier). If the result is above 100% of real time, the file can be played.
 
-During playback `mediacenter` sets the Linux framebuffer to the size of the picture with the `fb_cmd3` command, which only exists in this Main. The scaler then stretches it to the screen with the correct aspect ratio. With another Main, the ARM enlarges the picture.
+During playback `mediacenter` sets the Linux framebuffer to the picture size with the `fb_cmd3` command, which only exists in this Main. The scaler then enlarges it to the screen with the right shape. Pictures wider than the screen are narrowed on the ARM, because the scaler can only enlarge. With another Main the picture is scaled on the ARM.
 
 ### Building
 
-The `.github/workflows/build.yml` workflow builds everything on every push with GCC ARM 10.2 (`arm-none-linux-gnueabihf`). A commit with `[release]` in its message, or a `v*` tag, publishes a release with the zip; the version number is in the `VERSION` file.
+The `.github/workflows/build.yml` workflow builds the Main and the player on every push with ARM GCC 10.2 (`arm-none-linux-gnueabihf`). A commit with `[release]` in its message, or a `v*` tag, publishes a release with the zip; the version number is in the `VERSION` file. The `.github/workflows/fpga.yml` workflow builds the menu core (`fpga/menu`) with Quartus 17.0.
 
 Locally, `make` builds the Main. `mediacenter` needs FFmpeg 6.1.2, libdvdread 6.1.3 and libdvdnav 6.1.1, built statically for the ARM:
 
@@ -175,4 +238,4 @@ make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
 
 ## Origin and license
 
-MiSTer MediaCenter is derived from [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer) and from Anime0t4ku's Physical Disc support. It uses FFmpeg, libdvdread and libdvdnav. It is released under the GPL-3.0 license, like the projects it comes from: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+MiSTer MediaCenter derives from [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer), the MiSTer menu core and Anime0t4ku's Physical Disc support for physical discs. It uses FFmpeg, libdvdread and libdvdnav. It is distributed under the GPL-3.0 license, like the projects it derives from: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
