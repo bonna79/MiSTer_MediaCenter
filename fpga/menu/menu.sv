@@ -60,7 +60,7 @@ assign LED_POWER[0]= FB ? led[2] : act_cnt2[26] ? act_cnt2[25:18] > act_cnt2[7:0
 localparam CONF_STR = {
 	"MENU;UART31250,MIDI;",
 	"-  ;",
-	"V,vMC",`BUILD_DATE 
+	"V,vMCY",`BUILD_DATE 
 };
 
 wire forced_scandoubler;
@@ -362,7 +362,7 @@ wire WIDE = status[9];
 // interlaced (480i/576i) when it has 400 lines or more and the output is
 // 15 kHz. Otherwise the menu's own 240p/288p (480p/576p with the scandoubler).
 reg  PAL = 0, ILACE = 0, SCALED = 0;
-wire fb_ok = FB && LFB_FMT[2:0] == 3'b110 && LFB_WIDTH && LFB_HEIGHT;
+wire fb_ok = FB && (LFB_FMT[2:0] == 3'b110 || (LFB_FMT[5] && LFB_FMT[2:0] == 3'b100)) && LFB_WIDTH && LFB_HEIGHT;
 wire std_pal = (LFB_HEIGHT == 576 || LFB_HEIGHT == 288) ? 1'b1 :
                (LFB_HEIGHT == 480 || LFB_HEIGHT == 240) ? 1'b0 : status[4];
 wire next_pal = fb_ok ? std_pal : status[4];

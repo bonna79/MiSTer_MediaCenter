@@ -1391,6 +1391,18 @@ static int menu_is_mediacenter()
 	}
 }
 
+// The MediaCenter menu core converts a YUV 4:2:2 frame buffer to RGB
+// ("MCY" in its version string).
+int user_io_menu_yuv()
+{
+	for (int i = 0;; i++)
+	{
+		char *p = user_io_get_confstr(i);
+		if (!p) return 0;
+		if (p[0] == 'V' && strstr(p, ",vMCY")) return 1;
+	}
+}
+
 void user_io_init(const char *path, const char *xml)
 {
 	char *name;

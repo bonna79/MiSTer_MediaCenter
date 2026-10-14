@@ -329,6 +329,22 @@ static uint8_t *frame_rgb = NULL;
 static uint32_t *line_buf = NULL;
 static int *x_map = NULL;
 static int dst_x, dst_y, dst_w, dst_h, src_w, src_h;
+// MiSTer MediaCenter: framebuffer in YUV 4:2:2 (16 bits per pixel, bytes
+// Y0 U Y1 V) that the menu core converts, drawn by fb_present_yuv.
+static int fb_yuv = 0;
+static void (*fb_present_yuv)(void) = NULL;
+
+// Black, also in YUV (Y 16, U and V 128).
+static void fb_blank(uint8_t *mem, size_t len)
+{
+	if (!fb_yuv)
+	{
+		memset(mem, 0, len);
+		return;
+	}
+	uint32_t *p = (uint32_t *)mem;
+	for (size_t i = 0; i < len / 4; i++) p[i] = 0x80108010u;
+}
 
 static int fb_open(void)
 {
@@ -337,7 +353,8 @@ static int fb_open(void)
 
 	struct fb_var_screeninfo var;
 	struct fb_fix_screeninfo fix;
-	if (ioctl(fd, FBIOGET_VSCREENINFO, &var) || ioctl(fd, FBIOGET_FSCREENINFO, &fix) || var.bits_per_pixel != 32)
+	if (ioctl(fd, FBIOGET_VSCREENINFO, &var) || ioctl(fd, FBIOGET_FSCREENINFO, &fix) ||
+		var.bits_per_pixel != (fb_yuv ? 16u : 32u))
 	{
 		close(fd);
 		return -1;
@@ -356,7 +373,7 @@ static int fb_open(void)
 		fb_h = fix.smem_len / fb_stride;
 		fb_len = (size_t)fb_stride * fb_h;
 	}
-	if (!fb_w || !fb_h || fb_stride < fb_w * 4)
+	if (!fb_w || !fb_h || fb_stride < fb_w * (fb_yuv ? 2 : 4))
 	{
 		close(fd);
 		return -1;
@@ -369,7 +386,7 @@ static int fb_open(void)
 		return -1;
 	}
 
-	memset(fb_mem, 0, fb_len);
+	fb_blank(fb_mem, fb_len);
 	return 0;
 }
 
@@ -414,11 +431,14 @@ static void fb_layout(int w, int h)
 	// with 128-bit alignment hints and faults on a plain malloc block.
 	frame_rgb = NULL;
 	if (posix_memalign((void **)&frame_rgb, 64, (size_t)w * h * 4)) frame_rgb = NULL;
+	// The converters leave the alpha byte alone: set it once, so rows can go
+	// to the framebuffer as they are.
+	if (frame_rgb) memset(frame_rgb, 0xFF, (size_t)w * h * 4);
 	line_buf = (uint32_t *)malloc((size_t)dst_w * 4);
 	x_map = (int *)malloc((size_t)dst_w * sizeof(int));
 	for (int x = 0; x < dst_w; x++) x_map[x] = x * w / dst_w;
 
-	memset(fb_mem, 0, fb_len);
+	fb_blank(fb_mem, fb_len);
 }
 
 static inline uint32_t blend_px(uint32_t px, uint8_t v, uint8_t a)
@@ -438,6 +458,12 @@ static inline uint32_t blend_px(uint32_t px, uint8_t v, uint8_t a)
 static const uint32_t *video_line(int y, int *prev_sy)
 {
 	if (!have_frame || !frame_rgb || !line_buf || y < dst_y || y >= dst_y + dst_h) return NULL;
+	// Picture as big as its place on screen (MediaCenter's native frame
+	// buffer): its rows are copied straight, with no per-pixel work.
+	static int slow_draw = -1;
+	if (slow_draw < 0) slow_draw = getenv("MC_SLOWDRAW") != NULL;
+	if (!slow_draw && dst_w == src_w && dst_h == src_h)
+		return (const uint32_t *)(frame_rgb + (size_t)(y - dst_y) * src_w * 4);
 	// Source position in 1/256 of a line. A screen row that falls between two
 	// picture lines shows their average: with plain line repetition some
 	// lines appear twice as thick and edges get a visible stair pattern.
@@ -472,6 +498,11 @@ static const uint32_t *video_line(int y, int *prev_sy)
 static void fb_present(void)
 {
 	if (!fb_mem) return;
+	if (fb_yuv && fb_present_yuv)
+	{
+		fb_present_yuv();
+		return;
+	}
 	int prev_sy = -1;
 	for (int y = 0; y < fb_h; y++)
 	{

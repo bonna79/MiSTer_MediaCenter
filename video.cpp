@@ -40,7 +40,7 @@
 --  [2:0] : 011=8bpp(palette) 100=16bpp 101=24bpp 110=32bpp
 --  [3]   : 0=16bits 565 1=16bits 1555
 --  [4]   : 0=RGB  1=BGR (for 16/24/32 modes)
---  [5]   : TBD
+--  [5]   : 1=YUV 4:2:2 (16 bits, bytes Y0 U Y1 V), MediaCenter menu core only
 */
 
 #define FB_FMT_565  0b00100
@@ -49,6 +49,7 @@
 #define FB_FMT_8888 0b00110
 #define FB_FMT_PAL8 0b00011
 #define FB_FMT_RxB  0b10000
+#define FB_FMT_YUV  0b100000
 #define FB_EN       0x8000
 
 #define FB_DV_LBRD  3
@@ -4417,6 +4418,14 @@ void video_cmd(char *cmd)
 				sc_fmt = FB_FMT_565;
 				break;
 
+			// MiSTer MediaCenter's decoded video: the menu core converts it
+			case 422:
+				bpp = 2;
+				sc_fmt = FB_FMT_565 | FB_FMT_YUV;
+				rb = 0;
+				if (!is_menu() || !user_io_menu_yuv()) accept = 0;
+				break;
+
 			case 8:
 				bpp = 1;
 				sc_fmt = FB_FMT_PAL8;
@@ -4478,7 +4487,7 @@ void video_cmd(char *cmd)
 			if (cmd[6] != '2')
 			{
 				static char cmd[256];
-				sprintf(cmd, "echo %d %d %d %d %d >/sys/module/MiSTer_fb/parameters/mode", fmt, rb, width, height * fb_paged.pages, stride);
+				sprintf(cmd, "echo %d %d %d %d %d >/sys/module/MiSTer_fb/parameters/mode", fmt == 422 ? 565 : fmt, rb, width, height * fb_paged.pages, stride);
 				system(cmd);
 			}
 		}

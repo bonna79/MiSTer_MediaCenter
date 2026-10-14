@@ -233,6 +233,7 @@ void user_io_set_upload(unsigned char enable, int addr = 0);
 void user_io_file_rx_data(uint8_t *addr, uint32_t len);
 void user_io_file_info(const char *ext);
 int user_io_get_width();
+int user_io_menu_yuv();
 
 void user_io_check_reset(unsigned short modifiers, char useKeys);
 

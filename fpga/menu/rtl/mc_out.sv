@@ -6,6 +6,10 @@
 // pixel and line of every output pixel are picked by nearest neighbour, so an
 // interlaced output (480i/576i) gets the frame buffer's own lines in each
 // field. With "wide" a 16:9 picture is letterboxed on the 4:3 screen.
+//
+// Formats: 32 bits per pixel, or YUV 4:2:2 (bytes Y0 U Y1 V, frame buffer
+// format bit 5 with 16 bits per pixel) that the player writes for decoded
+// video and that is converted to RGB here.
 
 module mc_out
 (
@@ -47,6 +51,7 @@ reg [11:0] w, h;
 reg  [9:0] out_h, cols, lines, left, top;
 reg  [1:0] show_s = 0;
 reg        scale, ilc, wd;
+wire       yuv = fmt[5] && fmt[2:0] == 3'b100;
 
 // lines of the whole output picture (both fields when interlaced)
 wire [10:0] pic_h  = ilc ? {out_h, 1'b0} : {1'b0, out_h};
@@ -67,7 +72,7 @@ always @(posedge clk_vid) begin
 	left   <= (WIDTH[9:0] - cols) >> 1;
 	top    <= (out_h - lines) >> 1;
 	show_s <= {show_s[0], show};
-	active <= show_s[1] && fmt[2:0] == 3'b110 && w && h && (scale ? w <= 12'd2048 : (w <= WIDTH && h <= out_h));
+	active <= show_s[1] && (fmt[2:0] == 3'b110 || yuv) && w && h && (scale ? w <= 12'd2048 : (w <= WIDTH && h <= out_h));
 end
 
 // Scale factors, 16.16 fixed point: source pixels per output pixel and source
@@ -145,6 +150,7 @@ reg [63:0] bdata;
 assign ddr_idle = ~fetch & ~|start & ~ddr_rd;
 
 wire [12:0] colsp1 = w + 1'd1;
+wire [12:0] colsp3 = w + 2'd3;
 
 always @(posedge clk_sys) begin
 	reg [31:0] laddr;
@@ -180,7 +186,7 @@ always @(posedge clk_sys) begin
 				ddr_addr <= laddr[31:3];
 				wbank    <= bank;
 				waddr    <= 0;
-				words    <= colsp1[11:1];
+				words    <= yuv ? {1'b0, colsp3[11:2]} : colsp1[11:1];
 				fetch    <= 1;
 				start    <= 0;
 			end
@@ -201,7 +207,8 @@ reg [63:0] buffer[2048];
 always @(posedge clk_sys) if(bwe) buffer[baddr] <= bdata;
 
 reg [63:0] q;
-reg        hi, shown;
+reg  [1:0] hi;
+reg        shown, shown2;
 
 // the current line's source line is inside the picture (letterbox bars)
 reg        line_on;
@@ -216,28 +223,63 @@ always @(posedge clk_vid) begin
 end
 
 always @(posedge clk_vid) begin
-	reg  [9:0] sx;
+	reg [10:0] sx;
 	reg [37:0] px;
-	reg [31:0] p;
 
 	if(scale) begin
 		px = hc * hstep;
 		sx = px[26:16];
-		q     <= buffer[{vc[0], px[26:17]}];
-		hi    <= px[16];
-		shown <= active && hc < WIDTH && vc < out_h && line_on;
 	end
 	else begin
-		sx     = hc - left;
-		q     <= buffer[{vc[0], 1'b0, sx[9:1]}];
-		hi    <= sx[0];
-		shown <= active && hc >= left && sx < cols && vc >= top && vc - top < lines;
+		sx = hc - left;
 	end
+	if(yuv) q <= buffer[{vc[0], 1'b0, sx[10:2]}];
+	else    q <= buffer[{vc[0], sx[10:1]}];
+	hi    <= sx[1:0];
+	shown <= scale ? (active && hc < WIDTH && vc < out_h && line_on)
+	               : (active && hc >= left && sx < cols && vc >= top && vc - top < lines);
+end
 
-	p = hi ? q[63:32] : q[31:0];
-	if(!shown)      rgb <= 0;
-	else if(fmt[4]) rgb <= p[23:0];
-	else            rgb <= {p[7:0], p[15:8], p[23:16]};
+// RGB, or the products of the YUV to RGB conversion (BT.601 limited range,
+// 8.8 fixed point), then their sums bounded to 0..255.
+reg signed [21:0] cy, cr, cgu, cgv, cb;
+reg        [23:0] rgb2;
+reg               yuv2;
+
+function [7:0] clip(input signed [21:0] v);
+	reg signed [21:0] t;
+	begin
+		t = v + 22'sd128;
+		clip = t < 0 ? 8'd0 : t >= 22'sd65536 ? 8'd255 : t[15:8];
+	end
+endfunction
+
+always @(posedge clk_vid) begin
+	reg [31:0] p;
+	reg  [7:0] y, u, v;
+
+	if(yuv) begin
+		p = hi[1] ? q[63:32] : q[31:0];
+		y = hi[0] ? p[23:16] : p[7:0];
+		u = p[15:8];
+		v = p[31:24];
+	end
+	else begin
+		p = hi[0] ? q[63:32] : q[31:0];
+		y = 0; u = 0; v = 0;
+	end
+	cy  <= ($signed({3'b000, y}) - 11'sd16)  * 11'sd298;
+	cr  <= ($signed({3'b000, v}) - 11'sd128) * 11'sd409;
+	cgu <= ($signed({3'b000, u}) - 11'sd128) * 11'sd100;
+	cgv <= ($signed({3'b000, v}) - 11'sd128) * 11'sd208;
+	cb  <= ($signed({3'b000, u}) - 11'sd128) * 11'sd516;
+	rgb2   <= fmt[4] ? p[23:0] : {p[7:0], p[15:8], p[23:16]};
+	yuv2   <= yuv;
+	shown2 <= shown;
+
+	if(!shown2)    rgb <= 0;
+	else if(yuv2)  rgb <= {clip(cy + cr), clip(cy - cgu - cgv), clip(cy + cb)};
+	else           rgb <= rgb2;
 end
 
 endmodule

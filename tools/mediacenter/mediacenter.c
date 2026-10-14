@@ -267,8 +267,15 @@ static int svcd_on = 0;
 static double svcd_chapter[MAX_ENTRIES];
 static int svcd_chapters = 0;
 
+// The picture shown in a YUV framebuffer (a reference to the decoded frame)
+// and whether it is shown every other line (light mode).
+static AVFrame *yuv_last;
+static int yuv_half;
+static int yuv_stream = -1;  // the file's pictures go out as YUV: -1 not decided yet
+
 static void media_close(void)
 {
+	if (yuv_last) av_frame_unref(yuv_last);
 	vq_clear();
 	if (mc.vdec) avcodec_free_context(&mc.vdec);
 	if (mc.adec) avcodec_free_context(&mc.adec);
@@ -284,6 +291,7 @@ static void media_close(void)
 
 static int media_open(const char *path)
 {
+	yuv_stream = -1;
 	skip_base = AVDISCARD_DEFAULT;
 	half_lines = 0;
 	media_close();
@@ -791,8 +799,8 @@ static void fb_close(void)
 
 static void fb_clear(void)
 {
-	if (fb_map && !fb_fake) memset(fb_map, 0, fb_map_len);
-	else if (fb_mem) memset(fb_mem, 0, fb_len);
+	if (fb_map && !fb_fake) fb_blank(fb_map, fb_map_len);
+	else if (fb_mem) fb_blank(fb_mem, fb_len);
 }
 
 // Draws the picture into the next page and shows it.
@@ -831,10 +839,22 @@ static void screen_rebuild(void)
 	have_frame = 0;
 }
 
+// A YUV 4:2:2 framebuffer needs the MediaCenter menu core (version "MCY")
+// and a Main that knows it; cleared the first time it is refused.
+static int yuv_ok = 1;
+
+static void fb_native_fmt(int w, int h, double aspect, int yuv);
+
 static void fb_native(int w, int h, double aspect)
 {
+	fb_native_fmt(w, h, aspect, 0);
+}
+
+static void fb_native_fmt(int w, int h, double aspect, int yuv)
+{
 	if (!native_ok || !fb_mem) return;
-	if (w == native_w && h == native_h && (!w || aspect == native_aspect)) return;
+	if (!w) yuv = 0;
+	if (w == native_w && h == native_h && (!w || aspect == native_aspect) && yuv == fb_yuv) return;
 	if (!native_w)
 	{
 		def_w = fb_w;
@@ -847,7 +867,8 @@ static void fb_native(int w, int h, double aspect)
 		free(fb_mem);
 		fb_w = want_w;
 		fb_h = want_h;
-		fb_stride = fb_w * 4;
+		fb_yuv = yuv;
+		fb_stride = fb_w * (yuv ? 2 : 4);
 		fb_len = (size_t)fb_stride * fb_h;
 		fb_mem = (uint8_t *)calloc(1, fb_len);
 	}
@@ -860,7 +881,7 @@ static void fb_native(int w, int h, double aspect)
 			return;
 		}
 		char cmd[96];
-		if (w) snprintf(cmd, sizeof(cmd), "fb_cmd3 8888 1 %d %d %d 1000\n", w, h, (int)(aspect * 1000 + 0.5));
+		if (w) snprintf(cmd, sizeof(cmd), "fb_cmd3 %s %d %d %d 1000\n", yuv ? "422 0" : "8888 1", w, h, (int)(aspect * 1000 + 0.5));
 		else snprintf(cmd, sizeof(cmd), "fb_cmd3 default\n");
 		int ok = write(fd, cmd, strlen(cmd)) > 0;
 		close(fd);
@@ -873,9 +894,15 @@ static void fb_native(int w, int h, double aspect)
 			int f = open("/dev/fb0", O_RDWR | O_CLOEXEC);
 			struct fb_var_screeninfo var;
 			if (f >= 0 && !ioctl(f, FBIOGET_VSCREENINFO, &var))
-				changed = (int)var.xres == want_w &&
+				changed = (int)var.xres == want_w && var.bits_per_pixel == (yuv ? 16u : 32u) &&
 					((int)var.yres == want_h || (w && (int)var.yres == want_h * FB_PAGES));
 			if (f >= 0) close(f);
+		}
+		if (!changed && yuv)
+		{
+			fprintf(stderr, "mediacenter: YUV framebuffer not available (needs the MediaCenter menu core and Main), colours converted on the ARM\n");
+			yuv_ok = 0;
+			return;
 		}
 		if (!changed)
 		{
@@ -884,6 +911,7 @@ static void fb_native(int w, int h, double aspect)
 			return;
 		}
 		fb_close();
+		fb_yuv = yuv;
 		if (fb_open_pages(w ? want_h : 0))
 		{
 			fprintf(stderr, "mediacenter: framebuffer lost\n");
@@ -891,13 +919,106 @@ static void fb_native(int w, int h, double aspect)
 			return;
 		}
 	}
-	fprintf(stderr, "mediacenter: framebuffer %dx%d%s%s\n", fb_w, fb_h, w ? " stretched by the scaler" : "",
-		fb_pages > 1 ? ", 3 pages" : "");
+	fprintf(stderr, "mediacenter: framebuffer %dx%d%s%s%s\n", fb_w, fb_h, w ? " stretched by the scaler" : "",
+		fb_pages > 1 ? ", 3 pages" : "", fb_yuv ? ", YUV converted by the FPGA" : "");
 	native_w = w;
 	native_h = h;
 	native_aspect = aspect;
 	fb_par = w ? aspect * h / w : 1.0;
 	screen_rebuild();
+}
+
+// Time spent drawing pictures, reported in the log.
+static double draw_convert, draw_present;
+static int draw_count;
+
+#if defined(__arm__)
+#pragma GCC push_options
+#pragma GCC target("fpu=neon")
+#include <arm_neon.h>
+#endif
+
+// One row of 4:2:0 planes as 4:2:2 bytes Y0 U Y1 V.
+static void pack_yuyv(uint8_t *dst, const uint8_t *y, const uint8_t *u, const uint8_t *v, int w)
+{
+	int x = 0;
+#if defined(__arm__)
+	for (; x + 32 <= w; x += 32)
+	{
+		uint8x16x2_t yy = vld2q_u8(y + x);
+		uint8x16x4_t o;
+		o.val[0] = yy.val[0];
+		o.val[1] = vld1q_u8(u + x / 2);
+		o.val[2] = yy.val[1];
+		o.val[3] = vld1q_u8(v + x / 2);
+		vst4q_u8(dst + 2 * x, o);
+	}
+#endif
+	for (; x + 1 < w; x += 2)
+	{
+		dst[2 * x] = y[x];
+		dst[2 * x + 1] = u[x / 2];
+		dst[2 * x + 2] = y[x + 1];
+		dst[2 * x + 3] = v[x / 2];
+	}
+}
+
+#if defined(__arm__)
+#pragma GCC pop_options
+#endif
+
+// fb_present for a YUV framebuffer: the picture is the size of the
+// framebuffer; the controls are blended in grey (Y toward their level, U and
+// V toward 128).
+static void yuv_draw(void)
+{
+	static uint8_t *row_buf;
+	static int row_size;
+	if (row_size < fb_stride)
+	{
+		free(row_buf);
+		row_buf = (uint8_t *)malloc(fb_stride);
+		row_size = row_buf ? fb_stride : 0;
+		if (!row_buf) return;
+	}
+	AVFrame *f = yuv_last;
+	int w = fb_w < (f ? f->width : 0) ? fb_w : (f ? f->width : 0);
+	w &= ~1;
+	for (int y = 0; y < fb_h; y++)
+	{
+		uint8_t *out = fb_mem + (size_t)y * fb_stride;
+		int band = y >= ovl_y && ovl_shown && ovl_a;
+		int ly = yuv_half ? 2 * y : y, cy = yuv_half ? y : y / 2;
+		if (!have_frame || !f || !f->data[0] || ly >= f->height)
+		{
+			fb_blank(row_buf, (size_t)fb_w * 2);
+		}
+		else
+		{
+			fb_blank(row_buf + w * 2, (size_t)(fb_w - w) * 2);
+			pack_yuyv(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+				f->data[2] + (size_t)cy * f->linesize[2], w);
+		}
+		if (band)
+		{
+			const uint8_t *a = ovl_a + (size_t)(y - ovl_y) * fb_w;
+			const uint8_t *v = ovl_v + (size_t)(y - ovl_y) * fb_w;
+			for (int x = 0; x + 1 < fb_w; x += 2)
+			{
+				if (!a[x] && !a[x + 1]) continue;
+				uint8_t *p = row_buf + 2 * x;
+				for (int k = 0; k < 2; k++)
+				{
+					unsigned al = a[x + k], vy = 16 + v[x + k] * 219 / 255;
+					p[2 * k] = (uint8_t)((p[2 * k] * (255 - al) + vy * al + 127) / 255);
+				}
+				unsigned ac = (a[x] + a[x + 1] + 1) / 2;
+				p[1] = (uint8_t)((p[1] * (255 - ac) + 128 * ac + 127) / 255);
+				p[3] = (uint8_t)((p[3] * (255 - ac) + 128 * ac + 127) / 255);
+			}
+		}
+		memcpy(out, row_buf, (size_t)fb_w * 2);
+	}
 }
 
 // Converts and draws a decoded picture.
@@ -927,7 +1048,31 @@ static void draw_video_frame(AVFrame *f)
 		int sw = native_w ? def_w : fb_w, sh = native_w ? def_h : fb_h;
 		if (sw >= 320 && fw > sw) fw = sw;
 		if (sh >= 240 && fh > sh) fh = sh;
-		fb_native(fw, fh, fb_aspect);
+		// A picture drawn at its own size goes to the framebuffer as YUV and
+		// the FPGA converts the colours: the ARM only copies it. Decided on
+		// the first picture of a file (interlaced video stays in RGB, for
+		// the deinterlacing).
+		if (yuv_stream < 0)
+			yuv_stream = yuv_ok && !getenv("MC_NOYUV") && !frame_overlay && f->format == AV_PIX_FMT_YUV420P &&
+				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && fw == f->width && fh == h && !(fw & 1);
+		int yuv = yuv_stream && yuv_ok && fw == f->width && fh == h && f->format == AV_PIX_FMT_YUV420P;
+		fb_native_fmt(fw, fh, fb_aspect, yuv);
+		if (yuv && !fb_yuv) fb_native_fmt(fw, fh, fb_aspect, 0); // refused
+		if (fb_yuv && fb_mem)
+		{
+			double t_start = now_seconds();
+			fb_layout(f->width, h);
+			if (!yuv_last) yuv_last = av_frame_alloc();
+			if (!yuv_last) return;
+			av_frame_unref(yuv_last);
+			if (av_frame_ref(yuv_last, f) < 0) return;
+			yuv_half = half;
+			have_frame = 1;
+			fb_present_paged();
+			draw_present += now_seconds() - t_start;
+			draw_count++;
+			return;
+		}
 	}
 	if (!fb_mem) return;
 	fb_layout(f->width, h);
@@ -935,6 +1080,7 @@ static void draw_video_frame(AVFrame *f)
 	mc.sws = sws_getCachedContext(mc.sws, f->width, h, (enum AVPixelFormat)f->format,
 		f->width, h, fb_bgr ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA, SWS_POINT, NULL, NULL, NULL);
 	if (!mc.sws) return;
+	double t_start = now_seconds();
 	int stride = src_w * 4;
 	if (!(stride & 15))
 	{
@@ -964,7 +1110,11 @@ static void draw_video_frame(AVFrame *f)
 	if (f->flags & AV_FRAME_FLAG_INTERLACED) deinterlace_rgb();
 	if (frame_overlay) frame_overlay();
 	have_frame = 1;
+	double t_conv = now_seconds();
 	fb_present_paged();
+	draw_convert += t_conv - t_start;
+	draw_present += now_seconds() - t_conv;
+	draw_count++;
 }
 
 // Takes the frames that are due; returns the most recent one (owned by the
@@ -1117,6 +1267,8 @@ static int media_play(int in_playlist)
 	if (mc.audio_only) draw_audio_screen();
 	vt_start();
 	frames_shown = frames_dropped = 0;
+	draw_convert = draw_present = 0;
+	draw_count = 0;
 	double played = 0;
 	// The loop that reads the file and sends the sound runs ahead of the
 	// video decoding threads, so the sound keeps flowing on a heavy stream.
@@ -1340,6 +1492,9 @@ static int media_play(int in_playlist)
 		printf("mediacenter: %.0f s played, pictures shown %d (%.1f per second", played, frames_shown, frames_shown / played);
 		if (fps > 0) printf(" of %.2f, %.1f%% not shown", fps, 100.0 * (1.0 - frames_shown / (played * fps)));
 		printf("), dropped late %d\n", frames_dropped);
+		if (draw_count)
+			printf("mediacenter: per picture: colour conversion %.1f ms, drawing on screen %.1f ms\n",
+				1000 * draw_convert / draw_count, 1000 * draw_present / draw_count);
 	}
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
 	audio_close();
@@ -2153,7 +2308,8 @@ static int bench(const char *path)
 	if (media_open(path)) return 1;
 	int frames = 0;
 	double t0 = now_seconds();
-	double t_decode = 0, t_convert = 0, t_copy = 0;
+	double t_decode = 0, t_convert = 0, t_copy = 0, t_yuv = 0;
+	int yuv_frames = 0;
 	uint8_t *rgb = NULL, *fb_copy = NULL;
 	size_t rgb_size = 0;
 	// The first 60 s of media are enough to judge; Ctrl+C stops earlier.
@@ -2196,6 +2352,21 @@ static int bench(const char *path)
 			t_convert += b - a;
 			if (fb_copy) memcpy(fb_copy, rgb, (size_t)rs * h);
 			t_copy += now_seconds() - b;
+			// what the player does instead with the FPGA converting (YUV)
+			if (f->format == AV_PIX_FMT_YUV420P && fb_copy)
+			{
+				int half = h != f->height;
+				b = now_seconds();
+				for (int y = 0; y < h; y++)
+				{
+					int ly = half ? 2 * y : y, cy = half ? y : y / 2;
+					pack_yuyv(rgb, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+						f->data[2] + (size_t)cy * f->linesize[2], f->width & ~1);
+					memcpy(fb_copy + (size_t)y * f->width * 2, rgb, (size_t)f->width * 2);
+				}
+				t_yuv += now_seconds() - b;
+				yuv_frames++;
+			}
 		}
 		frames += mc.vq_count;
 		vq_clear();
@@ -2216,6 +2387,9 @@ static int bench(const char *path)
 		if (fps > 0) printf(", time available %.1f ms", 1000 / fps);
 		printf("\nmediacenter: colour conversion and copy are %.0f%% of the work\n",
 			100 * (t_convert + t_copy) / (t_decode + t_convert + t_copy));
+		if (yuv_frames)
+			printf("mediacenter: with the FPGA converting (YUV): copy %.1f ms per picture instead of %.1f ms\n",
+				1000 * t_yuv / yuv_frames, 1000 * (t_convert + t_copy) / frames);
 	}
 	media_close();
 	return 0;
@@ -2266,7 +2440,25 @@ static int test_input(double now)
 					for (int x = 0; x < fb_w; x++)
 					{
 						const uint8_t *px = fb_mem + (size_t)y * fb_stride + x * 4;
-						uint8_t rgb[3] = { px[fb_bgr ? 2 : 0], px[1], px[fb_bgr ? 0 : 2] };
+						uint8_t rgb[3] = { 0, 0, 0 };
+						if (fb_yuv)
+						{
+							// as the menu core converts it
+							const uint8_t *q = fb_mem + (size_t)y * fb_stride + (x & ~1) * 2;
+							int cy = (q[(x & 1) * 2] - 16) * 298, cu = q[1] - 128, cv = q[3] - 128;
+							int c[3] = { cy + 409 * cv, cy - 100 * cu - 208 * cv, cy + 516 * cu };
+							for (int k = 0; k < 3; k++)
+							{
+								int t = (c[k] + 128) >> 8;
+								rgb[k] = t < 0 ? 0 : t > 255 ? 255 : t;
+							}
+						}
+						else
+						{
+							rgb[0] = px[fb_bgr ? 2 : 0];
+							rgb[1] = px[1];
+							rgb[2] = px[fb_bgr ? 0 : 2];
+						}
 						fwrite(rgb, 1, 3, f);
 					}
 				fclose(f);
@@ -2304,6 +2496,8 @@ static int test_setup(const char *spec)
 	if (sh) snprintf(test_shots, sizeof(test_shots), "%s", sh + 1);
 	fb_w = 640;
 	fb_h = 480;
+	const char *size = getenv("MC_TESTFB"); // another screen size, "1280x720"
+	if (size) sscanf(size, "%dx%d", &fb_w, &fb_h);
 	fb_stride = fb_w * 4;
 	fb_len = (size_t)fb_stride * fb_h;
 	fb_bgr = 1;
@@ -2316,6 +2510,7 @@ static int test_setup(const char *spec)
 
 int main(int argc, char *argv[])
 {
+	fb_present_yuv = yuv_draw;
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
 	signal(SIGHUP, on_signal);

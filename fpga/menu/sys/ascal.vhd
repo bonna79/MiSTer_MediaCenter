@@ -540,6 +540,10 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_dcpt_clr, o_dcpt_inc : std_logic;
 	SIGNAL o_dcptv_clr, o_dcptv_inc : std_logic_vector(1 TO 12);
 	SIGNAL o_hpixs,o_hpix0,o_hpix1,o_hpix2,o_hpix3 : type_pix;
+	-- MiSTer MediaCenter: YUV 4:2:2 frame buffer (format bit 5), converted
+	-- to RGB here so the ARM only copies the decoded picture.
+	SIGNAL o_yuv_u : unsigned(7 DOWNTO 0);
+	SIGNAL o_yuv_y,o_yuv_r,o_yuv_gu,o_yuv_gv,o_yuv_b : signed(21 DOWNTO 0);
 	SIGNAL o_hpixq : arr_pixq(2 TO 8);
 	ATTRIBUTE ramstyle OF o_hpixq : SIGNAL IS "logic"; -- avoid blockram shift register
 	SIGNAL o_vpixq, o_vpixq_pre : arr_pix(0 TO 3);
@@ -729,6 +733,20 @@ ARCHITECTURE rtl OF ascal IS
 			WHEN OTHERS => -- 32bpp
 				RETURN to_integer(adrs(NB_LA-1 DOWNTO 2));
 		END CASE;
+	END FUNCTION;
+
+	-- (sum of the 8.8 fixed point products + 0.5) bounded to 0..255
+	FUNCTION yuv_clip(v : signed(21 DOWNTO 0)) RETURN unsigned IS
+		VARIABLE t : signed(21 DOWNTO 0);
+	BEGIN
+		t:=v+128;
+		IF t<0 THEN
+			RETURN x"00";
+		ELSIF t>=65536 THEN
+			RETURN x"FF";
+		ELSE
+			RETURN unsigned(t(15 DOWNTO 8));
+		END IF;
 	END FUNCTION;
 
 	FUNCTION swap(d : unsigned(N_DW-1 DOWNTO 0)) RETURN unsigned IS
@@ -1866,6 +1884,7 @@ BEGIN
 		VARIABLE prim_v,last_v,bib_v : std_logic;
 		VARIABLE shift_v : unsigned(0 TO N_DW+15);
 		VARIABLE hpix_v : type_pix;
+		VARIABLE yuv_y_v,yuv_u_v,yuv_v_v : unsigned(7 DOWNTO 0);
 		VARIABLE hcarry_v,vcarry_v : boolean;
 		VARIABLE dif_v : natural RANGE 0 TO 8*OHRESH-1;
 		VARIABLE off_v : natural RANGE 0 TO 15;
@@ -2295,12 +2314,35 @@ BEGIN
 				shift_v:=shift_opack(o_acpt4,o_shift,o_dr,o_format);
 				o_shift<=shift_v;
 				o_hpixs<=shift_opix(shift_v,o_format);
+
+				-- YUV 4:2:2, bytes Y0 U Y1 V: an even pixel takes U from its own
+				-- second byte and V from the next pixel's, an odd one keeps the
+				-- U of the pixel before. BT.601 limited range, 8.8 fixed point.
+				yuv_y_v:=shift_v(0 TO 7);
+				IF (o_acpt4 MOD 2)=0 THEN
+					yuv_u_v:=shift_v(8 TO 15);
+					yuv_v_v:=shift_v(24 TO 31);
+					o_yuv_u<=shift_v(8 TO 15);
+				ELSE
+					yuv_u_v:=o_yuv_u;
+					yuv_v_v:=shift_v(8 TO 15);
+				END IF;
+				o_yuv_y <=(signed(resize(yuv_y_v,11))-16)*298;
+				o_yuv_r <=(signed(resize(yuv_v_v,11))-128)*409;
+				o_yuv_gu<=(signed(resize(yuv_u_v,11))-128)*100;
+				o_yuv_gv<=(signed(resize(yuv_v_v,11))-128)*208;
+				o_yuv_b <=(signed(resize(yuv_u_v,11))-128)*516;
 			END IF;
 
 			IF o_sh4='1' THEN
 				hpix_v:=o_hpixs;
 				IF o_format(4)='1' THEN -- Swap B <-> R
 					hpix_v:=(r=>o_hpixs.b,g=>o_hpixs.g,b=>o_hpixs.r);
+				END IF;
+				IF o_format(5)='1' AND o_format(2 DOWNTO 0)="100" THEN
+					hpix_v:=(r=>yuv_clip(o_yuv_y+o_yuv_r),
+									 g=>yuv_clip(o_yuv_y-o_yuv_gu-o_yuv_gv),
+									 b=>yuv_clip(o_yuv_y+o_yuv_b));
 				END IF;
 				IF o_format(2 DOWNTO 0)="011" THEN
 					-- 8bpp indexed colour mode
