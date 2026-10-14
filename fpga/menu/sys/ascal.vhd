@@ -540,10 +540,21 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_dcpt_clr, o_dcpt_inc : std_logic;
 	SIGNAL o_dcptv_clr, o_dcptv_inc : std_logic_vector(1 TO 12);
 	SIGNAL o_hpixs,o_hpix0,o_hpix1,o_hpix2,o_hpix3 : type_pix;
-	-- MiSTer MediaCenter: YUV 4:2:2 frame buffer (format bit 5), converted
-	-- to RGB here so the ARM only copies the decoded picture.
+	-- MiSTer MediaCenter: YUV 4:2:2 frame buffer (format bit 5, 16 bits per
+	-- pixel, bytes Y0 U Y1 V). The pixels go through the scaler as Y,U,V in
+	-- place of R,G,B and are converted to RGB at the output, so the ARM only
+	-- copies the decoded picture.
+	SIGNAL o_acpt5 : natural RANGE 0 TO 15;
 	SIGNAL o_yuv_u : unsigned(7 DOWNTO 0);
-	SIGNAL o_yuv_y,o_yuv_r,o_yuv_gu,o_yuv_gv,o_yuv_b : signed(21 DOWNTO 0);
+	SIGNAL o_yuvm : std_logic;
+	SIGNAL o_c12_r,o_c12_g,o_c12_b : unsigned(7 DOWNTO 0);
+	SIGNAL o_c12_hs,o_c12_vs,o_c12_de,o_c12_vbl,o_c12_brd,o_c12_pic : std_logic;
+	SIGNAL o_c13_r,o_c13_g,o_c13_b : unsigned(7 DOWNTO 0);
+	SIGNAL o_c13_hs,o_c13_vs,o_c13_de,o_c13_vbl,o_c13_brd,o_c13_yuv : std_logic;
+	SIGNAL o_c13_y,o_c13_vr,o_c13_ug,o_c13_vg,o_c13_ub : signed(21 DOWNTO 0);
+	SIGNAL o_c14_r,o_c14_g,o_c14_b : unsigned(7 DOWNTO 0);
+	SIGNAL o_c14_hs,o_c14_vs,o_c14_de,o_c14_vbl,o_c14_brd,o_c14_yuv : std_logic;
+	SIGNAL o_c14_sr,o_c14_sg,o_c14_sb : signed(21 DOWNTO 0);
 	SIGNAL o_hpixq : arr_pixq(2 TO 8);
 	ATTRIBUTE ramstyle OF o_hpixq : SIGNAL IS "logic"; -- avoid blockram shift register
 	SIGNAL o_vpixq, o_vpixq_pre : arr_pix(0 TO 3);
@@ -735,7 +746,7 @@ ARCHITECTURE rtl OF ascal IS
 		END CASE;
 	END FUNCTION;
 
-	-- (sum of the 8.8 fixed point products + 0.5) bounded to 0..255
+	-- 8.8 fixed point sum + 0.5, bounded to 0..255
 	FUNCTION yuv_clip(v : signed(21 DOWNTO 0)) RETURN unsigned IS
 		VARIABLE t : signed(21 DOWNTO 0);
 	BEGIN
@@ -1884,7 +1895,6 @@ BEGIN
 		VARIABLE prim_v,last_v,bib_v : std_logic;
 		VARIABLE shift_v : unsigned(0 TO N_DW+15);
 		VARIABLE hpix_v : type_pix;
-		VARIABLE yuv_y_v,yuv_u_v,yuv_v_v : unsigned(7 DOWNTO 0);
 		VARIABLE hcarry_v,vcarry_v : boolean;
 		VARIABLE dif_v : natural RANGE 0 TO 8*OHRESH-1;
 		VARIABLE off_v : natural RANGE 0 TO 15;
@@ -2304,6 +2314,9 @@ BEGIN
 			END CASE;
 
 			o_acpt1<=o_acpt; o_acpt2<=o_acpt1; o_acpt3<=o_acpt2; o_acpt4<=o_acpt3;
+			IF o_sh3='1' THEN
+				o_acpt5<=o_acpt4;
+			END IF;
 			o_ad1<=o_ad; o_ad2<=o_ad1; o_ad3<=o_ad2;
 			o_sh1<=o_sh; o_sh2<=o_sh1; o_sh3<=o_sh2; o_sh4<=o_sh3;
 			o_lastt1<=o_last;   o_lastt2<=o_lastt1;
@@ -2314,24 +2327,6 @@ BEGIN
 				shift_v:=shift_opack(o_acpt4,o_shift,o_dr,o_format);
 				o_shift<=shift_v;
 				o_hpixs<=shift_opix(shift_v,o_format);
-
-				-- YUV 4:2:2, bytes Y0 U Y1 V: an even pixel takes U from its own
-				-- second byte and V from the next pixel's, an odd one keeps the
-				-- U of the pixel before. BT.601 limited range, 8.8 fixed point.
-				yuv_y_v:=shift_v(0 TO 7);
-				IF (o_acpt4 MOD 2)=0 THEN
-					yuv_u_v:=shift_v(8 TO 15);
-					yuv_v_v:=shift_v(24 TO 31);
-					o_yuv_u<=shift_v(8 TO 15);
-				ELSE
-					yuv_u_v:=o_yuv_u;
-					yuv_v_v:=shift_v(8 TO 15);
-				END IF;
-				o_yuv_y <=(signed(resize(yuv_y_v,11))-16)*298;
-				o_yuv_r <=(signed(resize(yuv_v_v,11))-128)*409;
-				o_yuv_gu<=(signed(resize(yuv_u_v,11))-128)*100;
-				o_yuv_gv<=(signed(resize(yuv_v_v,11))-128)*208;
-				o_yuv_b <=(signed(resize(yuv_u_v,11))-128)*516;
 			END IF;
 
 			IF o_sh4='1' THEN
@@ -2340,9 +2335,14 @@ BEGIN
 					hpix_v:=(r=>o_hpixs.b,g=>o_hpixs.g,b=>o_hpixs.r);
 				END IF;
 				IF o_format(5)='1' AND o_format(2 DOWNTO 0)="100" THEN
-					hpix_v:=(r=>yuv_clip(o_yuv_y+o_yuv_r),
-									 g=>yuv_clip(o_yuv_y-o_yuv_gu-o_yuv_gv),
-									 b=>yuv_clip(o_yuv_y+o_yuv_b));
+					-- YUV 4:2:2: an even pixel has U in its second byte and V in
+					-- the next pixel's, an odd one keeps the U of the pixel before.
+					IF (o_acpt5 MOD 2)=0 THEN
+						hpix_v:=(r=>o_shift(0 TO 7),g=>o_shift(8 TO 15),b=>o_shift(24 TO 31));
+						o_yuv_u<=o_shift(8 TO 15);
+					ELSE
+						hpix_v:=(r=>o_shift(0 TO 7),g=>o_yuv_u,b=>o_shift(8 TO 15));
+					END IF;
 				END IF;
 				IF o_format(2 DOWNTO 0)="011" THEN
 					-- 8bpp indexed colour mode
@@ -2351,6 +2351,9 @@ BEGIN
 				END IF;
 				IF (o_newres > 0) then
 					hpix_v := (others => (others => '0'));
+					IF o_format(5)='1' THEN -- black in YUV
+						hpix_v := (r=>x"10",g=>x"80",b=>x"80");
+					END IF;
 				END IF;
 				o_hpix0<=hpix_v;
 				o_hpix1<=o_hpix0;
@@ -3026,48 +3029,81 @@ BEGIN
 				o_v_poly_pix<=poly_final(o_v_poly_t);
 
 				-- CYCLE 12 -----------------------------------------
-				o_hs<=o_hsv(11);
-				o_vs<=o_vsv(11);
-				o_de<=o_dev(11);
-				o_vbl<=o_end(11);
-				o_r<=x"00";
-				o_g<=x"00";
-				o_b<=x"00";
-				o_brd<= not o_pev(11);
+				o_c12_hs<=o_hsv(11);
+				o_c12_vs<=o_vsv(11);
+				o_c12_de<=o_dev(11);
+				o_c12_vbl<=o_end(11);
+				o_c12_r<=x"00";
+				o_c12_g<=x"00";
+				o_c12_b<=x"00";
+				o_c12_brd<= not o_pev(11);
+				o_c12_pic<=o_pev(11);
 
 				CASE o_vmode(2 DOWNTO 0) IS
 					WHEN "000" => -- Nearest
 						IF MASK(MASK_NEAREST)='1' THEN
-							o_r<=o_v_poly_pix.r;
-							o_g<=o_v_poly_pix.g;
-							o_b<=o_v_poly_pix.b;
+							o_c12_r<=o_v_poly_pix.r;
+							o_c12_g<=o_v_poly_pix.g;
+							o_c12_b<=o_v_poly_pix.b;
 						END IF;
 					WHEN "001" | "010" => -- Bilinear | Sharp Bilinear
 						IF MASK(MASK_BILINEAR)='1' OR
 							 MASK(MASK_SHARP_BILINEAR)='1' THEN
-							o_r<=o_v_bil_pix.r;
-							o_g<=o_v_bil_pix.g;
-							o_b<=o_v_bil_pix.b;
+							o_c12_r<=o_v_bil_pix.r;
+							o_c12_g<=o_v_bil_pix.g;
+							o_c12_b<=o_v_bil_pix.b;
 						END IF;
 					WHEN "011" => -- BiCubic
 						IF MASK(MASK_BICUBIC)='1' THEN
-							o_r<=o_v_bic_pix.r;
-							o_g<=o_v_bic_pix.g;
-							o_b<=o_v_bic_pix.b;
+							o_c12_r<=o_v_bic_pix.r;
+							o_c12_g<=o_v_bic_pix.g;
+							o_c12_b<=o_v_bic_pix.b;
 						END IF;
 
 					WHEN OTHERS => -- Polyphase
 						IF MASK(MASK_POLY)='1' THEN
-							o_r<=o_v_poly_pix.r;
-							o_g<=o_v_poly_pix.g;
-							o_b<=o_v_poly_pix.b;
+							o_c12_r<=o_v_poly_pix.r;
+							o_c12_g<=o_v_poly_pix.g;
+							o_c12_b<=o_v_poly_pix.b;
 						END IF;
 				END CASE;
 
 				IF o_pev(11)='0' THEN
-					o_r<=o_border(23 DOWNTO 16); -- Copy border colour
-					o_g<=o_border(15 DOWNTO 8);
-					o_b<=o_border(7  DOWNTO 0);
+					o_c12_r<=o_border(23 DOWNTO 16); -- Copy border colour
+					o_c12_g<=o_border(15 DOWNTO 8);
+					o_c12_b<=o_border(7  DOWNTO 0);
+				END IF;
+
+				-- CYCLES 13-15 : YUV to RGB (BT.601 limited range, 8.8 fixed
+				-- point) for a YUV frame buffer, borders excepted
+				o_yuvm<=o_format(5) AND to_std_logic(o_format(2 DOWNTO 0)="100");
+
+				o_c13_hs<=o_c12_hs; o_c13_vs<=o_c12_vs; o_c13_de<=o_c12_de;
+				o_c13_vbl<=o_c12_vbl; o_c13_brd<=o_c12_brd;
+				o_c13_r<=o_c12_r; o_c13_g<=o_c12_g; o_c13_b<=o_c12_b;
+				o_c13_yuv<=o_yuvm AND o_c12_pic;
+				o_c13_y <=(signed(resize(o_c12_r,11))-16)*298;
+				o_c13_vr<=(signed(resize(o_c12_b,11))-128)*409;
+				o_c13_ug<=(signed(resize(o_c12_g,11))-128)*100;
+				o_c13_vg<=(signed(resize(o_c12_b,11))-128)*208;
+				o_c13_ub<=(signed(resize(o_c12_g,11))-128)*516;
+
+				o_c14_hs<=o_c13_hs; o_c14_vs<=o_c13_vs; o_c14_de<=o_c13_de;
+				o_c14_vbl<=o_c13_vbl; o_c14_brd<=o_c13_brd;
+				o_c14_r<=o_c13_r; o_c14_g<=o_c13_g; o_c14_b<=o_c13_b;
+				o_c14_yuv<=o_c13_yuv;
+				o_c14_sr<=o_c13_y+o_c13_vr;
+				o_c14_sg<=o_c13_y-o_c13_ug-o_c13_vg;
+				o_c14_sb<=o_c13_y+o_c13_ub;
+
+				o_hs<=o_c14_hs; o_vs<=o_c14_vs; o_de<=o_c14_de;
+				o_vbl<=o_c14_vbl; o_brd<=o_c14_brd;
+				IF o_c14_yuv='1' THEN
+					o_r<=yuv_clip(o_c14_sr);
+					o_g<=yuv_clip(o_c14_sg);
+					o_b<=yuv_clip(o_c14_sb);
+				ELSE
+					o_r<=o_c14_r; o_g<=o_c14_g; o_b<=o_c14_b;
 				END IF;
 
 				----------------------------------------------------
