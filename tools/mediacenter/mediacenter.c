@@ -2153,35 +2153,70 @@ static int bench(const char *path)
 	if (media_open(path)) return 1;
 	int frames = 0;
 	double t0 = now_seconds();
-	uint8_t *rgb = NULL;
+	double t_decode = 0, t_convert = 0, t_copy = 0;
+	uint8_t *rgb = NULL, *fb_copy = NULL;
+	size_t rgb_size = 0;
 	// The first 60 s of media are enough to judge; Ctrl+C stops earlier.
 	for (int more = 1; more && !quit_requested;)
 	{
 		double media = !isnan(mc.last_vpts) ? mc.last_vpts : mc.audio_end;
 		if (media >= 60.0) break;
+		double a = now_seconds();
 		more = decode_step();
-		// include the colour conversion, which the player does for every
-		// picture it shows
+		double b = now_seconds();
+		t_decode += b - a;
+		// the colour conversion and the copy to the screen, which the player
+		// does for every picture it shows (every other line in light mode)
 		for (int i = 0; i < mc.vq_count; i++)
 		{
 			AVFrame *f = mc.vq[i].frame;
-			if (!rgb) rgb = (uint8_t *)av_malloc((size_t)((f->width * 4 + 63) & ~63) * f->height);
-			mc.sws = sws_getCachedContext(mc.sws, f->width, f->height, (enum AVPixelFormat)f->format,
-				f->width, f->height, AV_PIX_FMT_BGRA, SWS_POINT, NULL, NULL, NULL);
+			int h = f->height, linesize[AV_NUM_DATA_POINTERS];
+			memcpy(linesize, f->linesize, sizeof(linesize));
+			if (half_lines && !(f->flags & AV_FRAME_FLAG_INTERLACED))
+			{
+				h /= 2;
+				for (int k = 0; k < AV_NUM_DATA_POINTERS; k++) linesize[k] *= 2;
+			}
+			int rs = (f->width * 4 + 63) & ~63;
+			if (!rgb || (size_t)rs * h > rgb_size)
+			{
+				av_free(rgb);
+				av_free(fb_copy);
+				rgb_size = (size_t)rs * h;
+				rgb = (uint8_t *)av_malloc(rgb_size);
+				fb_copy = (uint8_t *)av_malloc(rgb_size);
+			}
+			a = now_seconds();
+			mc.sws = sws_getCachedContext(mc.sws, f->width, h, (enum AVPixelFormat)f->format,
+				f->width, h, AV_PIX_FMT_BGRA, SWS_POINT, NULL, NULL, NULL);
 			uint8_t *dst[4] = { rgb, NULL, NULL, NULL };
-			int stride[4] = { (f->width * 4 + 63) & ~63, 0, 0, 0 };
-			if (mc.sws && rgb) sws_scale(mc.sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, dst, stride);
+			int stride[4] = { rs, 0, 0, 0 };
+			if (mc.sws && rgb) sws_scale(mc.sws, (const uint8_t *const *)f->data, linesize, 0, h, dst, stride);
+			b = now_seconds();
+			t_convert += b - a;
+			if (fb_copy) memcpy(fb_copy, rgb, (size_t)rs * h);
+			t_copy += now_seconds() - b;
 		}
 		frames += mc.vq_count;
 		vq_clear();
 		mc.pend_len = 0;
 	}
 	av_free(rgb);
+	av_free(fb_copy);
 	double secs = now_seconds() - t0;
 	double media = !isnan(mc.last_vpts) ? mc.last_vpts : mc.audio_end;
 	printf("mediacenter: decoded %d pictures, %.1f s of media in %.1f s: %.0f%% of real time%s\n",
 		frames, media, secs, secs > 0 ? 100.0 * media / secs : 0,
 		secs > 0 && media / secs >= 1.0 ? " (plays)" : " (too slow)");
+	if (frames)
+	{
+		double fps = mc.vstream >= 0 ? av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate) : 0;
+		printf("mediacenter: per picture: decoding (with audio) %.1f ms, colour conversion %.1f ms, copy %.1f ms",
+			1000 * t_decode / frames, 1000 * t_convert / frames, 1000 * t_copy / frames);
+		if (fps > 0) printf(", time available %.1f ms", 1000 / fps);
+		printf("\nmediacenter: colour conversion and copy are %.0f%% of the work\n",
+			100 * (t_convert + t_copy) / (t_decode + t_convert + t_copy));
+	}
 	media_close();
 	return 0;
 }
