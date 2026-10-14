@@ -551,7 +551,7 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_c12_hs,o_c12_vs,o_c12_de,o_c12_vbl,o_c12_brd,o_c12_pic : std_logic;
 	SIGNAL o_c13_r,o_c13_g,o_c13_b : unsigned(7 DOWNTO 0);
 	SIGNAL o_c13_hs,o_c13_vs,o_c13_de,o_c13_vbl,o_c13_brd,o_c13_yuv : std_logic;
-	SIGNAL o_c13_y,o_c13_vr,o_c13_ug,o_c13_vg,o_c13_ub : signed(21 DOWNTO 0);
+	SIGNAL o_c13_y,o_c13_vr,o_c13_uvg,o_c13_ub : signed(21 DOWNTO 0);
 	SIGNAL o_c14_r,o_c14_g,o_c14_b : unsigned(7 DOWNTO 0);
 	SIGNAL o_c14_hs,o_c14_vs,o_c14_de,o_c14_vbl,o_c14_brd,o_c14_yuv : std_logic;
 	SIGNAL o_c14_sr,o_c14_sg,o_c14_sb : signed(21 DOWNTO 0);
@@ -3084,8 +3084,8 @@ BEGIN
 				o_c13_yuv<=o_yuvm AND o_c12_pic;
 				o_c13_y <=(signed(resize(o_c12_r,11))-16)*298;
 				o_c13_vr<=(signed(resize(o_c12_b,11))-128)*409;
-				o_c13_ug<=(signed(resize(o_c12_g,11))-128)*100;
-				o_c13_vg<=(signed(resize(o_c12_b,11))-128)*208;
+				-- one DSP block: sum of two products
+				o_c13_uvg<=(signed(resize(o_c12_g,11))-128)*100 + (signed(resize(o_c12_b,11))-128)*208;
 				o_c13_ub<=(signed(resize(o_c12_g,11))-128)*516;
 
 				o_c14_hs<=o_c13_hs; o_c14_vs<=o_c13_vs; o_c14_de<=o_c13_de;
@@ -3093,7 +3093,7 @@ BEGIN
 				o_c14_r<=o_c13_r; o_c14_g<=o_c13_g; o_c14_b<=o_c13_b;
 				o_c14_yuv<=o_c13_yuv;
 				o_c14_sr<=o_c13_y+o_c13_vr;
-				o_c14_sg<=o_c13_y-o_c13_ug-o_c13_vg;
+				o_c14_sg<=o_c13_y-o_c13_uvg;
 				o_c14_sb<=o_c13_y+o_c13_ub;
 
 				o_hs<=o_c14_hs; o_vs<=o_c14_vs; o_de<=o_c14_de;
