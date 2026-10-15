@@ -974,6 +974,7 @@ static void *dvd_reader(void *arg)
 			mc.pend_len = 0;
 			mc.audio_end = mc.clock;
 			sent_end = NAN; // the new track starts its own timing
+			av_pause = 3.0;
 			DVD_UNLOCK();
 			audio_flush();
 		}

@@ -269,6 +269,7 @@ static int svcd_chapters = 0;
 
 // Time of the end of the sound sent to aplay; NAN before any.
 static double sent_end = NAN;
+static double av_pause; // seconds left without sync (after an audio track change)
 static double av_waited; // clock time held back for the sound, in the log
 static double audio_late_drop, audio_full_drop; // sound thrown away, seconds, in the log
 static int av_gaps, av_giveups; // sync skipped for a gap / gave up waiting, in the log
@@ -464,6 +465,15 @@ static void av_sync(double elapsed)
 		offset = e ? atof(e) : 0;
 	}
 	static double held; // seconds the clock has been held without a break
+	if (av_pause > 0)
+	{
+		// a new audio track: its sound settles first (aplay restarting
+		// after the silence, the decoder warming up). Holding the pictures
+		// meanwhile made them stutter for seconds.
+		av_pause -= elapsed;
+		held = 0;
+		return;
+	}
 	if (!audio_pipe || mc.astream < 0 || isnan(sent_end) || (mc.eof && !mc.pend_len)) { held = 0; return; }
 	// a gap in the sound (a new audio track starting later, a pause in the
 	// stream) is silence: the clock runs through it, otherwise the sound
@@ -473,10 +483,12 @@ static void av_sync(double elapsed)
 	double late = mc.clock - heard;
 	if (late > 0.03)
 	{
+		// slow the pictures down (by a quarter at most) rather than stop
+		// them: a stop is seen as a stutter, a slowdown is not
 		double c = late - 0.02;
-		if (c > elapsed) c = elapsed; // the clock stops, never goes back
+		if (c > elapsed * 0.25) c = elapsed * 0.25;
 		held += c;
-		if (held > 1.0)
+		if (held > 0.5)
 		{
 			// no sound is coming: stop waiting until some is sent again
 			sent_end = NAN;
@@ -1327,6 +1339,7 @@ static int media_play(int in_playlist)
 	draw_convert = draw_present = 0;
 	draw_count = 0;
 	av_waited = 0;
+	av_pause = 0;
 	audio_late_drop = audio_full_drop = 0;
 	av_gaps = av_giveups = 0;
 	double played = 0;
