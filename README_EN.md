@@ -181,7 +181,7 @@ Still to test: Super Video CD read from a burned disc, 15 kHz VGA output on a re
 
 ### 1. Download the files
 
-From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds all three files: Main, player and menu core. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
+From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds the Main, the player, the menu core and the library for protected DVDs. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
 
 The latest version is on the [Actions](../../actions) page. Open the latest successful run (green tick) of **Build MiSTer MediaCenter** and download `MiSTer_MediaCenter` and `mediacenter_arm`. The menu core is in the **Build MediaCenter menu core** run, file `mediacenter_rbf`.
 
@@ -199,7 +199,7 @@ Also install the [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTe
 
 The original Main (`/media/fat/MiSTer`) is left untouched.
 
-Protected DVDs also need `libdvdcss.so.2` in `/media/fat/dvdcss/`. This is the same location used by [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) and its `install_dvdcss` script. It is not included for licensing reasons. Without it only unprotected DVDs play.
+Protected DVDs need the `libdvdcss.so.2` library in `/media/fat/dvdcss/`. The zip already includes it: it is [VideoLAN's libdvdcss](https://www.videolan.org/developers/libdvdcss.html) (GPL licence) for ARM, the same one tested on the MiSTer with protected DVDs. This is the same location used by [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) and its `install_dvdcss` script. In some countries the law forbids circumventing DVD copy protection: check the rules where you live. Without this file only unprotected DVDs play.
 
 ### 3. Edit `/media/fat/MiSTer.ini`
 

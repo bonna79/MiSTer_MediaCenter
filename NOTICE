@@ -15,3 +15,8 @@ It is derived from:
   from this project.
 
 The full commit history of both projects is preserved in this repository.
+
+The release package also includes dvdcss/libdvdcss.so.2, an ARM build of
+libdvdcss by VideoLAN (GPL-2.0-or-later), loaded at run time to play
+protected DVDs. Its source code is available at
+https://code.videolan.org/videolan/libdvdcss
