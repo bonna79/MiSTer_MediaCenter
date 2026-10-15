@@ -1,38 +1,44 @@
 > Sviluppato con l'aiuto dell'intelligenza artificiale (Claude di Anthropic). / Developed with the help of AI (Anthropic's Claude).
 
-Prima versione pubblica di MiSTer MediaCenter: un unico lettore per Video CD, DVD-Video (anche protetti, con i menu), DVD dati con DivX/MP4/MP3 e file da SD, USB e rete. Include tutte le funzioni di Physical Disc: PSX con subcanale Q e LibCrypt, Mega CD con CD+G, avvio automatico dei dischi.
+**MiSTer MediaCenter 2.0** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB e rete.
 
-**Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD. Poi aggiungi a `MiSTer.ini`:
+**Novità:**
+- l'FPGA converte i colori del video: gli MP4 H.264 a 720p ora sono fluidi (immagini non mostrate dal 10% a circa il 2%);
+- audio e video sincronizzati, cambio della traccia audio durante il film senza scatti;
+- Super Video CD con i menu, anche da immagini `.bin` + `.cue` sulla SD;
+- uscita VGA a 15 kHz per i CRT, insieme all'HDMI;
+- i giochi su disco li gestisce il Main di [Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc), da installare a parte;
+- file di impostazioni `/media/fat/linux/mediacenter.ini` (per esempio `MC_AV_OFFSET=0.05` per spostare l'audio).
+
+**Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD. Contiene Main, lettore e core del menu: aggiornali sempre insieme. Poi in `MiSTer.ini`:
 
 ```ini
 [menu]
 main=MiSTer_MediaCenter
 
 [A0CD-*]
-main=MiSTer_MediaCenter
+main=MiSTer_Physical-CD
 ```
 
-Per i DVD protetti copia `libdvdcss.so.2` in `/media/fat/dvdcss/`; per motivi di licenza non è inclusa. Tutti i dettagli sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#readme).
+Riavvia il MiSTer. Per i DVD protetti copia `libdvdcss.so.2` in `/media/fat/dvdcss/` (non inclusa per motivi di licenza). Guida completa e risultati delle prove nel [README](https://github.com/bonna79/MiSTer_MediaCenter#readme).
 
-**Provato su MiSTer reale, uscita HDMI:**
-- Video CD;
-- DVD PAL protetto: 0,06% di immagini saltate;
-- DVD-R con DivX.
+**Provato su MiSTer reale (HDMI):** DVD protetti con menu, tracce audio e sottotitoli; Video CD; Super Video CD da immagine; DVD-R con DivX e MKV; MP4 H.264 720p; gioco PSX con LibCrypt tramite il Main di Physical Disc.
+**Da provare:** Super Video CD da disco masterizzato, uscita a 15 kHz su CRT.
 
-**Non ancora provati:** uscita VGA a 15 kHz e CD-R con file.
-
-Se trovi un problema, apri una segnalazione in [Issues](https://github.com/bonna79/MiSTer_MediaCenter/issues). Allega foto dello schermo e il file `/tmp/mediacenter.log`.
+Problemi: apri una segnalazione in [Issues](https://github.com/bonna79/MiSTer_MediaCenter/issues) con foto dello schermo e `/tmp/mediacenter.log`.
 
 ---
 
-**English:** first public release of MiSTer MediaCenter. It is a single player for:
-- Video CDs;
-- DVD-Video, protected discs and menus included;
-- data DVDs with DivX/MP4/MP3;
-- files from SD, USB and network.
+**English:** **MiSTer MediaCenter 2.0** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB and network.
 
-It includes every Physical Disc feature: PSX with Q subchannel and LibCrypt, Mega CD with CD+G, automatic disc start.
+**What's new:**
+- the FPGA converts the video colours: 720p H.264 MP4 now plays smoothly (frames not shown from 10% to about 2%);
+- audio and video in sync, seamless audio track changes during a film;
+- Super Video CD with menus, also from `.bin` + `.cue` images on the SD card;
+- 15 kHz VGA output for CRTs, alongside HDMI;
+- game discs are handled by the [Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc) Main, installed separately;
+- settings file `/media/fat/linux/mediacenter.ini` (for example `MC_AV_OFFSET=0.05` to move the sound).
 
-To install, extract `MiSTer_MediaCenter.zip` into the root of the SD card, then add `main=MiSTer_MediaCenter` to the `[menu]` and `[A0CD-*]` sections of `MiSTer.ini`. Protected DVDs need `libdvdcss.so.2` in `/media/fat/dvdcss/`, which is not included. The full guide is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md).
+**Install:** extract `MiSTer_MediaCenter.zip` to the root of the SD card. It holds the Main, the player and the menu core: always update them together. Then set `main=MiSTer_MediaCenter` in `[menu]` and `main=MiSTer_Physical-CD` in `[A0CD-*]` of `MiSTer.ini`, and restart the MiSTer. Protected DVDs need `libdvdcss.so.2` in `/media/fat/dvdcss/`, not included. Full guide and test results in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md).
 
-Tested on a real MiSTer over HDMI. Report problems on [Issues](https://github.com/bonna79/MiSTer_MediaCenter/issues), with photos of the screen and `/tmp/mediacenter.log`.
+**Tested on a real MiSTer (HDMI):** protected DVDs with menus, audio tracks and subtitles; Video CDs; Super Video CD from an image; DVD-R with DivX and MKV; 720p H.264 MP4; PSX game with LibCrypt through the Physical Disc Main. **Still to test:** Super Video CD from a burned disc, 15 kHz output on a CRT.

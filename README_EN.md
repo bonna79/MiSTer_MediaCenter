@@ -29,6 +29,16 @@ The package has three parts:
 
 The player's on-screen texts are in Italian.
 
+## What's new in version 2.0
+
+- **Colours converted by the FPGA:** the menu core converts colours from YUV to RGB, work the ARM used to do. 720p H.264 MP4 video now plays smoothly: frames not shown drop from 10% to about 2%.
+- **Audio and video in sync:** the picture waits for the sound when needed, slowing down slightly instead of stuttering. Changing audio track during a film (for example from 5.1 to a stereo commentary) is seamless.
+- **Super Video CD:** discs with PBC menus, and now also `.bin` + `.cue` images copied to the SD card.
+- **15 kHz VGA output for CRTs** from the menu core, alongside HDMI.
+- **Living alongside the Physical Disc Main:** game discs are now handled by the Physical Disc Main inside the console cores; MMC takes care of video discs and files.
+- **Settings file** `/media/fat/linux/mediacenter.ini` to adjust the player without editing scripts.
+- Videos wider than the screen (for example 1440x810) are now shown whole, narrowed to the screen width.
+
 ## Living alongside MiSTer Physical Disc
 
 MMC works together with Anime0t4ku's [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc) Main (`MiSTer_Physical-CD`), installed separately. Each does its own part:
@@ -49,6 +59,7 @@ If you insert a DVD while a game is running, go back to the MiSTer menu: MMC rec
 | DVD-Video, protected originals included (CSS) | Starts by itself when you insert the disc | Disc menus, chapters, audio tracks, subtitles, fast forward and rewind |
 | Video CD 1.0, 1.1 and 2.0 | Starts by itself when you insert the disc | PBC menus, chapters, audio channel |
 | Super Video CD | Starts by itself when you insert the disc | PBC menus, chapters, audio tracks, fast forward and rewind |
+| Super Video CD `.bin` + `.cue` images | From **Scripts → mediacenter**, opening the `.cue` file | As the disc, with its menus |
 | Data DVDs (DVD-R or DVD+R) with DivX, MP4, MP3… | The file list opens by itself when you insert the disc | As for files |
 | DivX, Xvid, MP4, MKV, MPEG and VOB video | From **Scripts → mediacenter**, choosing SD, USB or network | Audio tracks, chapters (or 60-second jumps), fast forward and rewind |
 | DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → mediacenter** | As a DVD |
@@ -68,22 +79,24 @@ MMC is made for standard-definition video. These are the recommended maximum res
 | Video CD (MPEG-1) | 352x288 (PAL), 352x240 (NTSC) | Perfect |
 | Super Video CD (MPEG-2) | 480x576 (PAL), 480x480 (NTSC) | Perfect |
 | DivX, Xvid (MPEG-4) | 720x576 | Smooth |
-| MP4, MKV in 8-bit H.264 | 720x576, at most 1024x576 | Smooth |
+| MP4, MKV in 8-bit H.264 | 1280x720 | Smooth |
 | Music | Any | Perfect |
 
-**HD MP4 and MKV video, 720p and above, is not recommended.** It plays, with smooth audio, but the MiSTer cannot show every frame and the picture stutters. Measured on a real MiSTer:
+**Video above 720p, 10-bit H.264 (Hi10p) and HEVC/H.265 are not recommended.** They play, with smooth audio, but the MiSTer cannot show every frame and the picture stutters. Measured on a real MiSTer:
 
 | Video | Frames not shown |
 | --- | --- |
-| DVD (MPEG-2 720x576) | about 1% |
-| 8-bit H.264 1280x720 | about 10% |
-| 8-bit H.264 1440x810 | about 65% |
-| 10-bit H.264 (Hi10p) 1280x720 | about 78% |
+| DVD (MPEG-2 720x576) | less than 1% |
+| 8-bit H.264 1280x720 | 1.4–2.5% (was 10% before the FPGA converted the colours) |
+| 8-bit H.264 1440x810 | about 65% (measured with version 1.0) |
+| 10-bit H.264 (Hi10p) 1280x720 | about 78% (measured with version 1.0) |
+
+With a 720p H.264 video the ARM needs about 30 ms to decode a picture, out of 41.7 ms available at 24 pictures per second. That is why the colour conversion, which took another 16 ms, moved to the FPGA: the ARM now copies the picture in 5.5 ms.
 
 The limit is in the hardware, on both sides:
 
 - **ARM:** all decoding runs on the DE10-Nano's 800 MHz ARM Cortex-A9, which has no hardware video decoder. It is enough for DVDs and DivX, not for high-definition H.264.
-- **FPGA:** there is no room for an H.264 decoder, and no free one suited to the MiSTer exists. So the FPGA only handles the video output (scaling for HDMI and the 15 kHz signal), not decoding.
+- **FPGA:** there is no room for an H.264 decoder, and no free one suited to the MiSTer exists. So the FPGA handles the video output (colour conversion, scaling for HDMI and the 15 kHz signal), not decoding.
 
 On a CRT, high definition brings nothing anyway: the picture is brought back to 480 or 576 lines.
 
@@ -109,22 +122,26 @@ The 15 kHz output has not been tested on a real CRT yet. If DVD pictures shake, 
 
 ## Tested on a real MiSTer
 
+Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 15 October 2026.
+
 | Test | Result |
 | --- | --- |
-| Protected original PAL DVD (Star Wars Episode III) | Smooth, 1.4% of frames skipped. Menus, chapters, audio tracks, subtitles, fast forward and rewind work |
+| Protected original PAL DVD (Star Wars Episode III) | Smooth. Menus, chapters, audio tracks, subtitles, fast forward and rewind work |
+| DVD with three audio tracks (English 5.1, Italian, stereo commentary) | 4289 pictures, 2 skipped. Sound in sync with the lips; changing track during the film without stutter |
 | Video CDs | Perfect, they start by themselves when the disc is inserted |
+| Super Video CD (`.bin` + `.cue` image from the SD card) | Menu and all three test entries work |
 | Data DVD-R with DivX and MKV files | The file list opens by itself, full-screen video |
-| 720p H.264 MP4 | Watchable, with 10% of frames skipped |
+| 720p H.264 MP4 (anime, 23.976 pictures per second) | Smooth, 1.4–2.5% of pictures not shown, sound in sync, correct colours with the FPGA conversion |
+| 1440x810 H.264 MP4 | Shown whole, narrowed to the screen width, but stutters |
 | Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
-| Video output used | HDMI at 1280x720 |
 
-Still to test: Super Video CD on a real disc, 15 kHz VGA output on a CRT.
+Still to test: Super Video CD read from a burned disc, 15 kHz VGA output on a real CRT.
 
 ## Installation
 
 ### 1. Download the files
 
-From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout.
+From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds all three files: Main, player and menu core. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
 
 The latest version is on the [Actions](../../actions) page. Open the latest successful run (green tick) of **Build MiSTer MediaCenter** and download `MiSTer_MediaCenter` and `mediacenter_arm`. The menu core is in the **Build MediaCenter menu core** run, file `mediacenter_rbf`.
 
@@ -174,6 +191,22 @@ Other optional settings, in the `[menu]` section:
 
 Restart the MiSTer after the changes.
 
+### 4. Player settings (optional)
+
+The player reads its settings from the text file `/media/fat/linux/mediacenter.ini`, one per line. The file is not needed: create it only if you want to change something.
+
+```ini
+# move the sound 50 milliseconds later
+MC_AV_OFFSET=0.05
+```
+
+| Setting | Effect |
+| --- | --- |
+| `MC_AV_OFFSET=0.05` | Moves the sound later (positive value) or earlier (negative), in seconds. Useful with TVs that delay the picture |
+| `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
+
+The same settings can also be given as environment variables, like the test variables below.
+
 ## Controls
 
 Use the controller, with the MiSTer menu buttons.
@@ -213,9 +246,10 @@ Open a report on the [Issues](../../issues) page and attach:
 | --- | --- |
 | `MC_ARMSCALE=1` | Scales the picture on the ARM instead of the FPGA scaler |
 | `MC_NOVSYNC=1` | Draws without waiting for vertical sync |
+| `MC_SLOWDRAW=1` | Draws pictures the old way, line by line |
 | `MC_DEBUG=1` | Logs DVD navigation events |
 | `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking, half of the lines enlarged by the FPGA scaler and, above 30 fps, only reference pictures) |
-| `MC_TEST=...` | Runs without screen or controller: simulated keys, pictures saved to `/tmp/mc_<seconds>.ppm`. With `cdimage:<.bin file>:<track 2 sector>:...` in place of the file it plays a Super Video CD image as if it were in the drive |
+| `MC_TEST=...` | Runs without screen or controller: simulated keys, pictures saved to `/tmp/mc_<seconds>.ppm`. With a `.cue` file it plays a Super Video CD image as if it were in the drive |
 
 To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. It analyzes at most the first minute of the file (Ctrl+C stops it earlier). If the result is above 100% of real time, the file can be played.
 

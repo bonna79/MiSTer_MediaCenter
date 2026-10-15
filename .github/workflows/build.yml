@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   build:
@@ -73,10 +74,23 @@ jobs:
             bin/mediacenter
             Scripts/mediacenter.sh
 
+      # The menu core is compiled by fpga.yml (Quartus, only when fpga/ changes):
+      # the release takes its latest successful build.
+      - name: Fetch the menu core
+        if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: fpga.yml
+          branch: main
+          workflow_conclusion: success
+          name: mediacenter_rbf
+          path: rbf
+
       - name: Package release
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         run: |
           mkdir -p pkg/linux pkg/Scripts
+          cp rbf/menu_mediacenter.rbf pkg/linux/
           cp bin/MiSTer_MediaCenter pkg/
           cp bin/mediacenter pkg/linux/
           cp Scripts/mediacenter.sh pkg/Scripts/

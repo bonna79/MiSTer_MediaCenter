@@ -27,6 +27,16 @@ Il pacchetto è formato da tre parti:
 | `mediacenter` | Il lettore vero e proprio, che gira sull'ARM |
 | `menu_mediacenter.rbf` | Il core del menu di MMC: il menu normale del MiSTer più l'uscita a 15 kHz che porta il video al CRT |
 
+## Novità della versione 2.0
+
+- **Colori convertiti dall'FPGA:** il core del menu converte i colori da YUV a RGB, lavoro che prima faceva l'ARM. I video MP4 in H.264 a 720p ora sono fluidi: le immagini non mostrate scendono dal 10% a circa il 2%.
+- **Audio e video sincronizzati:** il video aspetta l'audio quando serve, con un piccolo rallentamento invece di uno scatto. Il cambio della traccia audio durante il film (per esempio da 5.1 a commento stereo) avviene senza interruzioni.
+- **Super Video CD:** dischi con i menu PBC, e ora anche immagini `.bin` + `.cue` copiate sulla SD.
+- **Uscita VGA a 15 kHz per i CRT** dal core del menu, insieme all'HDMI.
+- **Convivenza con il Main di Physical Disc:** i giochi su disco ora li gestisce il Main di Physical Disc dentro i core delle console; MMC si occupa di dischi video e file.
+- **File di impostazioni** `/media/fat/linux/mediacenter.ini` per regolare il lettore senza toccare gli script.
+- I video più larghi dello schermo (per esempio 1440x810) ora si vedono interi, ristretti alla larghezza dello schermo.
+
 ## Convivenza con MiSTer Physical Disc
 
 MMC funziona insieme al Main di [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc) di Anime0t4ku (`MiSTer_Physical-CD`), da installare a parte. Ognuno fa la sua parte:
@@ -47,6 +57,7 @@ Se inserisci un DVD mentre sei in un gioco, esci al menu del MiSTer: lì MMC lo 
 | DVD-Video, anche originali protetti (CSS) | Parte da solo quando inserisci il disco | Menu del disco, capitoli, tracce audio, sottotitoli, avanti e indietro veloce |
 | Video CD 1.0, 1.1 e 2.0 | Parte da solo quando inserisci il disco | Menu PBC, capitoli, canale audio |
 | Super Video CD | Parte da solo quando inserisci il disco | Menu PBC, capitoli, tracce audio, avanti e indietro veloce |
+| Immagini di Super Video CD `.bin` + `.cue` | Da **Scripts → mediacenter**, aprendo il file `.cue` | Come il disco, con i menu |
 | DVD dati (DVD-R o DVD+R) con DivX, MP4, MP3… | Quando inserisci il disco si apre da solo l'elenco dei file | Come per i file |
 | Video DivX, Xvid, MP4, MKV, MPEG e VOB | Da **Scripts → mediacenter**, scegliendo SD, USB o rete | Tracce audio, capitoli (o salti di 60 secondi), avanti e indietro veloce |
 | Immagini DVD `.iso` e cartelle `VIDEO_TS` | Da **Scripts → mediacenter** | Come un DVD |
@@ -66,22 +77,24 @@ MMC è fatto per i video a risoluzione standard. Queste sono le risoluzioni mass
 | Video CD (MPEG-1) | 352x288 (PAL), 352x240 (NTSC) | Perfetto |
 | Super Video CD (MPEG-2) | 480x576 (PAL), 480x480 (NTSC) | Perfetto |
 | DivX, Xvid (MPEG-4) | 720x576 | Fluido |
-| MP4, MKV in H.264 a 8 bit | 720x576, al massimo 1024x576 | Fluido |
+| MP4, MKV in H.264 a 8 bit | 1280x720 | Fluido |
 | Musica | Qualsiasi | Perfetta |
 
-**I video MP4 e MKV in HD, a 720p e oltre, sono sconsigliati.** Si riproducono, con l'audio sempre fluido, ma il MiSTer non riesce a mostrare tutti i fotogrammi e l'immagine scatta. Misure fatte su un MiSTer vero:
+**I video oltre i 720p, quelli in H.264 a 10 bit (Hi10p) e quelli in HEVC/H.265 sono sconsigliati.** Si riproducono, con l'audio sempre fluido, ma il MiSTer non riesce a mostrare tutti i fotogrammi e l'immagine scatta. Misure fatte su un MiSTer vero:
 
 | Video | Fotogrammi non mostrati |
 | --- | --- |
-| DVD (MPEG-2 720x576) | circa 1% |
-| H.264 8 bit 1280x720 | circa 10% |
-| H.264 8 bit 1440x810 | circa 65% |
-| H.264 10 bit (Hi10p) 1280x720 | circa 78% |
+| DVD (MPEG-2 720x576) | meno dell'1% |
+| H.264 8 bit 1280x720 | 1,4–2,5% (era il 10% prima che l'FPGA convertisse i colori) |
+| H.264 8 bit 1440x810 | circa 65% (misurato con la versione 1.0) |
+| H.264 10 bit (Hi10p) 1280x720 | circa 78% (misurato con la versione 1.0) |
+
+Con un video H.264 a 720p l'ARM impiega circa 30 ms per decodificare un'immagine, su 41,7 ms disponibili a 24 immagini al secondo. Per questo la conversione dei colori, che occupava altri 16 ms, è passata all'FPGA: ora l'ARM copia l'immagine in 5,5 ms.
 
 Il limite è nell'hardware, da tutte e due le parti:
 
 - **ARM:** tutta la decodifica avviene sul processore ARM Cortex-A9 a 800 MHz del DE10-Nano, che non ha un decodificatore video hardware. Basta per DVD e DivX, non per l'H.264 in alta definizione.
-- **FPGA:** non ha spazio per un decodificatore H.264, e non ne esiste uno libero adatto al MiSTer. Per questo l'FPGA si occupa solo dell'uscita video (ingrandimento per l'HDMI e segnale a 15 kHz), non della decodifica.
+- **FPGA:** non ha spazio per un decodificatore H.264, e non ne esiste uno libero adatto al MiSTer. Per questo l'FPGA si occupa dell'uscita video (conversione dei colori, ingrandimento per l'HDMI e segnale a 15 kHz), non della decodifica.
 
 Sul CRT, poi, l'alta definizione non serve: l'immagine viene comunque riportata a 480 o 576 righe.
 
@@ -107,22 +120,26 @@ L'uscita a 15 kHz non è ancora stata provata su un CRT vero. Se l'immagine dei 
 
 ## Prove su un MiSTer vero
 
+Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, uscita HDMI a 1280x720, fino al 15 ottobre 2026.
+
 | Prova | Risultato |
 | --- | --- |
-| DVD PAL originale protetto (Star Wars Episodio III) | Fluido, 1,4% di fotogrammi saltati. Menu, capitoli, tracce audio, sottotitoli, avanti e indietro veloce funzionanti |
+| DVD PAL originale protetto (Star Wars Episodio III) | Fluido. Menu, capitoli, tracce audio, sottotitoli, avanti e indietro veloce funzionanti |
+| DVD con tre tracce audio (inglese 5.1, italiano, commento stereo) | 4289 immagini, 2 saltate. Audio sincronizzato con il labiale; cambio di traccia durante il film senza scatti |
 | Video CD | Perfetti, partono da soli quando si inserisce il disco |
+| Super Video CD (immagine `.bin` + `.cue` dalla SD) | Menu e tutte e tre le voci di prova funzionanti |
 | DVD-R dati con file DivX e MKV | L'elenco dei file si apre da solo, video a tutto schermo |
-| MP4 H.264 720p | Si vede, con il 10% di fotogrammi saltati |
+| MP4 H.264 720p (anime, 23,976 immagini al secondo) | Fluido, 1,4–2,5% di immagini non mostrate, audio sincronizzato, colori corretti con la conversione nell'FPGA |
+| MP4 H.264 1440x810 | Si vede intero, ristretto alla larghezza dello schermo, ma scatta |
 | Convivenza con il Main di Physical Disc | DVD e Video CD con MMC; un gioco PSX PAL con LibCrypt (The Legend of Dragoon) parte da solo e funziona con il Main di Physical Disc |
-| Uscita video usata | HDMI a 1280x720 |
 
-Da provare: Super Video CD su disco vero, uscita VGA a 15 kHz su CRT.
+Da provare: Super Video CD letto da un disco masterizzato, uscita VGA a 15 kHz su un CRT vero.
 
 ## Installazione
 
 ### 1. Scarica i file
 
-Dalla pagina [Releases](../../releases) scarica `MiSTer_MediaCenter.zip` ed estrailo nella cartella principale della SD (`/media/fat`). Le cartelle dello zip sono già organizzate come sulla SD.
+Dalla pagina [Releases](../../releases) scarica `MiSTer_MediaCenter.zip` ed estrailo nella cartella principale della SD (`/media/fat`). Le cartelle dello zip sono già organizzate come sulla SD. Lo zip contiene tutti e tre i file: Main, lettore e core del menu. Aggiornali sempre insieme, perché la conversione dei colori nell'FPGA richiede il Main e il core della stessa versione. Dopo aver copiato il Main o il core riavvia il MiSTer.
 
 La versione più recente si scarica dalla pagina [Actions](../../actions). Apri l'ultima compilazione riuscita (spunta verde) di **Build MiSTer MediaCenter** e scarica `MiSTer_MediaCenter` e `mediacenter_arm`. Il core del menu è nella compilazione **Build MediaCenter menu core**, file `mediacenter_rbf`.
 
@@ -172,6 +189,22 @@ Altre impostazioni facoltative, nella sezione `[menu]`:
 
 Dopo le modifiche riavvia il MiSTer.
 
+### 4. Impostazioni del lettore (facoltative)
+
+Il lettore legge le sue impostazioni dal file di testo `/media/fat/linux/mediacenter.ini`, una per riga. Il file non serve: crealo solo se vuoi cambiare qualcosa.
+
+```ini
+# sposta l'audio di 50 millisecondi più tardi
+MC_AV_OFFSET=0.05
+```
+
+| Impostazione | Effetto |
+| --- | --- |
+| `MC_AV_OFFSET=0.05` | Sposta l'audio più tardi (valore positivo) o più presto (negativo), in secondi. Serve con i televisori che ritardano l'immagine |
+| `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
+
+Le stesse impostazioni si possono dare anche come variabili d'ambiente, come quelle per i test qui sotto.
+
 ## Comandi
 
 Si usa il controller, con i tasti del menu del MiSTer.
@@ -211,9 +244,10 @@ Apri una segnalazione nella pagina [Issues](../../issues) e allega:
 | --- | --- |
 | `MC_ARMSCALE=1` | Ingrandisce l'immagine con l'ARM invece che con lo scaler dell'FPGA |
 | `MC_NOVSYNC=1` | Disegna senza aspettare la sincronia verticale |
+| `MC_SLOWDRAW=1` | Disegna le immagini con il vecchio metodo, riga per riga |
 | `MC_DEBUG=1` | Scrive nel log gli eventi della navigazione nei DVD |
 | `MC_FULLQUALITY=1` | Disattiva la modalità leggera dei video H.264/HEVC in alta definizione (deblocking spento, metà delle righe ingrandite dallo scaler FPGA e, sopra i 30 fps, solo le immagini di riferimento) |
-| `MC_TEST=...` | Prova senza schermo né controller: tasti simulati e immagini salvate in `/tmp/mc_<secondi>.ppm`. Con `cdimage:<file .bin>:<settore traccia 2>:...` al posto del file riproduce un'immagine di Super Video CD come se fosse nel lettore |
+| `MC_TEST=...` | Prova senza schermo né controller: tasti simulati e immagini salvate in `/tmp/mc_<secondi>.ppm`. Con un file `.cue` riproduce un'immagine di Super Video CD come se fosse nel lettore |
 
 Per misurare la velocità di decodifica usa `/media/fat/linux/mediacenter --bench <file>` oppure `--bench /dev/sr0`. Analizza al massimo il primo minuto del file (Ctrl+C lo ferma prima). Se il risultato supera il 100% del tempo reale, il file si può riprodurre.
 
