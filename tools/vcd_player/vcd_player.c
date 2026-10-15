@@ -957,8 +957,12 @@ static int audio_open(int samplerate)
 		return -1;
 	}
 
-	char cmd[128];
-	snprintf(cmd, sizeof(cmd), "aplay -q -t raw -f S16_LE -c 2 -r %d - 2>/dev/null", samplerate);
+	// aplay starts playing when its buffer is full (0.5 s by default): with
+	// the sound sent only 0.3 s ahead of the picture, it came out 0.2 s
+	// late. A 0.2 s buffer starts it in time.
+	char cmd[160];
+	snprintf(cmd, sizeof(cmd), "aplay -q -t raw -f S16_LE -c 2 -r %d --buffer-time=200000 --period-time=50000 - 2>/dev/null",
+		samplerate);
 	audio_pipe = popen(cmd, "w");
 	if (!audio_pipe) return -1;
 
