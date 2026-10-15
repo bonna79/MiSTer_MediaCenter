@@ -100,7 +100,7 @@ static void fit_text(char *dst, size_t len, const char *src, int max)
 // File types
 // ---------------------------------------------------------------------------
 
-static const char *const video_ext[] = { "avi", "divx", "xvid", "mkv", "mp4", "m4v", "mov", "mpg", "mpeg", "vob", "dat", "ts", "m2ts", "mts", "ogm", "ogv", "wmv", "asf", "iso", NULL };
+static const char *const video_ext[] = { "avi", "divx", "xvid", "mkv", "mp4", "m4v", "mov", "mpg", "mpeg", "vob", "dat", "ts", "m2ts", "mts", "ogm", "ogv", "wmv", "asf", "iso", "cue", NULL };
 static const char *const audio_ext[] = { "mp3", "mp2", "mp1", "mpa", "ogg", "oga", "flac", "wav", "m4a", "aac", "ac3", "dts", "wma", "mka", NULL };
 
 static int has_ext(const char *name, const char *const *list)
@@ -1873,9 +1873,67 @@ static int is_dvd_path(const char *path)
 	return !access(ifo, R_OK);
 }
 
+// A Super Video CD copied to the card as .bin + .cue: played like the disc
+// in the drive, reading the sectors from the image.
+static int play_cue_image(const char *cue)
+{
+	FILE *f = fopen(cue, "r");
+	if (!f) return -1;
+	char line[512], bin[1100] = "";
+	int t = 0, last = 0;
+	while (fgets(line, sizeof(line), f))
+	{
+		char name[400], mode[32];
+		int n, mm, ss, ff;
+		if (sscanf(line, " FILE \"%399[^\"]\"", name) == 1 && !bin[0])
+		{
+			const char *slash = strrchr(cue, '/');
+			if (name[0] == '/' || !slash) snprintf(bin, sizeof(bin), "%s", name);
+			else snprintf(bin, sizeof(bin), "%.*s/%s", (int)(slash - cue), cue, name);
+		}
+		else if (sscanf(line, " TRACK %d %31s", &n, mode) == 2 && n >= 1 && n <= MAX_TRACKS)
+		{
+			t = n;
+			tracks[t].data = strcasecmp(mode, "AUDIO") != 0;
+			tracks[t].start = -1;
+			if (t > last) last = t;
+		}
+		else if (t && sscanf(line, " INDEX %d %d:%d:%d", &n, &mm, &ss, &ff) == 4 && n == 1)
+			tracks[t].start = (mm * 60 + ss) * 75 + ff;
+	}
+	fclose(f);
+	if (!bin[0] || !last) return -1;
+	img_fd = open(bin, O_RDONLY | O_CLOEXEC);
+	if (img_fd < 0) { printf("mediacenter: cannot open %s\n", bin); return -1; }
+	struct stat st;
+	fstat(img_fd, &st);
+	track_first = 1;
+	track_last = last;
+	for (int i = 1; i <= last; i++)
+		tracks[i].end = i < last ? tracks[i + 1].start : (int)(st.st_size / RAW_SECTOR);
+	tracks[0].start = (int)(st.st_size / RAW_SECTOR); // lead-out
+
+	const char *kind = detect_vcd_kind();
+	printf("mediacenter: image %s: %s, %d track(s)\n", bin, kind ? kind : "not a Video CD", last);
+	int r = -1;
+	if (kind && strcmp(kind, "Video CD"))
+	{
+		if (!reopen_screen()) { svcd_play(); r = 0; }
+	}
+	else if (kind) printf("mediacenter: Video CD (MPEG-1) images are not supported yet\n");
+	close(img_fd);
+	img_fd = -1;
+	return r;
+}
+
 static int play_file(const char *path, int in_playlist)
 {
 	if (is_dvd_path(path)) return dvd_play(path);
+	if (has_ext(path, (const char *const[]){ "cue", NULL }))
+	{
+		play_cue_image(path);
+		return END_DONE;
+	}
 	if (media_open(path)) return END_DONE;
 	native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");
 	int r = media_play(in_playlist);
