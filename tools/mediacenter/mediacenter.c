@@ -267,6 +267,10 @@ static int svcd_on = 0;
 static double svcd_chapter[MAX_ENTRIES];
 static int svcd_chapters = 0;
 
+// Time of the end of the sound sent to aplay; NAN before any.
+static double sent_end = NAN;
+static double av_waited; // clock time held back for the sound, in the log
+
 // The picture shown in a YUV framebuffer (a reference to the decoded frame)
 // and whether it is shown every other line (light mode).
 static AVFrame *yuv_last;
@@ -292,6 +296,7 @@ static void media_close(void)
 static int media_open(const char *path)
 {
 	yuv_stream = -1;
+	sent_end = NAN;
 	skip_base = AVDISCARD_DEFAULT;
 	half_lines = 0;
 	media_close();
@@ -438,6 +443,33 @@ static void feed_audio_output(void)
 	memmove(mc.pend, mc.pend + (size_t)due * 2, (size_t)(mc.pend_len - due) * 4);
 	mc.pend_len -= due;
 	mc.pend_pts += due / (double)MC_AUDIO_RATE;
+	if (audio_pipe) sent_end = mc.pend_pts;
+}
+
+// The sound is the reference. The clock runs on the system time, but the
+// sound comes out only after everything queued before it: aplay starting,
+// the sound still queued after a seek, a slow output. When the sound heard
+// now is behind the clock, the clock waits for it (the pictures wait, the
+// sound is never cut). MC_AV_OFFSET (seconds) moves the sound later (+) or
+// earlier (-) for a TV that delays the picture.
+static void av_sync(double elapsed)
+{
+	static double offset = NAN;
+	if (isnan(offset))
+	{
+		const char *e = getenv("MC_AV_OFFSET");
+		offset = e ? atof(e) : 0;
+	}
+	if (!audio_pipe || mc.astream < 0 || isnan(sent_end) || (mc.eof && !mc.pend_len)) return;
+	double heard = sent_end - audio_queued() - offset;
+	double late = mc.clock - heard;
+	if (late > 0.03)
+	{
+		double c = late - 0.02;
+		if (c > elapsed) c = elapsed; // the clock stops, never goes back
+		mc.clock -= c;
+		av_waited += c;
+	}
 }
 
 // Queues a decoded picture to show at pts (NAN: one frame after the previous).
@@ -1269,6 +1301,7 @@ static int media_play(int in_playlist)
 	frames_shown = frames_dropped = 0;
 	draw_convert = draw_present = 0;
 	draw_count = 0;
+	av_waited = 0;
 	double played = 0;
 	// The loop that reads the file and sends the sound runs ahead of the
 	// video decoding threads, so the sound keeps flowing on a heavy stream.
@@ -1389,6 +1422,7 @@ static int media_play(int in_playlist)
 			played += elapsed;
 			fill();
 			feed_audio_output();
+			av_sync(elapsed);
 			if (vt.on)
 			{
 				pthread_mutex_lock(&vt.lock);
@@ -1495,6 +1529,7 @@ static int media_play(int in_playlist)
 		if (draw_count)
 			printf("mediacenter: per picture: colour conversion %.1f ms, drawing on screen %.1f ms\n",
 				1000 * draw_convert / draw_count, 1000 * draw_present / draw_count);
+		printf("mediacenter: pictures waited %.2f s for the sound\n", av_waited);
 	}
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
 	audio_close();

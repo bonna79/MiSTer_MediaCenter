@@ -1219,6 +1219,7 @@ static int dvd_play(const char *device)
 			DVD_LOCK();
 			mc.clock += elapsed;
 			feed_audio_output();
+			av_sync(elapsed);
 			// a picture timed far ahead would hold back all the others
 			while (mc.vq_count && mc.vq[0].pts > mc.clock + 3.0)
 			{

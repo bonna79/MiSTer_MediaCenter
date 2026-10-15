@@ -917,6 +917,7 @@ static int input_key(double now)
 #define AUDIO_RING (1 << 17) // stereo frames
 
 static FILE *audio_pipe = NULL;
+static int audio_rate = 0;
 static int16_t audio_ring[AUDIO_RING * 2];
 static volatile unsigned audio_rd = 0, audio_wr = 0;
 static pthread_t audio_thread;
@@ -965,6 +966,7 @@ static int audio_open(int samplerate)
 		samplerate);
 	audio_pipe = popen(cmd, "w");
 	if (!audio_pipe) return -1;
+	audio_rate = samplerate;
 
 	audio_running = 1;
 	if (pthread_create(&audio_thread, NULL, audio_main, NULL))
@@ -994,6 +996,18 @@ static int16_t to_s16(float v)
 	if (v > 1.0f) v = 1.0f;
 	if (v < -1.0f) v = -1.0f;
 	return (int16_t)(v * 32767.0f);
+}
+
+// Seconds of sound sent but not heard yet: in the ring, in the pipe, and in
+// aplay and the ALSA buffer (0.2 s, full while playing, plus about half a
+// period in aplay and in the writer thread).
+static double audio_queued(void)
+{
+	if (!audio_pipe || !audio_rate) return 0;
+	unsigned ring = audio_wr - audio_rd;
+	int piped = 0;
+	if (ioctl(fileno(audio_pipe), FIONREAD, &piped) < 0) piped = 0;
+	return (ring + piped / 4) / (double)audio_rate + 0.25;
 }
 
 static void audio_flush(void)
