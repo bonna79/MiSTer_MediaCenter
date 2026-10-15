@@ -270,6 +270,8 @@ static int svcd_chapters = 0;
 // Time of the end of the sound sent to aplay; NAN before any.
 static double sent_end = NAN;
 static double av_waited; // clock time held back for the sound, in the log
+static double audio_late_drop, audio_full_drop; // sound thrown away, seconds, in the log
+static int av_gaps, av_giveups; // sync skipped for a gap / gave up waiting, in the log
 
 // The picture shown in a YUV framebuffer (a reference to the decoded frame)
 // and whether it is shown every other line (light mode).
@@ -386,7 +388,7 @@ static void push_audio_at(AVFrame *f, double pts)
 	if (isnan(pts)) pts = mc.audio_end;
 
 	int room = mc.pend_cap - mc.pend_len;
-	if (room <= 0) return;
+	if (room <= 0) { audio_full_drop += f->nb_samples / (double)f->sample_rate; return; }
 	if (!mc.pend_len) mc.pend_pts = pts;
 	uint8_t *out = (uint8_t *)(mc.pend + (size_t)mc.pend_len * 2);
 	int n = swr_convert(mc.swr, &out, room, (const uint8_t **)f->extended_data, f->nb_samples);
@@ -410,6 +412,7 @@ static void feed_audio_output(void)
 	if (late > 0)
 	{
 		if (late > mc.pend_len) late = mc.pend_len;
+		audio_late_drop += late / (double)MC_AUDIO_RATE;
 		memmove(mc.pend, mc.pend + (size_t)late * 2, (size_t)(mc.pend_len - late) * 4);
 		mc.pend_len -= late;
 		mc.pend_pts += late / (double)MC_AUDIO_RATE;
@@ -465,7 +468,7 @@ static void av_sync(double elapsed)
 	// a gap in the sound (a new audio track starting later, a pause in the
 	// stream) is silence: the clock runs through it, otherwise the sound
 	// after the gap would never become due and playback would stop
-	if (mc.pend_len && mc.pend_pts > sent_end + 0.1) { held = 0; return; }
+	if (mc.pend_len && mc.pend_pts > sent_end + 0.1) { held = 0; av_gaps++; return; }
 	double heard = sent_end - audio_queued() - offset;
 	double late = mc.clock - heard;
 	if (late > 0.03)
@@ -478,12 +481,20 @@ static void av_sync(double elapsed)
 			// no sound is coming: stop waiting until some is sent again
 			sent_end = NAN;
 			held = 0;
+			av_giveups++;
 			return;
 		}
 		mc.clock -= c;
 		av_waited += c;
 	}
 	else held = 0;
+}
+
+static void av_report(void)
+{
+	printf("mediacenter: pictures waited %.2f s for the sound\n", av_waited);
+	printf("mediacenter: sound dropped late %.2f s, dropped with buffer full %.2f s, gaps %d, gave up waiting %d\n",
+		audio_late_drop, audio_full_drop, av_gaps, av_giveups);
 }
 
 // Queues a decoded picture to show at pts (NAN: one frame after the previous).
@@ -1316,6 +1327,8 @@ static int media_play(int in_playlist)
 	draw_convert = draw_present = 0;
 	draw_count = 0;
 	av_waited = 0;
+	audio_late_drop = audio_full_drop = 0;
+	av_gaps = av_giveups = 0;
 	double played = 0;
 	// The loop that reads the file and sends the sound runs ahead of the
 	// video decoding threads, so the sound keeps flowing on a heavy stream.
@@ -1543,7 +1556,7 @@ static int media_play(int in_playlist)
 		if (draw_count)
 			printf("mediacenter: per picture: colour conversion %.1f ms, drawing on screen %.1f ms\n",
 				1000 * draw_convert / draw_count, 1000 * draw_present / draw_count);
-		printf("mediacenter: pictures waited %.2f s for the sound\n", av_waited);
+		av_report();
 	}
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
 	audio_close();

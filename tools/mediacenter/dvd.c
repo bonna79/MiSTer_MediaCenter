@@ -219,6 +219,7 @@ static void dvd_audio_frame(AVFrame *f)
 		av_channel_layout_copy(&dvd.swr_layout, &f->ch_layout);
 		dvd.swr_rate = f->sample_rate;
 		dvd.swr_fmt = f->format;
+		printf("mediacenter: DVD sound %d Hz, %d channels\n", f->sample_rate, f->ch_layout.nb_channels);
 	}
 	double pts = f->best_effort_timestamp == AV_NOPTS_VALUE ? NAN : dvd_pos(f->best_effort_timestamp);
 	DVD_LOCK();
@@ -1355,6 +1356,7 @@ static int dvd_play(const char *device)
 	native_fb = 0;
 	fb_native(0, 0, 0);
 	printf("mediacenter: DVD pictures shown %d, dropped late %d\n", frames_shown, frames_dropped);
+	av_report();
 	audio_close();
 	exit_question = "Uscire dal Video CD?";
 	dvd_close();
