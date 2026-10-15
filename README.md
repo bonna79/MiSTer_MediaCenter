@@ -46,7 +46,47 @@ MMC funziona insieme al Main di [MiSTer Physical Disc](https://github.com/Anime0
 | **MiSTer MediaCenter** | Nel menu del MiSTer | Riconosce il disco inserito. DVD-Video, Video CD, Super Video CD e DVD dati li apre con il lettore; i giochi li avvia con il core di `_Physical Disc Cores` |
 | **MiSTer Physical Disc** | Dentro i core delle console | Legge il disco del gioco: subcanale Q, protezione LibCrypt della PSX, CD+G per il karaoke sul Mega CD, immagini CHD |
 
-Il MiSTer passa da un Main all'altro da solo, secondo le righe `main=` di `MiSTer.ini`. Per questo è importante configurare bene `MiSTer.ini` (vedi [Installazione](#3-modifica-mediafatmisterini)).
+Il MiSTer passa da un Main all'altro da solo, secondo le righe `main=` di `MiSTer.ini`.
+
+### Configurazione per usarli insieme
+
+Servono tutti e due i Main nella cartella principale della SD:
+
+| File | Da dove |
+| --- | --- |
+| `/media/fat/MiSTer_MediaCenter` | Da questo progetto ([Releases](../../releases)) |
+| `/media/fat/MiSTer_Physical-CD` | Da [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases) |
+
+Poi in `/media/fat/MiSTer.ini` aggiungi queste righe (se le sezioni ci sono già, correggi solo la riga `main=`):
+
+```ini
+; Menu del MiSTer: MiSTer MediaCenter riconosce i dischi
+; e apre DVD, Video CD, Super Video CD e file video
+[menu]
+main=MiSTer_MediaCenter
+PHYSICAL_DISC_BOOT=1
+
+; Core dei giochi su disco (_Physical Disc Cores): il Main
+; di Physical Disc legge il disco (PSX, Saturn, Mega CD...)
+[A0CD-*]
+main=MiSTer_Physical-CD
+```
+
+Riavvia il MiSTer. Da quel momento:
+
+1. nel menu lavora MiSTer MediaCenter: inserisci un DVD o un Video CD e parte il lettore; inserisci un gioco e MMC avvia il core giusto;
+2. appena parte il core del gioco, il MiSTer passa da solo al Main di Physical Disc, che legge il disco;
+3. quando esci dal gioco e torni al menu, il MiSTer torna da solo a MiSTer MediaCenter.
+
+Attenzione:
+
+- ogni sezione accetta **una sola** riga `main=`: se ce ne sono due vale solo l'ultima, quindi non mettere i due Main nella stessa sezione;
+- se il file del Main di Physical Disc sulla SD ha un altro nome, scrivi quello dopo `main=`;
+- senza la sezione `[A0CD-*]` i giochi partono ma il disco non viene letto;
+- `PHYSICAL_DISC_BOOT=1` è facoltativo: fa partire all'accensione il disco già nel lettore;
+- le opzioni del Main di Physical Disc (per esempio `MEGACD_SUBCODE_LOG`) vanno nella sezione `[A0CD-*]`.
+
+Le altre impostazioni sono spiegate in [Installazione](#3-modifica-mediafatmisterini).
 
 Se inserisci un DVD mentre sei in un gioco, esci al menu del MiSTer: lì MMC lo riconosce e lo fa partire.
 
