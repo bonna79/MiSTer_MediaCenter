@@ -67,27 +67,12 @@ jobs:
       - name: Build MediaCenter player
         run: make mediacenter FFMPEG="$PWD/ffmpeg-arm" DVDNAV="$PWD/dvdnav-arm"
 
-      # libdvdcss for protected DVDs, built from VideoLAN's source; the player
-      # loads it from /media/fat/dvdcss/libdvdcss.so.2 (see dvd.c).
-      - name: Build libdvdcss for the MiSTer ARM
-        run: |
-          curl -fsSL https://download.videolan.org/pub/videolan/libdvdcss/1.4.3/libdvdcss-1.4.3.tar.bz2 | tar -xj
-          cd libdvdcss-1.4.3
-          ./configure --host=arm-none-linux-gnueabihf --prefix="$PWD/../dvdcss-arm" --disable-static --disable-doc
-          make -j"$(nproc)"
-          make install
-          cd ..
-          mkdir -p bin/dvdcss
-          cp -L dvdcss-arm/lib/libdvdcss.so.2 bin/dvdcss/libdvdcss.so.2
-          arm-none-linux-gnueabihf-strip bin/dvdcss/libdvdcss.so.2
-          file bin/dvdcss/libdvdcss.so.2
-
       - uses: actions/upload-artifact@v4
         with:
           name: mediacenter_arm
           path: |
             bin/mediacenter
-            bin/dvdcss/libdvdcss.so.2
+            dvdcss/libdvdcss.so.2
             Scripts/mediacenter.sh
 
       # The menu core is compiled by fpga.yml (Quartus, only when fpga/ changes):
@@ -108,7 +93,8 @@ jobs:
           mkdir -p pkg/linux pkg/Scripts
           cp rbf/menu_mediacenter.rbf pkg/linux/
           mkdir -p pkg/dvdcss
-          cp bin/dvdcss/libdvdcss.so.2 pkg/dvdcss/
+          # libdvdcss for protected DVDs, kept in the repository (dvdcss/)
+          cp dvdcss/libdvdcss.so.2 pkg/dvdcss/
           cp bin/MiSTer_MediaCenter pkg/
           cp bin/mediacenter pkg/linux/
           cp Scripts/mediacenter.sh pkg/Scripts/
