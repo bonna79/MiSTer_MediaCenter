@@ -460,16 +460,30 @@ static void av_sync(double elapsed)
 		const char *e = getenv("MC_AV_OFFSET");
 		offset = e ? atof(e) : 0;
 	}
-	if (!audio_pipe || mc.astream < 0 || isnan(sent_end) || (mc.eof && !mc.pend_len)) return;
+	static double held; // seconds the clock has been held without a break
+	if (!audio_pipe || mc.astream < 0 || isnan(sent_end) || (mc.eof && !mc.pend_len)) { held = 0; return; }
+	// a gap in the sound (a new audio track starting later, a pause in the
+	// stream) is silence: the clock runs through it, otherwise the sound
+	// after the gap would never become due and playback would stop
+	if (mc.pend_len && mc.pend_pts > sent_end + 0.1) { held = 0; return; }
 	double heard = sent_end - audio_queued() - offset;
 	double late = mc.clock - heard;
 	if (late > 0.03)
 	{
 		double c = late - 0.02;
 		if (c > elapsed) c = elapsed; // the clock stops, never goes back
+		held += c;
+		if (held > 1.0)
+		{
+			// no sound is coming: stop waiting until some is sent again
+			sent_end = NAN;
+			held = 0;
+			return;
+		}
 		mc.clock -= c;
 		av_waited += c;
 	}
+	else held = 0;
 }
 
 // Queues a decoded picture to show at pts (NAN: one frame after the previous).
