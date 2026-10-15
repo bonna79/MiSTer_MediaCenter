@@ -2543,8 +2543,33 @@ static int test_setup(const char *spec)
 	return fb_mem ? 0 : -1;
 }
 
+// Settings for the player, read at start as environment variables (a
+// variable already set wins): /media/fat/linux/mediacenter.ini with lines
+// like MC_AV_OFFSET=0.05; lines starting with # or ; are comments.
+static void load_settings(void)
+{
+	FILE *f = fopen("/media/fat/linux/mediacenter.ini", "r");
+	if (!f) return;
+	char line[256];
+	while (fgets(line, sizeof(line), f))
+	{
+		char *p = line;
+		while (*p == ' ' || *p == '\t') p++;
+		if (*p == '#' || *p == ';' || *p == '[') continue;
+		char *eq = strchr(p, '=');
+		if (!eq) continue;
+		*eq = 0;
+		char *v = eq + 1, *end = v + strlen(v);
+		while (end > v && (end[-1] == '\n' || end[-1] == '\r' || end[-1] == ' ')) *--end = 0;
+		for (char *k = eq; k > p && k[-1] == ' '; ) *--k = 0;
+		if (*p) setenv(p, v, 0);
+	}
+	fclose(f);
+}
+
 int main(int argc, char *argv[])
 {
+	load_settings();
 	fb_present_yuv = yuv_draw;
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
