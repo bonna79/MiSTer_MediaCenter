@@ -21,13 +21,17 @@ The MiSTer's ARM processor reads and decodes discs and files. The FPGA handles t
 
 It reads from the USB optical drive, the SD card, USB sticks and network shares.
 
-The package has three parts:
+The package is made of these parts:
 
-| File | What it does |
-| --- | --- |
-| `MiSTer_MediaCenter` | The Main, the MiSTer's main program, used in the menu. When you insert a disc it recognizes it: video discs and data DVDs open with the player, games start with the right core |
-| `mediacenter` | The player itself, which runs on the ARM |
-| `menu_mediacenter.rbf` | MMC's menu core: the normal MiSTer menu plus the 15 kHz output that brings the video to the CRT |
+| File | Where it goes on the SD card | What it does |
+| --- | --- | --- |
+| `MiSTer_MediaCenter` | `/media/fat/` | The Main, the MiSTer's main program, used in the menu. When you insert a disc it recognizes it: video discs and data DVDs open with the player, games start with the right core |
+| `mediacenter` | `/media/fat/linux/` | The player itself, which runs on the ARM |
+| `mediacenter.sh` | `/media/fat/Scripts/` | The script shown in **Scripts**: it opens the player to pick files from SD, USB or network |
+| `menu_mediacenter.rbf` | `/media/fat/linux/` | MMC's menu core: the normal MiSTer menu plus the colour conversion and the 15 kHz output for the CRT |
+| `libdvdcss.so.2` | `/media/fat/dvdcss/` | The library for reading protected DVDs |
+
+The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
 The player's on-screen texts are in Italian.
 
@@ -36,6 +40,33 @@ The player's on-screen texts are in Italian.
 - **Working 15 kHz output for CRTs:** the player's video now reaches the CRT TV from the analog VGA output (tested with a SCART RGB cable on a Trinitron). With 2.0 the CRT only showed the menu background, because the Main never told the menu core there was a picture to show.
 - **Main updated** to the official MiSTer Main of 16 October 2026: HDMI fixes (TV detection, `vsync_adjust=2`) and everything new for the other cores.
 - With `vga_scaler=0` the "If you see this, then you need to modify MiSTer.ini" warning no longer appears over the player.
+
+Fixes:
+
+- **CRT with no picture:** with 2.0, on the VGA output without the scaler you only saw the menu's noise. The Main wrote the bit that tells the core "there is a Linux picture to show" the wrong way (a bug in the official Main, fixed on 1 October 2026). Now the core receives it and brings the video to the CRT.
+- **DivX cut on the right over HDMI:** a 576x432 video was doubled to 1152 pixels, but on a 720p TV the 4:3 window is 960 pixels wide and the scaler, in this mode, cannot shrink: only the first 960 pixels were shown. Now the player prepares the picture already at the window's size.
+- **Warning over the player:** the official Main shows a warning on the VGA when the Linux frame buffer is on and the scaler is off, because the stock menu cannot show it. MMC's core does show it, so with MMC the warning no longer appears.
+
+Tested on a real MiSTer with this Main (16 October 2026): DVD and DivX over HDMI at 720p and on a CRT at 15 kHz interlaced. **It has not yet been tested with the latest official Main installed as `/media/fat/MiSTer`**, the one used by the other cores: MMC uses its own Main in the menu anyway, so there should be no difference.
+
+## How it works
+
+The work is split between the two halves of the MiSTer:
+
+| Part | What it does |
+| --- | --- |
+| **ARM** (Cortex-A9 processor at 800 MHz, Linux) | The Main recognizes the disc. The `mediacenter` player reads the disc or file, decodes video and audio with FFmpeg (DVDs with libdvdnav and libdvdcss), handles DVD menus, subtitles and audio/video sync, and writes each picture to the frame buffer, an area of memory shared with the FPGA |
+| **FPGA** (`menu_mediacenter.rbf` core and scaler) | Reads the pictures from the frame buffer. Converts the colours from YUV to RGB, work that saves the ARM about 16 ms per picture. For HDMI the scaler enlarges the picture to the TV's resolution with the right shape. For the CRT the core generates the 15 kHz signal by itself: 240p/288p for the menu, 480i/576i interlaced for DVDs and video, narrowing the picture to 640 pixels and adding black bars to 16:9 films |
+
+The path of a picture:
+
+1. the ARM decodes the picture and writes it to one of the three frame buffer pages, while the scaler shows the previous one (so the picture never tears);
+2. the player tells the Main which page to show (`fb_cmd3 page`), and the Main passes it to the FPGA;
+3. the FPGA sends the same picture to HDMI and VGA at the same time.
+
+The sound goes from the ARM to the MiSTer's audio output, and the video follows the sound to stay in sync.
+
+The FPGA does not decode video: an H.264 decoder does not fit and there is no free one suited to the MiSTer. That is why the practical limit is 720p H.264.
 
 ## What's new in version 2.0
 
@@ -155,18 +186,19 @@ To watch an HD video, convert it to DVD resolution, for example with HandBrake: 
 - **HDMI (LCD TV):** the FPGA scaler enlarges the video to the resolution set with `video_mode` in `MiSTer.ini`, with the right shape (4:3, 16:9, 2.35:1 with black bars).
 - **15 kHz VGA (CRT TV):** the `menu_mediacenter.rbf` core sends the video to the CRT as its original signal. The menu comes out at 240p/288p; a DVD comes out interlaced at 480i (NTSC) or 576i (PAL), as from a DVD player; a 16:9 film is shown with black bars above and below (letterbox).
 
-For a CRT, add to the `[menu]` section of `MiSTer.ini`:
+MMC does not need to force anything: HDMI and CRT work with the MiSTer's normal settings. The general `[MiSTer]` part of `MiSTer.ini` just needs the scaler not to be sent to the VGA:
 
 ```ini
-[menu]
-main=MiSTer_MediaCenter
-vga_scaler=0
-forced_scandoubler=0
+[MiSTer]
+vga_scaler=0          ; VGA carries the core's signal, not the scaler's
+forced_scandoubler=0  ; the CRT gets 15 kHz
+composite_sync=1      ; only with a SCART cable (composite sync)
+video_mode=0          ; HDMI resolution, for example 1280x720
 ```
 
-Also add `composite_sync=1` if your cable or TV uses composite sync (for example with a SCART cable).
+Do **not** put `vga_scaler=1`, `video_mode`, `direct_video` or other scaler overrides in the `[menu]` section: they apply only to the menu, where MMC runs, and replace the general settings. With `vga_scaler=1` and a 240-line `video_mode`, for example, the CRT gets the scaler's picture, narrow and cut at the sides.
 
-Tested by rgm on a Sony Trinitron TV with a SCART RGB cable (`composite_sync=1`): DVD centred and whole. Don't use `vga_scaler=1` or a 240-line `video_mode` in the `[menu]` section: the CRT then gets the scaler's picture, narrow and cut at the sides.
+Tested by rgm on a Sony Trinitron TV with a SCART RGB cable: DVD and DivX centred and whole, interlaced at 576i; at the same time HDMI at 720p correct.
 
 ## Tested on a real MiSTer
 
@@ -181,7 +213,8 @@ Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI o
 | Data DVD-R with DivX and MKV files | The file list opens by itself, full-screen video |
 | 720p H.264 MP4 (anime, 23.976 pictures per second) | Smooth, 1.4–2.5% of pictures not shown, sound in sync, correct colours with the FPGA conversion |
 | 1440x810 H.264 MP4 | Shown whole, narrowed to the screen width, but stutters |
-| DVD on a CRT (15 kHz VGA, SCART RGB), version 2.1 | Picture centred and whole; DVD menu and film correct |
+| DVD on a CRT (15 kHz VGA, SCART RGB), version 2.1 | Picture centred and whole, 576i; DVD menu and film correct |
+| 576x432 DivX over HDMI 720p and on a CRT, version 2.1 | Whole on both outputs (before 2.1 it was cut on the right over HDMI) |
 | Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
 
 Still to test: Super Video CD read from a burned disc.
@@ -228,7 +261,7 @@ main=MiSTer_Physical-CD
 - **Each section takes a single `main=` line:** if there are two, only the last one counts. Do not put both Mains in the same section.
 - **`PHYSICAL_DISC_BOOT=1`** is optional: at power-on it starts the disc already in the drive, like a console switched on with a disc inside.
 - Physical Disc Main options, such as `MEGACD_SUBCODE_LOG` and `MEGACD_CDDA_PACED`, go in the `[A0CD-*]` section.
-- For a CRT, add the lines from [Video output](#video-output-hdmi-and-15-khz-crt) to `[menu]`.
+- HDMI and CRT need no lines in `[menu]`: see [Video output](#video-output-hdmi-and-15-khz-crt) for the general settings.
 
 Other optional settings, in the `[menu]` section:
 

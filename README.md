@@ -21,19 +21,50 @@ Il processore ARM del MiSTer legge e decodifica dischi e file. L'FPGA si occupa 
 
 Legge dal lettore ottico USB, dalla scheda SD, dalle chiavette USB e dalle cartelle di rete.
 
-Il pacchetto è formato da tre parti:
+Il pacchetto è formato da queste parti:
 
-| File | Cosa fa |
-| --- | --- |
-| `MiSTer_MediaCenter` | Il Main, il programma principale del MiSTer, usato nel menu. Quando inserisci un disco lo riconosce: dischi video e DVD dati li apre con il lettore, i giochi li avvia con il core giusto |
-| `mediacenter` | Il lettore vero e proprio, che gira sull'ARM |
-| `menu_mediacenter.rbf` | Il core del menu di MMC: il menu normale del MiSTer più l'uscita a 15 kHz che porta il video al CRT |
+| File | Dove va sulla SD | Cosa fa |
+| --- | --- | --- |
+| `MiSTer_MediaCenter` | `/media/fat/` | Il Main, il programma principale del MiSTer, usato nel menu. Quando inserisci un disco lo riconosce: dischi video e DVD dati li apre con il lettore, i giochi li avvia con il core giusto |
+| `mediacenter` | `/media/fat/linux/` | Il lettore vero e proprio, che gira sull'ARM |
+| `mediacenter.sh` | `/media/fat/Scripts/` | Lo script che compare in **Scripts**: apre il lettore per scegliere file da SD, USB o rete |
+| `menu_mediacenter.rbf` | `/media/fat/linux/` | Il core del menu di MMC: il menu normale del MiSTer più la conversione dei colori e l'uscita a 15 kHz per il CRT |
+| `libdvdcss.so.2` | `/media/fat/dvdcss/` | La libreria per leggere i DVD protetti |
+
+Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
 
 ## Novità della versione 2.1
 
 - **Uscita a 15 kHz per i CRT funzionante:** il video del lettore ora arriva al televisore CRT dalla VGA analogica (provato con cavo SCART RGB su un Trinitron). Con la 2.0 sul CRT si vedeva solo lo sfondo del menu, perché il Main non avvisava il core del menu che c'era un'immagine da mostrare.
 - **Main aggiornato** al Main ufficiale del MiSTer del 16 ottobre 2026: correzioni per l'HDMI (riconoscimento del televisore, `vsync_adjust=2`) e tutte le novità per gli altri core.
 - Con `vga_scaler=0` non compare più l'avviso "If you see this, then you need to modify MiSTer.ini" sopra il lettore.
+
+Correzioni:
+
+- **CRT senza immagine:** con la 2.0, sull'uscita VGA senza scaler si vedeva solo il fruscio del menu. Il Main scriveva in modo sbagliato il bit che dice al core "c'è un'immagine di Linux da mostrare" (errore del Main ufficiale, corretto il 1° ottobre 2026). Ora il core lo riceve e porta il video al CRT.
+- **DivX tagliati a destra su HDMI:** un video 576x432 veniva raddoppiato a 1152 punti, ma con un televisore a 720p il riquadro 4:3 è largo 960 punti e lo scaler, in questa modalità, non sa rimpicciolire: si vedevano solo i primi 960 punti. Ora il lettore prepara l'immagine già della misura del riquadro.
+- **Avviso sopra il lettore:** il Main ufficiale mostra sulla VGA un avviso quando c'è il framebuffer di Linux e lo scaler è spento, perché il menu di serie non sa mostrarlo. Il core di MMC invece lo mostra, quindi l'avviso con MMC non compare più.
+
+Provata su un MiSTer vero con questo Main (16 ottobre 2026): DVD e DivX su HDMI a 720p e su CRT a 15 kHz interlacciato. **Non è ancora stata provata con l'ultimo Main ufficiale installato come `/media/fat/MiSTer`**, quello usato dagli altri core: MMC usa comunque il suo Main nel menu, quindi non dovrebbero esserci differenze.
+
+## Come funziona
+
+Il lavoro è diviso tra le due parti del MiSTer:
+
+| Parte | Cosa fa |
+| --- | --- |
+| **ARM** (processore Cortex-A9 a 800 MHz, Linux) | Il Main riconosce il disco. Il lettore `mediacenter` legge disco o file, decodifica video e audio con FFmpeg (DVD con libdvdnav e libdvdcss), gestisce menu dei DVD, sottotitoli e sincronismo audio/video, e scrive ogni immagine nel framebuffer, cioè in una zona della memoria condivisa con l'FPGA |
+| **FPGA** (core `menu_mediacenter.rbf` e scaler) | Legge le immagini dal framebuffer. Converte i colori da YUV a RGB, lavoro che toglie all'ARM circa 16 ms per immagine. Per l'HDMI lo scaler ingrandisce l'immagine alla risoluzione del televisore con le proporzioni giuste. Per il CRT il core genera da solo il segnale a 15 kHz: 240p/288p per il menu, 480i/576i interlacciato per DVD e video, restringendo l'immagine a 640 punti e aggiungendo le bande nere ai film 16:9 |
+
+Il percorso di un'immagine:
+
+1. l'ARM decodifica l'immagine e la scrive in una delle tre pagine del framebuffer, mentre lo scaler mostra quella precedente (così l'immagine non si spezza);
+2. il lettore dice al Main quale pagina mostrare (`fb_cmd3 page`), e il Main lo comunica all'FPGA;
+3. l'FPGA manda la stessa immagine all'HDMI e alla VGA, contemporaneamente.
+
+L'audio va dall'ARM all'uscita audio del MiSTer, e il video si regola sull'audio per restare sincronizzato.
+
+L'FPGA non decodifica il video: un decodificatore H.264 non ci sta e non ne esiste uno libero adatto al MiSTer. Per questo il limite pratico è l'H.264 a 720p.
 
 ## Novità della versione 2.0
 
@@ -153,18 +184,19 @@ Per guardare un video HD conviene convertirlo, per esempio con HandBrake, a riso
 - **HDMI (televisore LCD):** lo scaler dell'FPGA ingrandisce il video alla risoluzione impostata con `video_mode` in `MiSTer.ini`, con le proporzioni giuste (4:3, 16:9, 2.35:1 con le bande nere).
 - **VGA a 15 kHz (televisore CRT):** il core `menu_mediacenter.rbf` manda il video al CRT con il suo segnale originale. Il menu esce a 240p/288p; un DVD esce interlacciato a 480i (NTSC) o 576i (PAL), come da un lettore DVD; un film in 16:9 viene mostrato con le bande nere sopra e sotto (letterbox).
 
-Per il CRT aggiungi alla sezione `[menu]` di `MiSTer.ini`:
+MMC non ha bisogno di forzare niente: HDMI e CRT funzionano con le impostazioni normali del MiSTer. Basta che nella parte generale `[MiSTer]` di `MiSTer.ini` lo scaler non sia collegato alla VGA:
 
 ```ini
-[menu]
-main=MiSTer_MediaCenter
-vga_scaler=0
-forced_scandoubler=0
+[MiSTer]
+vga_scaler=0          ; la VGA porta il segnale del core, non quello dello scaler
+forced_scandoubler=0  ; il CRT riceve 15 kHz
+composite_sync=1      ; solo con cavo SCART (sincronismo composito)
+video_mode=0          ; risoluzione dell'HDMI, per esempio 1280x720
 ```
 
-Aggiungi anche `composite_sync=1` se il tuo cavo o il tuo televisore usano il sincronismo composito (per esempio con un cavo SCART).
+Nella sezione `[menu]` **non** mettere `vga_scaler=1`, `video_mode`, `direct_video` o altre forzature dello scaler: valgono solo per il menu, dove gira MMC, e prendono il posto delle impostazioni generali. Con `vga_scaler=1` e un `video_mode` a 240 righe, per esempio, sul CRT arriva l'immagine dello scaler, stretta e tagliata ai lati.
 
-Provata da rgm su un televisore Sony Trinitron con cavo SCART RGB (`composite_sync=1`): DVD centrato e intero. Non usare `vga_scaler=1` né un `video_mode` a 240 righe nella sezione `[menu]`: in quel caso sul CRT arriva l'immagine dello scaler, stretta e tagliata ai lati.
+Provata da rgm su un televisore Sony Trinitron con cavo SCART RGB: DVD e DivX centrati e interi, interlacciati a 576i; nello stesso momento HDMI a 720p corretto.
 
 ## Prove su un MiSTer vero
 
@@ -179,7 +211,8 @@ Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, usci
 | DVD-R dati con file DivX e MKV | L'elenco dei file si apre da solo, video a tutto schermo |
 | MP4 H.264 720p (anime, 23,976 immagini al secondo) | Fluido, 1,4–2,5% di immagini non mostrate, audio sincronizzato, colori corretti con la conversione nell'FPGA |
 | MP4 H.264 1440x810 | Si vede intero, ristretto alla larghezza dello schermo, ma scatta |
-| DVD su CRT (VGA 15 kHz, SCART RGB), versione 2.1 | Immagine centrata e intera; menu del DVD e film corretti |
+| DVD su CRT (VGA 15 kHz, SCART RGB), versione 2.1 | Immagine centrata e intera, 576i; menu del DVD e film corretti |
+| DivX 576x432 su HDMI 720p e su CRT, versione 2.1 | Intero su tutte e due le uscite (prima della 2.1 era tagliato a destra su HDMI) |
 | Convivenza con il Main di Physical Disc | DVD e Video CD con MMC; un gioco PSX PAL con LibCrypt (The Legend of Dragoon) parte da solo e funziona con il Main di Physical Disc |
 
 Da provare: Super Video CD letto da un disco masterizzato.
@@ -226,7 +259,7 @@ main=MiSTer_Physical-CD
 - **Ogni sezione accetta una sola riga `main=`:** se ce ne sono due, vale solo l'ultima. Non mettere tutti e due i Main nella stessa sezione.
 - **`PHYSICAL_DISC_BOOT=1`** è facoltativo: all'accensione fa partire il disco che è già nel lettore, come una console accesa con il disco dentro.
 - Le opzioni del Main di Physical Disc, come `MEGACD_SUBCODE_LOG` e `MEGACD_CDDA_PACED`, vanno nella sezione `[A0CD-*]`.
-- Per il CRT aggiungi a `[menu]` le righe di [Uscita video](#uscita-video-hdmi-e-crt-a-15-khz).
+- Per l'HDMI e il CRT non servono righe in `[menu]`: vedi [Uscita video](#uscita-video-hdmi-e-crt-a-15-khz) per le impostazioni generali.
 
 Altre impostazioni facoltative, nella sezione `[menu]`:
 
