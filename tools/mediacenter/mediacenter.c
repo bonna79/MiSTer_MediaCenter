@@ -1115,6 +1115,15 @@ static void draw_video_frame(AVFrame *f)
 		// screen is narrowed on the ARM, or its right side would be cut off.
 		int fw = f->width * mx, fh = h * my;
 		int sw = native_w ? def_w : fb_w, sh = native_w ? def_h : fb_h;
+		// The scaler shows the frame buffer in a window of the picture's
+		// aspect (4:3 on a 16:9 screen is narrower than the screen) and
+		// cannot shrink it: the picture must fit that window.
+		if (sw >= 320 && sh >= 240 && fb_aspect > 0)
+		{
+			int ww = (int)(sh * fb_aspect + 0.5);
+			if (ww <= sw) sw = ww;
+			else sh = (int)(sw / fb_aspect + 0.5);
+		}
 		if (sw >= 320 && fw > sw) fw = sw;
 		if (sh >= 240 && fh > sh) fh = sh;
 		// A picture drawn at its own size goes to the framebuffer as YUV and
