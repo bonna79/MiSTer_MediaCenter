@@ -236,6 +236,7 @@ void user_io_file_rx_data(uint8_t *addr, uint32_t len);
 void user_io_file_info(const char *ext);
 int user_io_get_width();
 int user_io_menu_yuv();
+int menu_is_mediacenter();
 
 void user_io_check_reset(unsigned short modifiers, char useKeys);
 

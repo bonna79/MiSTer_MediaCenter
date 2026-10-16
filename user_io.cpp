@@ -1452,7 +1452,7 @@ int user_io_get_width()
 }
 
 // The menu core is MiSTer MediaCenter's one ("MC" in its version string).
-static int menu_is_mediacenter()
+int menu_is_mediacenter()
 {
 	for (int i = 0;; i++)
 	{

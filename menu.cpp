@@ -902,7 +902,8 @@ const char* get_rbf_name_bootcore(char *str)
 
 static void vga_nag()
 {
-	if (video_fb_state() && !(cfg.fb_terminal == 2 && !cfg.vga_scaler && !cfg.direct_video))
+	// MiSTer MediaCenter's menu core shows the frame buffer on its own 15 kHz output.
+	if (video_fb_state() && !(cfg.fb_terminal == 2 && !cfg.vga_scaler && !cfg.direct_video) && !(is_menu() && menu_is_mediacenter()))
 	{
 		EnableOsd_on(OSD_VGA);
 		OsdSetSize(16);
