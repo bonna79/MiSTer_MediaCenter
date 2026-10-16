@@ -31,6 +31,12 @@ The package has three parts:
 
 The player's on-screen texts are in Italian.
 
+## What's new in version 2.1
+
+- **Working 15 kHz output for CRTs:** the player's video now reaches the CRT TV from the analog VGA output (tested with a SCART RGB cable on a Trinitron). With 2.0 the CRT only showed the menu background, because the Main never told the menu core there was a picture to show.
+- **Main updated** to the official MiSTer Main of 16 October 2026: HDMI fixes (TV detection, `vsync_adjust=2`) and everything new for the other cores.
+- With `vga_scaler=0` the "If you see this, then you need to modify MiSTer.ini" warning no longer appears over the player.
+
 ## What's new in version 2.0
 
 - **Colours converted by the FPGA:** the menu core converts colours from YUV to RGB, work the ARM used to do. 720p H.264 MP4 video now plays smoothly: frames not shown drop from 10% to about 2%.
@@ -160,11 +166,11 @@ forced_scandoubler=0
 
 Also add `composite_sync=1` if your cable or TV uses composite sync (for example with a SCART cable).
 
-The 15 kHz output has not been tested on a real CRT yet. If DVD pictures shake, the field order may need flipping: report it with a photo.
+Tested by rgm on a Sony Trinitron TV with a SCART RGB cable (`composite_sync=1`): DVD centred and whole. Don't use `vga_scaler=1` or a 240-line `video_mode` in the `[menu]` section: the CRT then gets the scaler's picture, narrow and cut at the sides.
 
 ## Tested on a real MiSTer
 
-Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 15 October 2026.
+Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 16 October 2026; Sony Trinitron CRT over SCART RGB.
 
 | Test | Result |
 | --- | --- |
@@ -175,9 +181,10 @@ Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI o
 | Data DVD-R with DivX and MKV files | The file list opens by itself, full-screen video |
 | 720p H.264 MP4 (anime, 23.976 pictures per second) | Smooth, 1.4–2.5% of pictures not shown, sound in sync, correct colours with the FPGA conversion |
 | 1440x810 H.264 MP4 | Shown whole, narrowed to the screen width, but stutters |
+| DVD on a CRT (15 kHz VGA, SCART RGB), version 2.1 | Picture centred and whole; DVD menu and film correct |
 | Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
 
-Still to test: Super Video CD read from a burned disc, 15 kHz VGA output on a real CRT.
+Still to test: Super Video CD read from a burned disc.
 
 ## Installation
 

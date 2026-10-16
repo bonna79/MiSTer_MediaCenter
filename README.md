@@ -29,6 +29,12 @@ Il pacchetto è formato da tre parti:
 | `mediacenter` | Il lettore vero e proprio, che gira sull'ARM |
 | `menu_mediacenter.rbf` | Il core del menu di MMC: il menu normale del MiSTer più l'uscita a 15 kHz che porta il video al CRT |
 
+## Novità della versione 2.1
+
+- **Uscita a 15 kHz per i CRT funzionante:** il video del lettore ora arriva al televisore CRT dalla VGA analogica (provato con cavo SCART RGB su un Trinitron). Con la 2.0 sul CRT si vedeva solo lo sfondo del menu, perché il Main non avvisava il core del menu che c'era un'immagine da mostrare.
+- **Main aggiornato** al Main ufficiale del MiSTer del 16 ottobre 2026: correzioni per l'HDMI (riconoscimento del televisore, `vsync_adjust=2`) e tutte le novità per gli altri core.
+- Con `vga_scaler=0` non compare più l'avviso "If you see this, then you need to modify MiSTer.ini" sopra il lettore.
+
 ## Novità della versione 2.0
 
 - **Colori convertiti dall'FPGA:** il core del menu converte i colori da YUV a RGB, lavoro che prima faceva l'ARM. I video MP4 in H.264 a 720p ora sono fluidi: le immagini non mostrate scendono dal 10% a circa il 2%.
@@ -158,11 +164,11 @@ forced_scandoubler=0
 
 Aggiungi anche `composite_sync=1` se il tuo cavo o il tuo televisore usano il sincronismo composito (per esempio con un cavo SCART).
 
-L'uscita a 15 kHz non è ancora stata provata su un CRT vero. Se l'immagine dei DVD trema, potrebbe servire invertire l'ordine dei campi: segnalalo con una foto.
+Provata da rgm su un televisore Sony Trinitron con cavo SCART RGB (`composite_sync=1`): DVD centrato e intero. Non usare `vga_scaler=1` né un `video_mode` a 240 righe nella sezione `[menu]`: in quel caso sul CRT arriva l'immagine dello scaler, stretta e tagliata ai lati.
 
 ## Prove su un MiSTer vero
 
-Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, uscita HDMI a 1280x720, fino al 15 ottobre 2026.
+Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, uscita HDMI a 1280x720, fino al 16 ottobre 2026; CRT Sony Trinitron via SCART RGB.
 
 | Prova | Risultato |
 | --- | --- |
@@ -173,9 +179,10 @@ Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, usci
 | DVD-R dati con file DivX e MKV | L'elenco dei file si apre da solo, video a tutto schermo |
 | MP4 H.264 720p (anime, 23,976 immagini al secondo) | Fluido, 1,4–2,5% di immagini non mostrate, audio sincronizzato, colori corretti con la conversione nell'FPGA |
 | MP4 H.264 1440x810 | Si vede intero, ristretto alla larghezza dello schermo, ma scatta |
+| DVD su CRT (VGA 15 kHz, SCART RGB), versione 2.1 | Immagine centrata e intera; menu del DVD e film corretti |
 | Convivenza con il Main di Physical Disc | DVD e Video CD con MMC; un gioco PSX PAL con LibCrypt (The Legend of Dragoon) parte da solo e funziona con il Main di Physical Disc |
 
-Da provare: Super Video CD letto da un disco masterizzato, uscita VGA a 15 kHz su un CRT vero.
+Da provare: Super Video CD letto da un disco masterizzato.
 
 ## Installazione
 
