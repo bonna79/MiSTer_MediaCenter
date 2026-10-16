@@ -14,7 +14,7 @@
 
 **Come funziona:** l'ARM legge il disco o il file, decodifica video e audio con FFmpeg e scrive le immagini nel framebuffer. L'FPGA converte i colori da YUV a RGB, ingrandisce l'immagine per l'HDMI e genera da solo il segnale a 15 kHz per il CRT, mandando la stessa immagine alle due uscite insieme. Dettagli nel README.
 
-**Non ancora provata con l'ultimo Main ufficiale installato come `/media/fat/MiSTer`.** Le prove sono state fatte con il Main ufficiale precedente; MMC usa comunque il suo Main nel menu.
+Provata sia con il Main ufficiale precedente sia con l'ultimo Main ufficiale installato come `/media/fat/MiSTer`: nessun problema.
 
 **Dalla 2.0:**
 - l'FPGA converte i colori del video: gli MP4 H.264 a 720p ora sono fluidi (immagini non mostrate dal 10% a circa il 2%);
@@ -51,7 +51,7 @@ main=MiSTer_Physical-CD
 MMC lavora nel menu (dischi video e file); il Main di Physical Disc di Anime0t4ku, installato a parte, lavora nei core delle console per i giochi. Riavvia il MiSTer. Per i DVD protetti lo zip include `libdvdcss.so.2` in `dvdcss/`, la stessa provata con i DVD protetti. Guida completa e risultati delle prove nel [README](https://github.com/bonna79/MiSTer_MediaCenter#readme).
 
 **Provato su MiSTer reale:** DVD protetti con menu, tracce audio e sottotitoli; Video CD; Super Video CD da immagine; DVD-R con DivX e MKV; MP4 H.264 720p; gioco PSX con LibCrypt tramite il Main di Physical Disc; DVD e DivX su CRT Trinitron via SCART RGB e su HDMI 720p.
-**Da provare:** Super Video CD da disco masterizzato; ultimo Main ufficiale come `/media/fat/MiSTer`.
+**Da provare:** Super Video CD da disco masterizzato.
 
 Problemi: apri una segnalazione in [Issues](https://github.com/bonna79/MiSTer_MediaCenter/issues) con foto dello schermo e `/tmp/mediacenter.log`.
 
@@ -69,7 +69,7 @@ Problemi: apri una segnalazione in [Issues](https://github.com/bonna79/MiSTer_Me
 
 **How it works:** the ARM reads the disc or file, decodes video and audio with FFmpeg and writes the pictures to the frame buffer. The FPGA converts colours from YUV to RGB, enlarges the picture for HDMI and generates the 15 kHz CRT signal by itself, sending the same picture to both outputs at once. Details in the README.
 
-**Not yet tested with the latest official Main installed as `/media/fat/MiSTer`.** Tests used the previous official Main; MMC uses its own Main in the menu anyway.
+Tested with both the previous official Main and the latest official Main installed as `/media/fat/MiSTer`: no problems.
 
 **From 2.0:**
 - the FPGA converts the video colours: 720p H.264 MP4 now plays smoothly (frames not shown from 10% to about 2%);
@@ -80,4 +80,4 @@ Problemi: apri una segnalazione in [Issues](https://github.com/bonna79/MiSTer_Me
 
 **Install:** extract `MiSTer_MediaCenter.zip` to the root of the SD card (always update all files together): Main `MiSTer_MediaCenter` to `/media/fat/`, ARM player `mediacenter` and menu core `menu_mediacenter.rbf` to `/media/fat/linux/`, script `mediacenter.sh` to `/media/fat/Scripts/`, `libdvdcss.so.2` to `/media/fat/dvdcss/`. The old `vcd_player` is no longer needed. In `MiSTer.ini` put `vga_scaler=0`, `forced_scandoubler=0` (and `composite_sync=1` with SCART) in `[MiSTer]`, `main=MiSTer_MediaCenter` in `[menu]` with no scaler overrides, and `main=MiSTer_Physical-CD` in `[A0CD-*]`: MMC handles the menu (video discs and files), Anime0t4ku's Physical Disc Main, installed separately, handles games inside the console cores. Restart the MiSTer. Full guide and test results in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md).
 
-**Tested on a real MiSTer:** protected DVDs with menus, audio tracks and subtitles; Video CDs; Super Video CD from an image; DVD-R with DivX and MKV; 720p H.264 MP4; PSX game with LibCrypt through the Physical Disc Main; DVD and DivX on a Trinitron CRT over SCART RGB and over HDMI 720p. **Still to test:** Super Video CD from a burned disc; latest official Main as `/media/fat/MiSTer`.
+**Tested on a real MiSTer:** protected DVDs with menus, audio tracks and subtitles; Video CDs; Super Video CD from an image; DVD-R with DivX and MKV; 720p H.264 MP4; PSX game with LibCrypt through the Physical Disc Main; DVD and DivX on a Trinitron CRT over SCART RGB and over HDMI 720p. **Still to test:** Super Video CD from a burned disc.

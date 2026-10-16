@@ -45,7 +45,7 @@ Correzioni:
 - **DivX tagliati a destra su HDMI:** un video 576x432 veniva raddoppiato a 1152 punti, ma con un televisore a 720p il riquadro 4:3 è largo 960 punti e lo scaler, in questa modalità, non sa rimpicciolire: si vedevano solo i primi 960 punti. Ora il lettore prepara l'immagine già della misura del riquadro.
 - **Avviso sopra il lettore:** il Main ufficiale mostra sulla VGA un avviso quando c'è il framebuffer di Linux e lo scaler è spento, perché il menu di serie non sa mostrarlo. Il core di MMC invece lo mostra, quindi l'avviso con MMC non compare più.
 
-Provata su un MiSTer vero con questo Main (16 ottobre 2026): DVD e DivX su HDMI a 720p e su CRT a 15 kHz interlacciato. **Non è ancora stata provata con l'ultimo Main ufficiale installato come `/media/fat/MiSTer`**, quello usato dagli altri core: MMC usa comunque il suo Main nel menu, quindi non dovrebbero esserci differenze.
+Provata su un MiSTer vero (16 ottobre 2026): DVD e DivX su HDMI a 720p e su CRT a 15 kHz interlacciato, sia con il Main ufficiale precedente sia con l'ultimo Main ufficiale installato come `/media/fat/MiSTer`, quello usato dagli altri core.
 
 ## Come funziona
 
@@ -213,6 +213,7 @@ Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, usci
 | MP4 H.264 1440x810 | Si vede intero, ristretto alla larghezza dello schermo, ma scatta |
 | DVD su CRT (VGA 15 kHz, SCART RGB), versione 2.1 | Immagine centrata e intera, 576i; menu del DVD e film corretti |
 | DivX 576x432 su HDMI 720p e su CRT, versione 2.1 | Intero su tutte e due le uscite (prima della 2.1 era tagliato a destra su HDMI) |
+| Ultimo Main ufficiale (16 ottobre 2026) come `/media/fat/MiSTer`, versione 2.1 | Funziona tutto, nessun problema |
 | Convivenza con il Main di Physical Disc | DVD e Video CD con MMC; un gioco PSX PAL con LibCrypt (The Legend of Dragoon) parte da solo e funziona con il Main di Physical Disc |
 
 Da provare: Super Video CD letto da un disco masterizzato.

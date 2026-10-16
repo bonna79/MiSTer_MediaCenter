@@ -47,7 +47,7 @@ Fixes:
 - **DivX cut on the right over HDMI:** a 576x432 video was doubled to 1152 pixels, but on a 720p TV the 4:3 window is 960 pixels wide and the scaler, in this mode, cannot shrink: only the first 960 pixels were shown. Now the player prepares the picture already at the window's size.
 - **Warning over the player:** the official Main shows a warning on the VGA when the Linux frame buffer is on and the scaler is off, because the stock menu cannot show it. MMC's core does show it, so with MMC the warning no longer appears.
 
-Tested on a real MiSTer with this Main (16 October 2026): DVD and DivX over HDMI at 720p and on a CRT at 15 kHz interlaced. **It has not yet been tested with the latest official Main installed as `/media/fat/MiSTer`**, the one used by the other cores: MMC uses its own Main in the menu anyway, so there should be no difference.
+Tested on a real MiSTer (16 October 2026): DVD and DivX over HDMI at 720p and on a CRT at 15 kHz interlaced, both with the previous official Main and with the latest official Main installed as `/media/fat/MiSTer`, the one used by the other cores.
 
 ## How it works
 
@@ -215,6 +215,7 @@ Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI o
 | 1440x810 H.264 MP4 | Shown whole, narrowed to the screen width, but stutters |
 | DVD on a CRT (15 kHz VGA, SCART RGB), version 2.1 | Picture centred and whole, 576i; DVD menu and film correct |
 | 576x432 DivX over HDMI 720p and on a CRT, version 2.1 | Whole on both outputs (before 2.1 it was cut on the right over HDMI) |
+| Latest official Main (16 October 2026) as `/media/fat/MiSTer`, version 2.1 | Everything works, no problems |
 | Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
 
 Still to test: Super Video CD read from a burned disc.
