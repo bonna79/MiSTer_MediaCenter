@@ -16,11 +16,13 @@
 #include "support/vhd/vhdcfg.h"
 #include "support/minimig/minimig_hdd.h"
 #include "support/minimig/minimig_config.h"
+#include "support/minimig/minimig_a2065.h"
 #include "spi.h"
 #include "user_io.h"
 #include "file_io.h"
 #include "hardware.h"
 #include "ide.h"
+#include "ide_cdrom.h"
 
 #if 0
 	#define dbg_printf     printf
@@ -88,6 +90,25 @@ uint16_t ide_check()
 	if (!res) res = (uint8_t)spi_w(0);
 	DisableIO();
 	return res;
+}
+
+// Wait for the core to take or supply the next block of a transfer. The
+// Amiga can be held in the A2065 interrupt server meanwhile: it acknowledges
+// CSR0 and loops until the bits clear, which needs a2065_poll() to apply the
+// write. Without it here neither side ever proceeds.
+// a2065_poll() costs an uncached DDR3 read and a recv() each call, so it runs
+// on every 16th miss only: the core usually answers within a few checks, and
+// the handshake latency of every block would otherwise pay for it.
+static uint16_t ide_wait_req(ide_config *ide)
+{
+	uint16_t req = 0;
+	uint32_t spins = 0;
+	while (!req)
+	{
+		req = (ide_check() >> ide->bitoff) & 7;
+		if (!req && !(++spins & 15)) a2065_poll();
+	}
+	return req;
 }
 
 int ide_img_mount(fileTYPE *f, const char *name, int rw)
@@ -473,7 +494,7 @@ void ide_img_set(uint32_t drvnum, fileTYPE *f, int cd, int sectors, int heads, i
 	{
 		if (drive->present)
 		{
-			if (!drive->chd_f) 
+			if (!drive->chd_f)
 			{
 				if (parse_vhd_config(drive)) ide_set_geometry(drive, sectors, heads);
 				else ide_set_geometry(drive, drive->spt, drive->heads);
@@ -814,8 +835,7 @@ static void process_read(ide_config *ide, int multi)
 		if (!ide->null) ide->null = (readhdd(&ide->drive[ide->regs.drv], lba, cnt) <= 0);
 		if (ide->null) memset(ide_buf, 0, cnt * 512);
 
-		ide_req = 0;
-		while (!ide_req) ide_req = (ide_check() >> ide->bitoff) & 7;
+		ide_req = ide_wait_req(ide);
 
 		if (ide_req != 5)
 		{
@@ -845,8 +865,7 @@ static void process_write(ide_config *ide, int multi)
 		ide->regs.io_size = cnt;
 		ide_set_regs(ide);
 
-		ide_req = 0;
-		while (!ide_req) ide_req = (ide_check() >> ide->bitoff) & 7;
+		ide_req = ide_wait_req(ide);
 
 		if (ide_req != 5)
 		{
@@ -946,7 +965,24 @@ static int handle_hdd(ide_config *ide)
 
 	case 0x40: // READ VERIFY
 		dbg_printf("Received read verify command. Not implemented but returning OK.\n");
-		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_IRQ;
+		ide->regs.error = 0;
+		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_DSC | ATA_STATUS_IRQ;
+		ide_set_regs(ide);
+		break;
+
+	case 0x70: // seek
+	case 0xE3: // standby immediate
+		// These no-data commands complete immediately for image-backed disks.
+		ide->regs.error = 0;
+		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_DSC | ATA_STATUS_IRQ;
+		ide_set_regs(ide);
+		break;
+
+	case 0x90: // execute device diagnostic
+		// Return the ATA drive-0-passed diagnostic code. Some system BIOSes
+		// require this command to succeed before registering the disk.
+		ide->regs.error = 0x01;
+		ide->regs.status = ATA_STATUS_RDY | ATA_STATUS_DSC | ATA_STATUS_IRQ;
 		ide_set_regs(ide);
 		break;
 
@@ -1099,7 +1135,8 @@ int ide_open(uint8_t unit, const char* filename)
 	static fileTYPE hdd_file[4] = {};
 	chs_t chs = {};
 
-	if (!is_minimig() || ((minimig_config.ide_cfg & 1) && minimig_config.hardfile[unit].cfg))
+	if (!is_minimig()
+	    || ((minimig_config.ide_cfg & 1) && minimig_config.hardfile[unit].cfg))
 	{
 		printf("\nChecking HDD %d\n", unit);
 		if (filename[0] && FileOpenEx(&hdd_file[unit], filename, FileCanWrite(filename) ? O_RDWR : O_RDONLY))
@@ -1135,6 +1172,11 @@ int ide_open(uint8_t unit, const char* filename)
 	}
 
 	// close if opened earlier.
+	{
+		int port = (unit >> 1) & 1;
+		int drv  = unit & 1;
+		cdrom_close_chd(&ide_inst[port].drive[drv]);
+	}
 	ide_img_set(unit, 0, 0);
 	FileClose(&hdd_file[unit]);
 	return 0;

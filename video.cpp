@@ -19,6 +19,7 @@
 #include "file_io.h"
 #include "mat4x4.h"
 #include "menu.h"
+#include "osd.h"
 #include "video.h"
 #include "input.h"
 #include "shmem.h"
@@ -87,6 +88,9 @@ static int fb_enabled = 0;
 static int fb_width = 0;
 static int fb_height = 0;
 static int fb_num = 0;
+static int con_width = 0;
+static int con_height = 0;
+static int con_crt = 0;
 static int brd_x = 0;
 static int brd_y = 0;
 
@@ -95,9 +99,24 @@ static int menu_bgn = 0;
 
 VideoInfo current_video_info;
 
+static bool minimig_rtg_hdmi = false;
+
+bool video_is_direct()
+{
+	return cfg.direct_video && !(is_minimig() && minimig_rtg_hdmi);
+}
+
+static int video_vsync_adjust()
+{
+	return cfg.direct_video ? 0 : cfg.vsync_adjust;
+}
+
 static int support_FHD = 0;
 
 yc_mode yc_modes[20];
+
+static int hdmi_power = 1;
+static int hdmi_need_init = 0;
 
 struct vrr_cap_t
 {
@@ -230,7 +249,7 @@ static uint32_t getPLLdiv(uint32_t div)
 	return ((div / 2) << 8) | (div / 2);
 }
 
-static int findPLLpar(double Fout, uint32_t *pc, uint32_t *pm, double *pko)
+static int findPLLpar(double Fout, uint32_t *pc, uint32_t *pm, double *pko, bool quiet = false)
 {
 	uint32_t c = 1;
 	while ((Fout*c) < 400) c++;
@@ -246,13 +265,13 @@ static int findPLLpar(double Fout, uint32_t *pc, uint32_t *pm, double *pko)
 
 		if (ko && (ko <= 0.05f || ko >= 0.95f))
 		{
-			printf("Fvco=%f, C=%d, M=%d, K=%f ", fvco, c, m, ko);
+			if (!quiet) printf("Fvco=%f, C=%d, M=%d, K=%f ", fvco, c, m, ko);
 			if (fvco > 1500.f)
 			{
-				printf("-> No exact parameters found\n");
+				if (!quiet) printf("-> No exact parameters found\n");
 				return 0;
 			}
-			printf("-> K is outside allowed range\n");
+			if (!quiet) printf("-> K is outside allowed range\n");
 			c++;
 		}
 		else
@@ -266,6 +285,25 @@ static int findPLLpar(double Fout, uint32_t *pc, uint32_t *pm, double *pko)
 
 	//will never reach here
 	return 0;
+}
+
+#define PLL_INT_GUARD_PPM 10.0
+
+static bool pll_request_on_integer(double Fout)
+{
+	uint32_t c, m;
+	double ko;
+
+	if (!findPLLpar(Fout, &c, &m, &ko, true))
+	{
+		// Match setPLL's fallback divider.
+		c = 1;
+		while ((Fout*c) < 400) c++;
+	}
+	else if (ko) return false;
+
+	double mk = (Fout*c) / 50;
+	return fabs(mk - round(mk)) < (mk * PLL_INT_GUARD_PPM / 1000000.0);
 }
 
 static void setPLL(double Fout, vmode_custom_t *v)
@@ -1225,7 +1263,7 @@ static void hdmi_config_set_csc()
 
 	const float pi = float(M_PI);
 
-	int ypbpr = (cfg.vga_mode_int == 1) && (cfg.direct_video == 1);
+	int ypbpr = (cfg.vga_mode_int == 1) && video_is_direct();
 
 	// out-of-scope defines, not used with ypbpr
 	int16_t csc_int16[12];
@@ -1423,36 +1461,55 @@ int hdmi_has_int()
 	return has_int;
 }
 
-#define HPD_SETTLE_MS        250
-#define HPD_SETTLE_SAMPLE_MS 25
-#define HPD_REINIT_GAP_MS    2000
-#define HPD_REINIT_BURST_MAX 3
-#define HPD_REINIT_DECAY_MS  60000
-#define HPD_FALLBACK_POLL_MS 1000
-#define INT_STUCK_WINDOW_MS  3000
-#define INT_STUCK_MIN_CNT    20
-#define INT_STUCK_POLL_MS    100
+static void hdmi_config_audio()
+{
+	// address, value
+	uint8_t init_data[] = {
 
-enum { HPD_IDLE = 0, HPD_SETTLE };
-static int           hpd_sm_state = HPD_IDLE;
-static int           hpd_level = -1, ms_level = -1;   // -1 = not yet sampled
-static unsigned long hpd_settle_tmr = 0, hpd_sample_tmr = 0, hpd_fallback_tmr = 0;
-static unsigned long hpd_reinit_guard = 0, hpd_reinit_decay = 0;
-static int           hpd_reinit_burst = 0;
-static bool          hpd_reinit_suppressed = false;
-static bool          hpd_edge_pending = false;
-static bool          hpd_edge_asleep = false;
-static bool          int_pin_usable = true;
-static unsigned long int_stuck_tmr = 0, int_stuck_poll_tmr = 0;
-static int           int_stuck_cnt = 0;
-static bool          hdmi_tx_on = true;
+		0xAF, (uint8_t)(0b00000100	// [7]=0 HDCP Disabled.
+								// [6:5] must be b00!
+								// [4]=0 Current frame is unencrypted
+								// [3:2] must be b01!
+			| ((cfg.dvi_mode == 1) ? 0b00 : 0b10)),	 //	[1]=1 HDMI Mode.
+								// [0] must be b0!
+
+		// (Audio stuff on Programming Guide, Page 66)...
+		0x0A, 0b00000000,		// [6:4] Audio Select. b000 = I2S.
+								// [3:2] Audio Mode. (HBR stuff, leave at 00!).
+
+		0x0B, 0b00001110,		//
+
+		0x0C, 0b00000100,		// [7] 0 = Use sampling rate from I2S stream.   1 = Use samp rate from I2C Register.
+								// [6] 0 = Use Channel Status bits from stream. 1 = Use Channel Status bits from I2C register.
+								// [2] 1 = I2S0 Enable.
+								// [1:0] I2S Format: 00 = Standard. 01 = Right Justified. 10 = Left Justified. 11 = AES.
+
+		0x0D, 0b00010000,		// [4:0] I2S Bit (Word) Width for Right-Justified.
+		0x14, 0b00000010,		// [3:0] Audio Word Length. b0010 = 16 bits.
+		0x15, (uint8_t)((cfg.hdmi_audio_96k ? 0x80 : 0x00) | 0b0100000),	// I2S Sampling Rate [7:4]. b0000 = (44.1KHz). b0010 = 48KHz.
+								// Input ID [3:1] b000 (0) = 24-bit RGB 444 or YCrCb 444 with Separate Syncs.
+
+		// Audio Clock Config
+		0x01, 0x00,				//
+		0x02, (uint8_t)(cfg.hdmi_audio_96k ? 0x30 : 0x18),	// Set N Value 12288/6144
+		0x03, 0x00,				//
+
+		0x07, 0x01,				//
+		0x08, 0x22,				// Set CTS Value 74250
+		0x09, 0x0A,				//
+	};
+
+	for (uint i = 0; i < sizeof(init_data); i += 2)
+	{
+		int res = i2c_smbus_write_byte_data(hdmi_main_fd, init_data[i], init_data[i + 1]);
+		if (res < 0) printf("i2c: write error (%02X %02X): %d\n", init_data[i], init_data[i + 1], res);
+	}
+}
 
 static void hdmi_config_init()
 {
-	int ypbpr = (cfg.vga_mode_int == 1) && (cfg.direct_video == 1);
-	// int_pin_usable: a runtime stuck-INT demotion must survive reinit,
-	// or the rewritten mask re-arms an INT line nothing services anymore.
-	uint8_t int0 = (hdmi_has_int() && int_pin_usable) ? 0xC0 : 0x00; // HPD + SENSE
+	int ypbpr = (cfg.vga_mode_int == 1) && video_is_direct();
+	uint8_t int0 = hdmi_has_int() ? 0xC0 : 0x00; // HPD + SENSE
 
 	if (hdmi_main_fd < 0)
 	{
@@ -1481,6 +1538,9 @@ static void hdmi_config_init()
 			}
 		}
 	}
+
+	hdmi_power = 1;
+	hdmi_need_init = 0;
 
 	// address, value
 	uint8_t init_data[] = {
@@ -1571,13 +1631,6 @@ static void hdmi_config_init()
 		0xAA, 0x00,				// ADI required Write.
 		0xAB, 0x40,				// ADI required Write.
 
-		0xAF, (uint8_t)(0b00000100	// [7]=0 HDCP Disabled.
-								// [6:5] must be b00!
-								// [4]=0 Current frame is unencrypted
-								// [3:2] must be b01!
-			| ((cfg.dvi_mode == 1) ? 0b00 : 0b10)),	 //	[1]=1 HDMI Mode.
-								// [0] must be b0!
-
 		0xB9, 0x00,				// ADI required Write.
 
 		0xBA, 0b01100000,		// [7:5] Input Clock delay...
@@ -1595,31 +1648,6 @@ static void hdmi_config_init()
 		0xE2, 0x01,				// Power down the CEC.
 		0xE4, 0x60,				// ADI required Write.
 		0xFA, 0x7D,				// Nbr of times to search for good phase
-
-		// (Audio stuff on Programming Guide, Page 66)...
-		0x0A, 0b00000000,		// [6:4] Audio Select. b000 = I2S.
-								// [3:2] Audio Mode. (HBR stuff, leave at 00!).
-
-		0x0B, 0b00001110,		//
-
-		0x0C, 0b00000100,		// [7] 0 = Use sampling rate from I2S stream.   1 = Use samp rate from I2C Register.
-								// [6] 0 = Use Channel Status bits from stream. 1 = Use Channel Status bits from I2C register.
-								// [2] 1 = I2S0 Enable.
-								// [1:0] I2S Format: 00 = Standard. 01 = Right Justified. 10 = Left Justified. 11 = AES.
-
-		0x0D, 0b00010000,		// [4:0] I2S Bit (Word) Width for Right-Justified.
-		0x14, 0b00000010,		// [3:0] Audio Word Length. b0010 = 16 bits.
-		0x15, (uint8_t)((cfg.hdmi_audio_96k ? 0x80 : 0x00) | 0b0100000),	// I2S Sampling Rate [7:4]. b0000 = (44.1KHz). b0010 = 48KHz.
-								// Input ID [3:1] b000 (0) = 24-bit RGB 444 or YCrCb 444 with Separate Syncs.
-
-		// Audio Clock Config
-		0x01, 0x00,				//
-		0x02, (uint8_t)(cfg.hdmi_audio_96k ? 0x30 : 0x18),	// Set N Value 12288/6144
-		0x03, 0x00,				//
-
-		0x07, 0x01,				//
-		0x08, 0x22,				// Set CTS Value 74250
-		0x09, 0x0A,				//
 	};
 
 	for (uint i = 0; i < sizeof(init_data); i += 2)
@@ -1628,6 +1656,7 @@ static void hdmi_config_init()
 		if (res < 0) printf("i2c: write error (%02X %02X): %d\n", init_data[i], init_data[i + 1], res);
 	}
 
+	hdmi_config_audio();
 	hdmi_config_set_csc();
 }
 
@@ -1713,7 +1742,7 @@ static void hdmi_config_set_mode(vmode_custom_t *vm)
 	const uint8_t vic_mode = (uint8_t)vm->param.vic;
 	uint8_t pr_flags;
 
-	if (cfg.direct_video && is_menu()) pr_flags = 0; // automatic pixel repetition
+	if (video_is_direct() && is_menu()) pr_flags = 0; // automatic pixel repetition
 	else if (vm->param.pr != 0) pr_flags = 0b01001000; // manual pixel repetition with 2x clock
 	else pr_flags = 0b01000000; // manual pixel repetition
 
@@ -1746,21 +1775,24 @@ static void hdmi_config_set_mode(vmode_custom_t *vm)
 
 static void edid_parse_cea_ext(uint8_t *cea)
 {
+	if (cea[2] < 4 || cea[2] > 127) return;
+
 	uint8_t *data_block_end = cea + cea[2];
 	uint8_t *cur_blk_start = cea + 4;
 	uint8_t *cur_blk_data = cur_blk_start;
-	while (cur_blk_start != data_block_end)
+	while (cur_blk_start < data_block_end)
 	{
 		cur_blk_data = cur_blk_start;
 		uint8_t blk_tag = (*cur_blk_data & 0xe0) >> 5;
 		uint8_t blk_size = *cur_blk_data & 0x1f;
 		uint8_t blk_data_size = blk_size; //size of actual data in the block, it might be adjusted if the first byte is extended tag
+		if (cur_blk_start + blk_size + 1 > data_block_end) break;
 		cur_blk_data++;
 		//vendor specific block might be the only one?
 
 		uint8_t is_vendor_specific = 0;
 		if (blk_tag == 0x03) is_vendor_specific = 1;
-		if (blk_tag == 0x07)
+		if (blk_tag == 0x07 && blk_size)
 		{
 			if (*cur_blk_data == 0x01) is_vendor_specific = 1;
 			cur_blk_data++; //The extended tag uses the next byte for the type. We may not need it?
@@ -1772,7 +1804,7 @@ static void edid_parse_cea_ext(uint8_t *cea)
 			int oui = cur_blk_data[0] | cur_blk_data[1] << 8 | cur_blk_data[2] << 16;
 			cur_blk_data += 3;
 			blk_data_size -= 3;
-			if (oui == 0x00001a) //AMD block
+			if (oui == 0x00001a && blk_data_size >= 4) //AMD block
 			{
 				uint8_t min_fr = cur_blk_data[2];
 
@@ -1809,6 +1841,7 @@ static int find_edid_vrr_capability()
 {
 	uint8_t *cur_ext = NULL;
 	uint8_t ext_cnt = edid[126];
+	if (ext_cnt > 15) ext_cnt = 15;
 
 	//Probably only one extension, but just in case...
 	for (int i = 0; i < ext_cnt; i++)
@@ -1849,6 +1882,8 @@ static void cache_raw_edid_mfg_id(const uint8_t *buf)
 
 static bool read_edid_segment(uint8_t segment, uint8_t *buf)
 {
+	i2c_smbus_write_byte_data(hdmi_main_fd, 0x96, 4); // clear possible pending EDID IRQ (auto EDID after HPD)
+
 	i2c_smbus_write_byte_data(hdmi_main_fd, 0xC4, segment);
 	i2c_smbus_write_byte_data(hdmi_main_fd, 0xC9, 0x03);
 	usleep(1000);
@@ -1866,11 +1901,15 @@ static bool read_edid_segment(uint8_t segment, uint8_t *buf)
 				int value = i2c_smbus_read_byte_data(hdmi_edid_fd, (uint8_t)i);
 				buf[i] = (value < 0) ? 0 : (uint8_t)value;
 			}
+
+			i2c_smbus_write_byte_data(hdmi_main_fd, 0xC9, 0x03);
 			return true;
 		}
 		usleep(10000);
 	}
 
+	printf("EDID timeout.\n");
+	i2c_smbus_write_byte_data(hdmi_main_fd, 0xC9, 0x03);
 	return false;
 }
 
@@ -1879,23 +1918,17 @@ static int read_edid(bool force = false)
 	if (hdmi_main_fd < 0 || hdmi_edid_fd < 0) return 0;
 	if (is_edid_valid() && !force) return 1;
 
-	//Test if adv7513 senses hdmi clock. If not, don't bother with the edid query
-	int hpd_state = i2c_smbus_read_byte_data(hdmi_main_fd, 0x42);
-	if (hpd_state < 0 || !(hpd_state & 0x20))
-	{
-		raw_edid_mfg_id_valid = false;
-		return 0;
-	}
-
 	// read into scratch; replace live edid[] only on a valid read, so a transient failure can't blank it
-	uint8_t buf[sizeof(edid)] = {};
+	static uint8_t buf[sizeof(edid)];
+	memset(buf, 0, sizeof(buf));
 	bool ddc_responded = false;
 
 	// waiting for valid EDID
 	for (int k = 0; k < 20; k++)
 	{
-		int current = i2c_smbus_read_byte_data(hdmi_main_fd, 0x42);
-		if (current < 0 || !(current & 0x20))
+		//Test if adv7513 senses hdmi clock. If not, don't bother with the edid query
+		int hpd_state = i2c_smbus_read_byte_data(hdmi_main_fd, 0x42);
+		if (hpd_state < 0 || ((hpd_state & 0x60) != 0x60))
 		{
 			raw_edid_mfg_id_valid = false;
 			return 0;
@@ -1904,6 +1937,8 @@ static int read_edid(bool force = false)
 		if (got_interrupt) ddc_responded = true;
 		if (is_edid_valid_buf(buf)) break;
 		if (!got_interrupt) break;  // no DDC response — display has no EDID, don't retry
+
+		printf("Invalid EDID: retry...\n");
 		usleep(100000);
 	}
 
@@ -1914,6 +1949,7 @@ static int read_edid(bool force = false)
 			// header bad but DDC answered: still cache raw mfg id for non-conformant DAC EDIDs
 			cache_raw_edid_mfg_id(buf);
 			printf("Invalid EDID: incorrect header.\n");
+			hexdump(buf, 256, 0);
 		}
 		else
 		{
@@ -1933,9 +1969,9 @@ static int read_edid(bool force = false)
 	memcpy(edid, buf, sizeof(edid));
 
 	printf("EDID:\n");
-	uint8_t n = edid[126] + 1;
-	if (n > sizeof(edid) / 128) n = sizeof(edid) / 128;
-	hexdump(edid, n*128, 0);
+	uint8_t n = edid[126];
+	if (n > 15) n = 15;
+	hexdump(edid, (n + 1)*128, 0);
 
 	cache_raw_edid_mfg_id(edid);
 
@@ -2077,7 +2113,7 @@ static void set_vrr_mode()
 
 	float vrateh = 100000000;
 
-	if (cfg.vrr_mode == 0 || is_menu())
+	if (cfg.vrr_mode == 0 || is_menu() || video_is_direct() || minimig_rtg_hdmi)
 	{
 		if (last_vrr_mode != 0)
 		{
@@ -2106,7 +2142,7 @@ static void set_vrr_mode()
 		return;
 	}
 
-	find_edid_vrr_capability();
+	if (is_edid_valid()) find_edid_vrr_capability();
 
 	if (cfg.vrr_mode == 1) //autodetect
 	{
@@ -2206,7 +2242,7 @@ static void set_vrr_mode()
 	last_vrr_rate = vrateh;
 	last_vrr_vfp = v_cur.param.vfp;
 
-	if (!supports_vrr() || cfg.vsync_adjust) use_vrr = 0;
+	if (!supports_vrr() || video_vsync_adjust()) use_vrr = 0;
 }
 
 static void video_set_mode(vmode_custom_t *v, double Fpix)
@@ -2218,7 +2254,8 @@ static void video_set_mode(vmode_custom_t *v, double Fpix)
 
 	v_cur = *v;
 	vmode_custom_t v_fix = v_cur;
-	if (cfg.direct_video)
+	set_vrr_mode();
+	if (video_is_direct())
 	{
 		v_fix.item[2] = FB_DV_RBRD;
 		v_fix.item[4] = FB_DV_LBRD;
@@ -2229,10 +2266,6 @@ static void video_set_mode(vmode_custom_t *v, double Fpix)
 		v_fix.item[8] = FB_DV_UBRD;;
 		v_fix.item[5] += v_cur.item[6] - v_fix.item[6];
 		v_fix.item[5] += v_cur.item[8] - v_fix.item[8];
-	}
-	else
-	{
-		set_vrr_mode();
 	}
 
 	if (Fpix) setPLL(Fpix, &v_cur);
@@ -2297,7 +2330,7 @@ static void video_set_mode(vmode_custom_t *v, double Fpix)
 	for (int i = 9; i < 21; i++)
 	{
 		printf("0x%X, ", v_cur.item[i]);
-		if (i & 1) spi_w(v_cur.item[i] | ((i == 9 && Fpix && cfg.vsync_adjust == 2 && !is_menu()) ? 0x8000 : 0) | 0x4000);
+		if (i & 1) spi_w(v_cur.item[i] | ((i == 9 && Fpix && video_vsync_adjust() == 2 && !is_menu()) ? 0x8000 : 0) | 0x4000);
 		else
 		{
 			spi_w(v_cur.item[i]);
@@ -2626,13 +2659,7 @@ static void video_mode_load(bool keep_direct_video_auto = false)
 		hdmi_config_set_csc();
 	}
 
-	if (cfg.direct_video && cfg.vsync_adjust)
-	{
-		printf("Disabling vsync_adjust because of enabled direct video.\n");
-		cfg.vsync_adjust = 0;
-	}
-
-	if (cfg.direct_video)
+	if (video_is_direct())
 	{
 		int mode = cfg.menu_pal ? 2 : 0;
 		if (cfg.forced_scandoubler) mode++;
@@ -2703,26 +2730,12 @@ void video_cfg_reset()
 
 void video_init()
 {
+	minimig_rtg_hdmi = false;
 	yc_parse(yc_modes, sizeof(yc_modes) / sizeof(yc_modes[0]));
 
 	fb_init();
 	hdmi_config_init();
 	read_edid(true);
-
-	// Adopt the link state this init just handled: video_poll's
-	// first-sample recovery is only for a link that came up after init
-	// (Monitor Sense rose late on cold boot). Sinks that are up now but
-	// have no readable EDID (DVI, VGA DACs) would otherwise pay the
-	// blocking EDID retry loop a second time on every boot.
-	if (hdmi_main_fd >= 0)
-	{
-		int st42 = i2c_smbus_read_byte_data(hdmi_main_fd, 0x42);
-		if (st42 >= 0 && (st42 & 0x60) == 0x60)
-		{
-			hpd_level = 1;
-			ms_level = 1;
-		}
-	}
 
 	hdmi_config_set_hdr();
 	video_mode_load();
@@ -2762,45 +2775,43 @@ void video_reinit()
 	user_io_send_buttons(1);
 	video_mode_adjust(1);
 	video_menu_bg(-1);
-	return;
 }
 
-void video_hdmi_power(int on)
+void tmds_power(int on)
 {
-	// ADV7513 power-down control: 0x41[6] = power down.
-	// Keep bit 4 set in both directions: it's a reserved bit whose power-on
-	// default is 1 and the init sequence writes 0x10; clearing it upsets
-	// some non-genuine chips.
+	// ADV7513 power-down control. 0 = power on, 1 = power down.
 	if (hdmi_main_fd >= 0)
 	{
 		uint8_t val = on ? 0x10 : 0x50;
 		int res = i2c_smbus_write_byte_data(hdmi_main_fd, 0x41, val);
 		if (res < 0) printf("i2c: write error (41 %02X): %d\n", val, res);
 	}
+}
 
-	if (on && !hdmi_tx_on)
+void video_hdmi_power(int on)
+{
+	// ADV7513 power-down control. 0 = power on, 1 = power down.
+	if (hdmi_main_fd >= 0)
 	{
-		// Waking from external power-down (hdmi_off): Monitor Sense dropped
-		// while the TX was down, so re-adopt the current levels silently
-		// instead of treating the recovery as a hotplug edge. Defer the
-		// first sample (fallback re-arm): right after the power-up write
-		// Monitor Sense still reads low, and adopting that transient would
-		// turn its recovery into a spurious reinit on every wake.
-		hpd_level = -1;
-		ms_level = -1;
-		hpd_sm_state = HPD_IDLE;
-		hpd_edge_pending = false;
-		hpd_fallback_tmr = GetTimer(HPD_FALLBACK_POLL_MS);
-		if (hpd_edge_asleep)
+		hdmi_power = on ? 1 : 0;
+		tmds_power(on);
+
+		if (on)
 		{
-			// HPD toggled while the TX was down: the display may have been
-			// swapped. Drop the cached EDID so the first sample re-probes
-			// it via video_poll's recovery reinit.
-			bzero(edid, sizeof(edid));
+			if (hdmi_need_init)
+			{
+				uint8_t current_status = i2c_smbus_read_byte_data(hdmi_main_fd, 0x42);
+				bool hpd_high = (current_status & 0x40) != 0; // Bit 6: HPD pin level
+				bool MS_high = (current_status & 0x20) != 0; // Bit 5: Monitor Sense level
+				if (hpd_high && MS_high) video_reinit();
+			}
+			else
+			{
+				// Audio must be re-inited.
+				hdmi_config_audio();
+			}
 		}
 	}
-	hpd_edge_asleep = false;
-	hdmi_tx_on = (on != 0);
 }
 
 void video_poll()
@@ -2809,191 +2820,42 @@ void video_poll()
 
 	cec_poll();
 
-	if (hdmi_main_fd < 0) return;
-
-	if (int_pin_usable && fpga_get_hdmi_int())
+	if (fpga_get_hdmi_int())
 	{
-		// While a stuck pin is suspected, rate-limit the status reads:
-		// at loop rate they would monopolize the i2c bus for the whole
-		// detection window.
-		if (!int_stuck_cnt || CheckTimer(int_stuck_poll_tmr))
+		uint8_t irq_status = i2c_smbus_read_byte_data(hdmi_main_fd, 0x96);
+		if (irq_status == 0) return;
+
+		uint8_t clear_mask = irq_status & (0x80 | 0x40);
+		if (clear_mask) i2c_smbus_write_byte_data(hdmi_main_fd, 0x96, clear_mask);
+
+		if (irq_status & (0x80 | 0x40))
 		{
-			int irq_status = i2c_smbus_read_byte_data(hdmi_main_fd, 0x96);
-			if (irq_status < 0) irq_status = 0; // read error: keep the polled paths below alive
+			uint8_t current_status = i2c_smbus_read_byte_data(hdmi_main_fd, 0x42);
 
-			// Clear everything latched, not just HPD/MS: unmasked bits
-			// (e.g. vsync) latch too and would otherwise hold INT asserted.
-			if (irq_status) i2c_smbus_write_byte_data(hdmi_main_fd, 0x96, irq_status);
+			bool hpd_high = (current_status & 0x40) != 0; // Bit 6: HPD pin level
+			bool MS_high = (current_status & 0x20) != 0; // Bit 5: Monitor Sense level
 
-			if (irq_status & 0xC0)
+			// The safe window to read EDID is when BOTH 5V power (HPD)
+			// and internal display termination (Monitor Sense) are fully high and stable
+			if (hpd_high && MS_high)
 			{
-				int_stuck_cnt = 0;
-				// Latch the edge until a sample consumes it: an unplug or
-				// renegotiation pulse can complete inside one blocked poll
-				// gap, leaving the levels unchanged - the latched interrupt
-				// is then its only trace.
-				if (hdmi_tx_on) hpd_edge_pending = true;
-				// HPD toggled while the TX was powered down (hdmi_off):
-				// the display may have been swapped - remember it for wake.
-				else if (irq_status & 0x80) hpd_edge_asleep = true;
+				hdmi_need_init = 1;
+				if (hdmi_power)
+				{
+					printf("[HDMI] HPD and Monitor Sense Stable. Power up, re-initializing...\n");
+					video_hdmi_power(1);
+				}
+				else
+				{
+					printf("[HDMI] HPD and Monitor Sense Stable, but HDMI is powered down. Will re-init upon wakeup.\n");
+				}
 			}
 			else
 			{
-				// INT pin asserted with no enabled interrupt flag latched:
-				// unwired/floating INT trace or non-spec interrupt masking.
-				// Count cumulatively within the window - resetting on a
-				// momentary deassert would let a periodically re-latching
-				// phantom bit evade detection forever.
-				if (!int_stuck_cnt) int_stuck_tmr = GetTimer(INT_STUCK_WINDOW_MS);
-				int_stuck_poll_tmr = GetTimer(INT_STUCK_POLL_MS);
-				int_stuck_cnt++;
-				if (CheckTimer(int_stuck_tmr))
-				{
-					// CEC interrupts latch in 0x97 and also assert the pin;
-					// those are the CEC driver's to service, not a stuck pin.
-					if (int_stuck_cnt >= INT_STUCK_MIN_CNT &&
-					    i2c_smbus_read_byte_data(hdmi_main_fd, 0x97) <= 0)
-					{
-						printf("[HDMI] INT pin stuck/floating; switching to polled hotplug.\n");
-						int_pin_usable = false;
-						i2c_smbus_write_byte_data(hdmi_main_fd, 0x94, 0x00);
-						i2c_smbus_write_byte_data(hdmi_main_fd, 0x96, 0xFF);
-					}
-					int_stuck_cnt = 0; // window over: restart the count
-				}
+				printf("[HDMI] Link lost or re-routing (HPD=%d, MS=%d)\n", hpd_high, MS_high);
+				tmds_power(0);
 			}
 		}
-	}
-
-	// hdmi_off screensaver has the TX powered down: no hotplug actions.
-	if (!hdmi_tx_on) return;
-
-	bool sample = false;
-	if (hpd_edge_pending || hpd_sm_state == HPD_SETTLE)
-	{
-		// Edge service and settle tracking sample at a bounded rate:
-		// loop-rate i2c reads would starve the input poll.
-		if (CheckTimer(hpd_sample_tmr))
-		{
-			sample = true;
-			hpd_sample_tmr = GetTimer(HPD_SETTLE_SAMPLE_MS);
-		}
-	}
-	if (CheckTimer(hpd_fallback_tmr))
-	{
-		sample = true;
-		hpd_fallback_tmr = GetTimer(HPD_FALLBACK_POLL_MS);
-
-		if (!int_pin_usable)
-		{
-			// Demoted to polling: 0x96 still latches edges regardless of
-			// the 0x94 mask, so pulses shorter than the poll period stay
-			// visible - service the latches here.
-			int irq_status = i2c_smbus_read_byte_data(hdmi_main_fd, 0x96);
-			if (irq_status > 0)
-			{
-				i2c_smbus_write_byte_data(hdmi_main_fd, 0x96, irq_status);
-				if (irq_status & 0xC0) hpd_edge_pending = true;
-			}
-		}
-	}
-	if (!sample) return;
-
-	int st42 = i2c_smbus_read_byte_data(hdmi_main_fd, 0x42);
-	if (st42 < 0) return; // hpd_edge_pending stays armed: retried next sample
-	int hpd = (st42 >> 6) & 1; // Bit 6: HPD pin level
-	int ms = (st42 >> 5) & 1;  // Bit 5: Monitor Sense level
-	bool edge = hpd_edge_pending;
-	hpd_edge_pending = false;
-
-	if (hpd_level < 0)
-	{
-		// First sample: adopt the state video_init() already handled.
-		// Exception: link is up but the EDID is invalid (Monitor Sense
-		// rose only after init, or the display was swapped during
-		// hdmi_off) - recover with one reinit.
-		hpd_level = hpd;
-		ms_level = ms;
-		if (hpd && ms && !is_edid_valid())
-		{
-			hpd_sm_state = HPD_SETTLE;
-			hpd_settle_tmr = GetTimer(HPD_SETTLE_MS);
-		}
-		return;
-	}
-
-	bool changed = (hpd != hpd_level) || (ms != ms_level);
-	bool was_up = (hpd_level && ms_level);
-	hpd_level = hpd;
-	ms_level = ms;
-	if (!hpd)
-	{
-		// genuine unplug re-arms the reinit burst limiter
-		hpd_reinit_burst = 0;
-		hpd_reinit_suppressed = false;
-	}
-	else if (hpd_reinit_burst && CheckTimer(hpd_reinit_decay))
-	{
-		// The limiter targets rapid reinit feedback loops; sinks that
-		// never drop HPD (AVRs toggling only Monitor Sense) would stay
-		// suppressed forever, so a quiet minute also re-arms it.
-		hpd_reinit_burst = 0;
-		hpd_reinit_suppressed = false;
-	}
-
-	switch (hpd_sm_state)
-	{
-	case HPD_IDLE:
-		if ((changed || (edge && was_up)) && hpd && ms)
-		{
-			hpd_sm_state = HPD_SETTLE;
-			hpd_settle_tmr = GetTimer(HPD_SETTLE_MS);
-		}
-		else if (changed && was_up)
-		{
-			// Never power the TX down here: some non-genuine chips stop
-			// generating interrupts while powered down, turning a Monitor
-			// Sense transient into a permanent black screen.
-			printf("[HDMI] link change (HPD=%d MS=%d), keeping TX powered.\n", hpd, ms);
-		}
-		break;
-
-	case HPD_SETTLE:
-		if (changed || edge)
-		{
-			hpd_settle_tmr = GetTimer(HPD_SETTLE_MS);
-			break;
-		}
-		if (!CheckTimer(hpd_settle_tmr)) break;
-		if (!(hpd && ms))
-		{
-			hpd_sm_state = HPD_IDLE;
-			break;
-		}
-		if (!CheckTimer(hpd_reinit_guard)) break;
-		if (hpd_reinit_burst >= HPD_REINIT_BURST_MAX)
-		{
-			if (!hpd_reinit_suppressed)
-			{
-				printf("[HDMI] %d reinits without link-down; suppressing until unplug or %ds quiet.\n",
-				       hpd_reinit_burst, HPD_REINIT_DECAY_MS / 1000);
-				hpd_reinit_suppressed = true;
-			}
-			hpd_sm_state = HPD_IDLE;
-			break;
-		}
-		hpd_reinit_burst++;
-		hpd_reinit_guard = GetTimer(HPD_REINIT_GAP_MS);
-		hpd_reinit_decay = GetTimer(HPD_REINIT_DECAY_MS);
-		printf("[HDMI] link up stable (HPD=1 MS=1), re-initializing (#%d).\n", hpd_reinit_burst);
-		video_reinit();
-		// The reinit itself bounces the link (TMDS restart, EDID read);
-		// flush the self-induced latches so they don't read back as a
-		// fresh hotplug pulse and chain another reinit.
-		i2c_smbus_write_byte_data(hdmi_main_fd, 0x96, 0xFF);
-		hpd_edge_pending = false;
-		hpd_sm_state = HPD_IDLE;
-		break;
 	}
 }
 
@@ -3027,6 +2889,8 @@ static bool get_video_info(bool force, VideoInfo *video_info)
 		video_info->pixrep = spi_w(0);
 		video_info->de_h = spi_w(0);
 		video_info->de_v = spi_w(0);
+		video_info->frame_clocks = spi_w(0);
+		video_info->frame_clocks |= (spi_w(0) & 0xFF) << 16;
 		video_info->interlaced = ( res & 0x100 ) != 0;
 		video_info->rotated = ( res & 0x200 ) != 0;
 	}
@@ -3038,10 +2902,11 @@ static bool get_video_info(bool force, VideoInfo *video_info)
 
 	static uint8_t fb_crc = 0;
 	uint8_t crc = spi_uio_cmd_cont(UIO_GET_FB_PAR);
-	if (fb_crc != crc || force || res_changed)
+	if (is_minimig() || fb_crc != crc || force || res_changed)
 	{
 		fb_changed |= (fb_crc != crc);
 		fb_crc = crc;
+		const VideoInfo previous = *video_info;
 		video_info->arx = spi_w(0);
 		video_info->arxy = !!(video_info->arx & 0x1000);
 		video_info->arx &= 0xFFF;
@@ -3050,6 +2915,12 @@ static bool get_video_info(bool force, VideoInfo *video_info)
 		video_info->fb_width = spi_w(0);
 		video_info->fb_height = spi_w(0);
 		video_info->fb_en = !!(video_info->fb_fmt & 0x40);
+		fb_changed |= previous.fb_fmt != video_info->fb_fmt ||
+		              previous.fb_width != video_info->fb_width ||
+		              previous.fb_height != video_info->fb_height ||
+		              previous.arx != video_info->arx ||
+		              previous.ary != video_info->ary ||
+		              previous.arxy != video_info->arxy;
 	}
 	DisableIO();
 
@@ -3272,7 +3143,7 @@ bool video_mode_select(uint32_t vtime, vmode_custom_t* out_mode)
 
 	printf("\033[1;33mvideo_mode_select(%u): ", vtime);
 
-	if (vtime == 0 || !cfg.vsync_adjust)
+	if (vtime == 0 || !video_vsync_adjust())
 	{
 		printf(", using default mode");
 		adjustable = false;
@@ -3317,6 +3188,34 @@ bool video_mode_select(uint32_t vtime, vmode_custom_t* out_mode)
 	return adjustable;
 }
 
+static uint64_t div_round_u64(uint64_t numerator, uint64_t denominator)
+{
+	return (numerator + denominator / 2) / denominator;
+}
+
+static uint64_t calc_frame_locked_phase(uint64_t fsc_num, uint64_t fsc_den,
+	uint32_t frame_ticks, uint32_t frame_clocks)
+{
+	if(!frame_ticks || !frame_clocks) return 0;
+
+	// Nearest whole number of subcarrier rotations in one frame.
+	// These products fit in uint64_t for the 32-bit frame timer and
+	// the NTSC/PAL subcarrier ratios used here.
+	const uint64_t frame_cycles = div_round_u64(
+		fsc_num * (uint64_t)frame_ticks,
+		fsc_den * 100000000ULL
+	);
+
+	// Calculate round(frame_cycles * 2^40 / frame_clocks).
+	// The whole-number quotient contributes only
+	// multiples of 2^40, which disappear under the 40-bit mask.
+	const uint64_t frame_remainder = frame_cycles % frame_clocks;
+	return div_round_u64(
+		frame_remainder * (1ULL << 40),
+		frame_clocks
+	) & 0xFFFFFFFFFFULL;
+}
+
 static void set_yc_mode()
 {
 	// Enable YC for S-Video/CVBS modes, or subcarrier for CXA2075 encoders
@@ -3325,12 +3224,68 @@ static void set_yc_mode()
 		float fps = current_video_info.vtime ? (100000000.f / current_video_info.vtime) : 0.f;
 		int pal = fps < 55.f;
 		double CLK_REF = (pal || (cfg.ntsc_mode == 1)) ? 4.43361875f : (cfg.ntsc_mode == 2) ? 3.575611f : 3.579545f;
-		double CLK_VIDEO = current_video_info.ctime * 100.f / current_video_info.ptime;
+		double CLK_VIDEO;
 
 		float prate = current_video_info.width * 100.f;
 		prate /= current_video_info.ptime;
 
-		int64_t PHASE_INC = ((int64_t)((CLK_REF / CLK_VIDEO) * 1099511627776LL)) & 0xFFFFFFFFFFLL;
+		int64_t PHASE_INC;
+		if(current_video_info.frame_clocks)
+		{
+			uint32_t frame_ticks = current_video_info.vtime;
+
+			/*
+			* vtime is the interval between VS boundaries.
+			* In an interlaced mode that is a field period, while
+			* frame_clocks was counted across both fields.
+			*/
+			if(current_video_info.interlaced)
+				frame_ticks *= 2;
+
+			CLK_VIDEO = current_video_info.frame_clocks * 100.0 /
+				frame_ticks;
+
+			uint64_t fsc_num =
+				(pal || (cfg.ntsc_mode == 1)) ? 17734475ULL :
+				(cfg.ntsc_mode == 2) ? 3575611ULL :
+				315000000ULL;
+
+			uint64_t fsc_den =
+				(pal || (cfg.ntsc_mode == 1)) ? 4ULL :
+				(cfg.ntsc_mode == 2) ? 1ULL :
+				88ULL;
+
+			/*
+			 * NES/SNES progressive NTSC use CLK_VIDEO = 12 * FSC.
+			 * Recognize the clock relationship instead of depending on
+			 * which member of the alternating frame pair vtime captured.
+			 */
+			const double fsc_ratio = CLK_VIDEO / CLK_REF;
+			if(!current_video_info.interlaced &&
+			   !pal && !cfg.ntsc_mode &&
+			   fabs(fsc_ratio - 12.0) < 0.001)
+			{
+				PHASE_INC = div_round_u64(1ULL << 40, 12ULL);
+				printf("YC exact clock ratio: CLK_VIDEO/FSC=12\n");
+			}
+			else
+			{
+				PHASE_INC = calc_frame_locked_phase(
+					fsc_num,
+					fsc_den,
+					frame_ticks,
+					current_video_info.frame_clocks
+				);
+			}
+		}
+		else
+		{
+			// Old framework and interlaced modes retain the existing path.
+			CLK_VIDEO = current_video_info.ctime * 100.f /
+				current_video_info.ptime;
+			PHASE_INC = ((int64_t)((CLK_REF / CLK_VIDEO) *
+				1099511627776LL)) & 0xFFFFFFFFFFLL;
+		}
 
 		int COLORBURST_START = (int)(3.7f * (CLK_VIDEO / CLK_REF));
 		int COLORBURST_END = (int)(9.0f * (CLK_VIDEO / CLK_REF)) + COLORBURST_START;
@@ -3387,10 +3342,20 @@ static void spd_config_update()
 {
 	if (use_freesync_spd) return;
 
-	if (cfg.direct_video && (cfg.spd_quirk < 3))
+	if ((video_is_direct() || minimig_rtg_hdmi) && (cfg.spd_quirk < 3))
 	{
-		// Custom SPD IF for additional DV1 metadata
-		VideoInfo *vi = &current_video_info;
+		VideoInfo output_info = current_video_info;
+		if (minimig_rtg_hdmi)
+		{
+			output_info.width = v_cur.param.hact << v_cur.param.pr;
+			output_info.height = v_cur.param.vact;
+			output_info.pixrep = 1;
+			output_info.de_h = v_cur.param.hbp << v_cur.param.pr;
+			output_info.de_v = v_cur.param.vbp;
+			output_info.interlaced = false;
+			output_info.rotated = false;
+		}
+		const VideoInfo *vi = &output_info;
 		if (!vi->width) return;
 
 		uint8_t data[31] = {
@@ -3398,7 +3363,7 @@ static void spd_config_update()
 			'D',
 			'V',
 			'1', // version
-			(uint8_t)((vi->interlaced ? 1 : 0) | ((menu_present() && (cfg.spd_quirk < 2)) ? 4 : 0) | (vi->rotated ? 8 : 0) | (arcade_get_direction() << 4)),
+			(uint8_t)((vi->interlaced ? 1 : 0) | ((menu_present() && (cfg.spd_quirk < 2)) ? 4 : 0) | (vi->rotated ? 8 : 0) | (minimig_rtg_hdmi ? 0 : (arcade_get_direction() << 4))),
 			(uint8_t)(vi->pixrep ? vi->pixrep : (vi->ctime / vi->width)),
 			(uint8_t)vi->de_h,
 			(uint8_t)(vi->de_h >> 8),
@@ -3443,6 +3408,10 @@ static void spd_config_update()
 
 		hdmi_spd_config(data);
 	}
+	else
+	{
+		hdmi_spd_config(0);
+	}
 }
 
 #define fr_constrain(fr) ((cfg.refresh_min && fr < cfg.refresh_min) ? cfg.refresh_min : (cfg.refresh_max && fr > cfg.refresh_max) ? cfg.refresh_max : fr)
@@ -3452,16 +3421,21 @@ void video_mode_adjust(bool force)
 	static bool rep_force = false;
 	if (force) rep_force = true;
 
-	VideoInfo video_info;
+	VideoInfo video_info = current_video_info;
 
 	const bool vid_changed = get_video_info(rep_force, &video_info);
 	current_video_info = video_info;
 
-	if (vid_changed || rep_force)
+	const bool rtg = is_minimig() && cfg.direct_video &&
+	                 ((video_info.fb_fmt & 0x80) ? minimig_rtg_hdmi : video_info.fb_en);
+	const bool output_changed = rtg != minimig_rtg_hdmi;
+	minimig_rtg_hdmi = rtg;
+
+	const bool refresh_info = vid_changed || rep_force || output_changed;
+	if (refresh_info)
 	{
 		show_video_info(&video_info, &v_cur);
 		set_yc_mode();
-		spd_config_update();
 	}
 	rep_force = false;
 
@@ -3470,7 +3444,7 @@ void video_mode_adjust(bool force)
 	if(menu != menu_now && cfg.spd_quirk < 2) spd_config_update();
 	menu = menu_now;
 
-	if (vid_changed && !is_menu())
+	if ((vid_changed || output_changed) && !is_menu())
 	{
 		if (cfg_has_video_sections())
 		{
@@ -3479,11 +3453,24 @@ void video_mode_adjust(bool force)
 			user_io_send_buttons(1);
 		}
 
-		if ((cfg.vsync_adjust || cfg.vscale_mode >= 4))
+		if (output_changed)
+		{
+			printf("Minimig RTG: switching to %s\n", rtg ? "HDMI" : "Direct Video");
+			hdmi_spd_config(0);
+			video_mode_load(true);
+			hdmi_config_init();
+			hdmi_invalidate_mode_cache();
+			hdmi_config_set_hdr();
+			last_vrr_mode = 0xFF;
+			video_set_mode(&v_def, 0);
+			user_io_send_buttons(1);
+			rep_force = true;
+		}
+		else if (!minimig_rtg_hdmi && (video_vsync_adjust() || cfg.vscale_mode >= 4))
 		{
 			const uint32_t vtime = video_info.vtime;
 
-			printf("\033[1;33madjust_video_mode(%u): vsync_adjust=%d vscale_mode=%d.\033[0m\n", vtime, cfg.vsync_adjust, cfg.vscale_mode);
+			printf("\033[1;33madjust_video_mode(%u): vsync_adjust=%d vscale_mode=%d.\033[0m\n", vtime, video_vsync_adjust(), cfg.vscale_mode);
 
 			vmode_custom_t new_mode;
 			bool adjust = video_mode_select(vtime, &new_mode);
@@ -3516,11 +3503,31 @@ void video_mode_adjust(bool force)
 				}
 			}
 
+			if (video_vsync_adjust() == 2 && Fpix && !video_is_direct() && pll_request_on_integer(Fpix))
+			{
+				uint32_t c, m;
+				double ko;
+				const uint32_t horz = v->param.hact + v->param.hfp + v->param.hs + v->param.hbp;
+				const uint32_t vert = v->param.vact + v->param.vfp + v->param.vs + v->param.vbp;
+				for (uint32_t lines = 1; lines <= 8 && vert + lines <= 4095; lines++)
+				{
+					double candidate = 100.0 * horz * (vert + lines) / vtime;
+					if (candidate > 300.f) break;
+					if (findPLLpar(candidate, &c, &m, &ko, true) && ko && candidate * c <= 1500.f)
+					{
+						v->param.vfp += lines;
+						printf("PLL integer boundary: adding %u VFP lines, Fpix %.6f -> %.6f MHz\n", lines, Fpix, candidate);
+						Fpix = candidate;
+						break;
+					}
+				}
+			}
+
 			video_set_mode(v, Fpix);
 			user_io_send_buttons(1);
 			rep_force = true;
 		}
-		else if (use_vrr == VRR_MISTER)
+		else if (!minimig_rtg_hdmi && use_vrr == VRR_MISTER)
 		{
 			int fr = 1000000000 / video_info.vtime;
 			int fr_min = (fr - 10) / 10;
@@ -3549,12 +3556,16 @@ void video_mode_adjust(bool force)
 	{
 		set_vfilter(0); // update filters if flags have changed
 	}
+
+	if (refresh_info || rep_force) spd_config_update();
 }
 
 static void fb_write_module_params()
 {
-	int width = fb_width;
-	int height = fb_height;
+	int width = con_width;
+	int height = con_height;
+	int font = !con_crt ? 0 : (height < 400) ? 8 : 16;
+
 	offload_add_work([=]
 	{
 		FILE *fp = fopen("/sys/module/MiSTer_fb/parameters/mode", "wt");
@@ -3562,6 +3573,13 @@ static void fb_write_module_params()
 		{
 			fprintf(fp, "%d %d %d %d %d\n", 8888, 1, width, height, width * 4);
 			fclose(fp);
+		}
+
+		for (int i = 1; font && i <= 2; i++)
+		{
+			char cmd[128];
+			snprintf(cmd, sizeof(cmd), "setfont -C /dev/tty%d /usr/share/consolefonts/lat1-%02d.psfu.gz", i, font);
+			system(cmd);
 		}
 	});
 }
@@ -3588,7 +3606,7 @@ void video_fb_enable(int enable, int n)
 				fb_num = n;
 
 				int xoff = 0, yoff = 0;
-				if (cfg.direct_video)
+				if (video_is_direct())
 				{
 					xoff = v_cur.item[4] - FB_DV_LBRD;
 					yoff = v_cur.item[8] - FB_DV_UBRD;
@@ -3598,13 +3616,13 @@ void video_fb_enable(int enable, int n)
 				spi_w((uint16_t)(FB_EN | FB_FMT_RxB | FB_FMT_8888)); // format, enable flag
 				spi_w((uint16_t)fb_addr); // base address low word
 				spi_w(fb_addr >> 16);     // base address high word
-				spi_w(fb_width);          // frame width
-				spi_w(fb_height);         // frame height
+				spi_w(n ? fb_width : con_width);   // frame width
+				spi_w(n ? fb_height : con_height); // frame height
 				spi_w(xoff);                 // scaled left
 				spi_w(xoff + v_cur.item[1] - 1); // scaled right
 				spi_w(yoff);                 // scaled top
 				spi_w(yoff + v_cur.item[5] - 1); // scaled bottom
-				spi_w(fb_width * 4);      // stride
+				spi_w((n ? fb_width : con_width) * 4); // stride
 
 				//printf("Linux frame buffer: %dx%d, stride = %d bytes\n", fb_width, fb_height, fb_width * 4);
 				if (!fb_num)
@@ -3634,7 +3652,7 @@ void video_fb_enable(int enable, int n)
 
 		DisableIO();
 		if (cfg.direct_video) set_vga_fb(enable);
-		if (is_menu()) user_io_status_set("[8:5]", (fb_enabled && !fb_num) ? 0x160 : 0);
+		if (is_menu()) user_io_status_set("[8:5]", (fb_enabled && !fb_num) ? 0xB : 0);
 	}
 }
 
@@ -3670,6 +3688,15 @@ static void video_fb_config()
 
 	fb_width = v_cur.item[1] / fb_scale_x;
 	fb_height = v_cur.item[5] / fb_scale_y;
+
+	con_width = fb_width;
+	con_height = fb_height;
+	con_crt = (cfg.fb_terminal == 2 && !cfg.vga_scaler && !video_is_direct());
+	if (con_crt)
+	{
+		con_width = 640;
+		con_height = (cfg.menu_pal ? 288 : 240) * (cfg.forced_scandoubler ? 2 : 1);
+	}
 
 	brd_x = cfg.vscale_border / fb_scale_x;
 	brd_y = cfg.vscale_border / fb_scale_y;
@@ -3990,9 +4017,9 @@ void video_menu_bg(int n, int idle)
 		n = menu_bg;
 		idle = cached_idle;
 
-		imlib_context_set_image(bg1); imlib_free_image(); bg1 = 0;
-		imlib_context_set_image(bg2); imlib_free_image(); bg2 = 0;
-		imlib_context_set_image(curtain); imlib_free_image(); curtain = 0;
+		if (bg1) { imlib_context_set_image(bg1); imlib_free_image(); bg1 = 0; }
+		if (bg2) { imlib_context_set_image(bg2); imlib_free_image(); bg2 = 0; }
+		if (curtain) { imlib_context_set_image(curtain); imlib_free_image(); curtain = 0; }
 	}
 	else
 	{
@@ -4027,10 +4054,11 @@ void video_menu_bg(int n, int idle)
 					vs_wait();
 				};
 
-				if (cfg.osd_rotate)
+				int rot = OsdGetRotation(true);
+				if (rot)
 				{
 					imlib_context_set_image(logo);
-					imlib_image_orientate(cfg.osd_rotate == 1 ? 3 : 1);
+					imlib_image_orientate(rot == 1 ? 3 : 1);
 				}
 			}
 			else
@@ -4134,11 +4162,12 @@ void video_menu_bg(int n, int idle)
 
 			int dst_w, dst_h;
 			int dst_x, dst_y;
-			if (cfg.osd_rotate)
+			int rot = OsdGetRotation(true);
+			if (rot)
 			{
 				dst_h = height / 2;
 				dst_w = src_w * dst_h / src_h;
-				if (cfg.osd_rotate == 1)
+				if (rot == 1)
 				{
 					dst_x = brd_x;
 					dst_y = height - dst_h;
@@ -4159,7 +4188,7 @@ void video_menu_bg(int n, int idle)
 
 			if (*bg)
 			{
-				if (cfg.direct_video && (v_cur.item[5] < 300)) dst_h /= 2;
+				if (video_is_direct() && (v_cur.item[5] < 300)) dst_h /= 2;
 
 				imlib_context_set_image(*bg);
 				imlib_blend_image_onto_image(logo, 1,
@@ -4377,7 +4406,7 @@ void video_cmd(char *cmd)
 
 			int divx = 1;
 			int divy = 1;
-			if (cfg.direct_video && (v_cur.item[5] < 300))
+			if (video_is_direct() && (v_cur.item[5] < 300))
 			{
 				// TV 240P/288P
 				while ((width*(divx + 1)) <= (int)v_cur.item[1]) divx++;
@@ -4451,7 +4480,7 @@ void video_cmd(char *cmd)
 			uint32_t addr = FB_ADDR + 4096;
 
 			int xoff = 0, yoff = 0;
-			if (cfg.direct_video)
+			if (video_is_direct())
 			{
 				xoff = v_cur.item[4] - FB_DV_LBRD;
 				yoff = v_cur.item[8] - FB_DV_UBRD;

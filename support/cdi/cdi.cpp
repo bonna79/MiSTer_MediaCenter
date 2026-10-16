@@ -21,7 +21,6 @@
 #include <libchdr/chd.h>
 #include <arpa/inet.h>
 #include "cdg_unpacker.hpp"
-#include "../physical_disc/physical_disc.h"
 
 #define TIMEKEEPER_SIZE (8 * 1024)
 
@@ -36,7 +35,7 @@ static constexpr auto SERVO_AUDIO_CD_OPT = "[12]";
 // clang-format off
 static const uint8_t mode2_bootheader[] = {
 	0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, // Sync words
-	0x00, 0x02, 0x16 // MSF
+	0x00, 0x02, 0x16														// MSF
 };
 // clang-format on
 
@@ -69,7 +68,9 @@ struct toc_entry
 	uint8_t f;
 };
 
-static std::array<struct toc_entry, 200> toc_buffer;
+// (99 + 3) * 3 to support 99 tracks + A0/A1/A2
+static std::array<struct toc_entry, (99 + 3) * 3> toc_buffer;
+
 uint32_t toc_entry_count = 0;
 static enum DiscType disc_type = DT_CDDA;
 
@@ -120,6 +121,7 @@ static void unload_chd(toc_t* table)
 	}
 	if (chd_hunkbuf)
 		free(chd_hunkbuf);
+	chd_hunkbuf = nullptr;
 	memset(table, 0, sizeof(toc_t));
 	chd_hunknum = -1;
 }
@@ -150,7 +152,7 @@ static int load_chd(const char* filename, toc_t* table)
 	{
 		table->tracks[i].pregap = table->tracks[i].indexes[1];
 		table->tracks[i].start += 150;
-		table->tracks[i].end += 150;
+		table->tracks[i].end += 150 - 1;
 
 		printf("\x1b[32mCHD: Track = %u, start = %u, end = %u, offset = %d, sector_size=%d, type = %u, pregap = "
 			   "%u\n\x1b[0m",
@@ -161,15 +163,16 @@ static int load_chd(const char* filename, toc_t* table)
 			   table->tracks[i].sector_size,
 			   table->tracks[i].type,
 			   table->tracks[i].pregap);
-		printf("\x1b[32mCHD: Track = %u, Index %u %u seconds\n\x1b[0m",
-			   i,
-			   table->tracks[i].indexes[0],
-			   table->tracks[i].indexes[1]);
 	}
 
 	table->end += 150;
 
 	chd_hunkbuf = (uint8_t*)malloc(table->chd_hunksize);
+	if (!chd_hunkbuf)
+	{
+		unload_chd(table);
+		return 0;
+	}
 	chd_hunknum = -1;
 
 	return 1;
@@ -183,7 +186,11 @@ static int load_cue(const char* filename, toc_t* table)
 	static char cue[100 * 1024];
 
 	unload_cue(table);
-	strcpy(fname, filename);
+	if (snprintf(fname, sizeof(fname), "%s", filename) >= (int)sizeof(fname))
+	{
+		printf("\x1b[32mCDI: CUE path is too long\n\x1b[0m");
+		return 0;
+	}
 	printf("\x1b[32mCDI: Open CUE: %s\n\x1b[0m", fname);
 
 	memset(cue, 0, sizeof(cue));
@@ -237,12 +244,13 @@ static int load_cue(const char* filename, toc_t* table)
 			if (*lptr == '\"')
 			{
 				lptr++;
-				while ((*lptr != '\"') && (lptr <= (line + 128)) && (ptr < (fname + 1023)))
+				while ((*lptr != '\"') && (lptr < (line + sizeof(line))) && (ptr < (fname + sizeof(fname) - 1)))
 					*ptr++ = *lptr++;
 			}
 			else
 			{
-				while ((*lptr != 0x20) && (lptr <= (line + 128)) && (ptr < (fname + 1023)))
+				while (*lptr && (*lptr != 0x20) && (lptr < (line + sizeof(line))) &&
+					   (ptr < (fname + sizeof(fname) - 1)))
 					*ptr++ = *lptr++;
 			}
 			*ptr = 0;
@@ -354,67 +362,10 @@ static int load_cue(const char* filename, toc_t* table)
 	return 1;
 }
 
-static int load_physical_cd(toc_t* table)
-{
-	unload_cue(table);
-	unload_chd(table);
-	if (physical_disc_open(NULL))
-	{
-		physical_disc_close();
-		return 0;
-	}
-
-	physical_disc_native_speed(1);
-	if (physical_disc_load_toc(table))
-	{
-		physical_disc_close();
-		return 0;
-	}
-
-	int data_lba = -1;
-	for (int i = 0; i < table->last; i++)
-	{
-		if (table->tracks[i].type != TT_CDDA)
-		{
-			data_lba = table->tracks[i].start;
-			break;
-		}
-	}
-
-	if (data_lba >= 0)
-	{
-		uint8_t probe[CDI_SECTOR_LEN];
-		physical_disc_probe_sector(data_lba + 16, probe);
-		int ready = probe[0] == 0 && probe[11] == 0 && probe[15] == 2;
-		for (int i = 1; i < 11 && ready; i++) ready = probe[i] == 0xFF;
-		if (!ready)
-		{
-			physical_disc_close();
-			return 0;
-		}
-	}
-
-	for (int i = 0; i < table->last; i++)
-	{
-		table->tracks[i].start += 150;
-		table->tracks[i].end += 149;
-		table->tracks[i].type = table->tracks[i].type == TT_CDDA ? TT_CDDA : TT_MODE2;
-		table->tracks[i].indexes[1] = i ? 0 : 150;
-	}
-	table->end += 150;
-	return 1;
-}
-
 static int load_cd_image(const char* filename, toc_t* table)
 {
 	int result = 0;
 
-	if (!strcmp(filename, PHYSICAL_DISC_SENTINEL))
-	{
-		result = load_physical_cd(table);
-	}
-	else
-	{
 	const char* ext = strrchr(filename, '.');
 	if (!ext)
 		return 0;
@@ -427,7 +378,6 @@ static int load_cd_image(const char* filename, toc_t* table)
 	{
 		result = load_cue(filename, table);
 	}
-	}
 
 	// On a CDI 210/05 the SERVO has to provide the info
 	// on whether this is an Audio CD to the SLAVE,
@@ -436,7 +386,7 @@ static int load_cd_image(const char* filename, toc_t* table)
 	// We use sector 00:02:16 as reference as it contains the boot block.
 	// If this is a suitable MODE2 header, we assume it is a CD-i disc
 	auto buffer = std::make_unique<uint8_t[]>(CDI_CDIC_BUFFER_SIZE);
-	if (buffer)
+	if (result && buffer)
 	{
 		cdi_read_cd(buffer.get(), 166, 1);
 		bool is_audio_cd = memcmp(buffer.get(), mode2_bootheader, sizeof(mode2_bootheader));
@@ -493,6 +443,9 @@ static void prepare_toc_buffer(toc_t* toc)
 	{
 		for (int i = 0; i < 3; i++)
 		{
+			if (toc_entry_count >= toc_buffer.size())
+				return;
+
 			toc_ptr->control = control;
 			toc_ptr->track = track;
 			toc_ptr->m = m;
@@ -501,8 +454,7 @@ static void prepare_toc_buffer(toc_t* toc)
 
 			toc_ptr++;
 
-			if (toc_entry_count < toc_buffer.size())
-				toc_entry_count++;
+			toc_entry_count++;
 		}
 	};
 
@@ -557,11 +509,9 @@ int cdi_chd_hunksize()
 	return 0;
 }
 
-
-
+// clang-format off
 
 // CRC routine from https://github.com/mamedev/mame/blob/master/src/mame/philips/cdicdic.cpp
-// clang-format off
 const uint16_t s_crc_ccitt_table[256] =
 	{
 		0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
@@ -879,10 +829,12 @@ void subcode_q_data(int lba, struct subcode& out)
 		as = rem_lba / 75;
 		af = rem_lba % 75;
 
-		int track = toc.GetTrackByLBA(lba + 150);
+		int track = 0;
+		while (track < toc.last && lba > toc.tracks[track].end)
+			track++;
 
 		int track_lba = 0;
-		if (track < (int)ARRAY_LENGTH(toc.tracks))
+		if (track >= 0 && track < toc.last)
 			track_lba = lba - toc.tracks[track].start;
 
 		int index = 1;
@@ -901,7 +853,7 @@ void subcode_q_data(int lba, struct subcode& out)
 		ts = track_lba / 75;
 		tf = track_lba % 75;
 
-		if (track < (int)ARRAY_LENGTH(toc.tracks))
+		if (track >= 0 && track < toc.last)
 			out.control = htons(toc.tracks[track].type ? 0x41 : 0x01);
 		out.track = htons(BCD(track + 1));
 		out.index = htons(BCD(index));
@@ -924,10 +876,19 @@ void subcode_q_data(int lba, struct subcode& out)
 	out.mode1_crc0 = htons((crc_accum >> 8) & 0xff);
 	out.mode1_crc1 = htons(crc_accum & 0xff);
 #if 0
-	printf("subcode %d   %02x %02x %02x %02x %02x %02x     %02x %02x %02x %02x %02x %02x\n", lba,
-		   ntohs(out.control), ntohs(out.track), ntohs(out.index),
-		   ntohs(out.mode1_mins), ntohs(out.mode1_secs), ntohs(out.mode1_frac), ntohs(out.mode1_zero),
-		   ntohs(out.mode1_amins), ntohs(out.mode1_asecs), ntohs(out.mode1_afrac), ntohs(out.mode1_crc0),
+	printf("subcode %d   %02x %02x %02x %02x %02x %02x     %02x %02x %02x %02x %02x %02x\n",
+		   lba,
+		   ntohs(out.control),
+		   ntohs(out.track),
+		   ntohs(out.index),
+		   ntohs(out.mode1_mins),
+		   ntohs(out.mode1_secs),
+		   ntohs(out.mode1_frac),
+		   ntohs(out.mode1_zero),
+		   ntohs(out.mode1_amins),
+		   ntohs(out.mode1_asecs),
+		   ntohs(out.mode1_afrac),
+		   ntohs(out.mode1_crc0),
 		   ntohs(out.mode1_crc1));
 #endif
 }
@@ -956,10 +917,11 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 
 	while (cnt > 0)
 	{
+		memset(buffer, 0, CDI_CDIC_BUFFER_SIZE);
+
 		if (lba < 0 || !toc.last)
 		{
 			// TOC area
-			memset(buffer, 0, CDI_SECTOR_LEN);
 			buffer += CDI_SECTOR_LEN;
 			struct subcode& subcode_out = *reinterpret_cast<struct subcode*>(buffer);
 			subcode_q_data(lba, subcode_out);
@@ -971,31 +933,10 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 		}
 		else
 		{
-			memset(buffer, 0xAA, CDI_SECTOR_LEN);
-
-			if (toc.phys)
-			{
-				int disc_lba = lba - 150;
-				if (disc_lba >= 0 && lba < toc.end)
-				{
-					physical_disc_seek_hint(disc_lba);
-					physical_disc_read_sector(disc_lba, buffer, NULL);
-				}
-				else
-					memset(buffer, 0, CDI_SECTOR_LEN);
-				check_scramble(lba, buffer);
-				buffer += CDI_SECTOR_LEN;
-				struct subcode& subcode_out = *reinterpret_cast<struct subcode*>(buffer);
-				subcode_q_data(lba, subcode_out);
-				memset(subcode_out.rw, 0, sizeof(subcode_out.rw));
-				buffer += sizeof(struct subcode);
-				cnt--;
-				lba++;
-				continue;
-			}
-
+			// Iterate over all CD tracks and ...
 			for (int i = 0; i < toc.last; i++)
 			{
+				// ... check for sectors in reading range
 				if (lba >= (toc.tracks[i].start - toc.tracks[i].pregap) && lba <= toc.tracks[i].end)
 				{
 					if (!toc.chd_f)
@@ -1035,9 +976,9 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 						}
 					}
 
-					while (cnt)
+					while (cnt && lba <= toc.tracks[i].end)
 					{
-						std::array<uint8_t, SUBCHANNEL_RW_SIZE> subc;
+						std::array<uint8_t, SUBCHANNEL_RW_SIZE> subc{};
 						bool subc_filled{false};
 						bool reinterleave_subcode{false};
 
@@ -1118,9 +1059,6 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 							}
 						}
 
-						if ((lba + 1) > toc.tracks[i].end)
-							break;
-
 						check_scramble(lba, buffer);
 						buffer += CDI_SECTOR_LEN;
 						struct subcode& subcode_out = *reinterpret_cast<struct subcode*>(buffer);
@@ -1144,8 +1082,16 @@ void cdi_read_cd(uint8_t* buffer, int lba, int cnt)
 						cnt--;
 						lba++;
 					}
-					break;
 				}
+			}
+
+			if (cnt)
+			{
+				// Even without track data, build a lead out to end the CD properly
+				buffer += CDI_SECTOR_LEN;
+				struct subcode& subcode_out = *reinterpret_cast<struct subcode*>(buffer);
+				subcode_q_data(lba, subcode_out);
+				buffer += sizeof(subcode_out);
 			}
 		}
 
@@ -1168,7 +1114,7 @@ static void mount_cd(int size, int index)
 /// Must be static to keep the value between mount calls
 static char last_dir[1024] = "";
 
-int cdi_mount_cd(int s_index, const char* filename)
+void cdi_mount_cd(int s_index, const char* filename)
 {
 	int loaded = 0;
 
@@ -1176,34 +1122,26 @@ int cdi_mount_cd(int s_index, const char* filename)
 	{
 		if (load_cd_image(filename, &toc) && toc.last)
 		{
-			int audio_only = !strcmp(filename, PHYSICAL_DISC_SENTINEL) && physical_disc_toc_audio_only(&toc);
-			if (!audio_only && !strcmp(filename, PHYSICAL_DISC_SENTINEL))
-			{
-				char save_name[64] = "physical_disc";
-				physical_disc_save_name(PHYSICAL_DISC_DISC_UNKNOWN, save_name, sizeof(save_name));
-				cdi_mount_save(save_name);
-			}
-			else if (!audio_only)
-			{
-				const char* p = strrchr(filename, '/');
-				int cur_len = p ? p - filename : 0;
-				int old_len = strlen(last_dir);
-				int same_game = old_len && (cur_len == old_len) && !strncmp(last_dir, filename, old_len);
+			const char* p = strrchr(filename, '/');
+			int cur_len = p ? p - filename : 0;
+			int old_len = strlen(last_dir);
+
+			int same_game = old_len && (cur_len == old_len) && !strncmp(last_dir, filename, old_len);
 
 			// Handle multi disc titles and avoid re-mounting the save file
 			// to avoid resets on the core
-				if (!same_game)
-				{
-					strncpy(last_dir, filename, sizeof(last_dir));
-					char* p = strrchr(last_dir, '/');
-					if (p)
-						*p = 0;
-					else
-						*last_dir = 0;
+			if (!same_game)
+			{
+				snprintf(last_dir, sizeof(last_dir), "%s", filename);
+				char* p = strrchr(last_dir, '/');
+				if (p)
+					*p = 0;
+				else
+					*last_dir = 0;
+
 				// FPGA side will be informed about the mount and perform a reset
 				// if configured to do so
-					cdi_mount_save(last_dir);
-				}
+				cdi_mount_save(last_dir);
 			}
 
 			prepare_toc_buffer(&toc);
@@ -1216,13 +1154,10 @@ int cdi_mount_cd(int s_index, const char* filename)
 	if (!loaded)
 	{
 		printf("Unmount CD\n");
-		if (toc.phys) physical_disc_close();
 		unload_cue(&toc);
 		unload_chd(&toc);
 		mount_cd(0, s_index);
 	}
-
-	return loaded;
 }
 
 void cdi_poll() {}

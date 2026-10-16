@@ -7,7 +7,6 @@
 #include "saturn.h"
 #include "../../shmem.h"
 #include "../chd/mister_chd.h"
-#include "../physical_disc/physical_disc.h"
 
 #define SHMEM_ADDR  0x31000000
 
@@ -158,7 +157,7 @@ int satcdd_t::LoadCUE(const char* filename) {
 		{
 			if (this->toc.last == 99) break;
 			this->toc.last++;
-
+			
 			if (bb != (this->toc.last + 1))
 			{
 				FileClose(&this->toc.tracks[this->toc.last].f);
@@ -323,18 +322,7 @@ int satcdd_t::Load(const char *filename)
 	Unload();
 
 	const char *ext = filename + strlen(filename) - 4;
-	if (!strcmp(filename, PHYSICAL_DISC_SENTINEL))
-	{
-		if (physical_disc_open(NULL) || physical_disc_load_toc(&this->toc))
-		{
-			physical_disc_close();
-			printf("\x1b[32mSaturn: no readable physical disc\n\x1b[0m");
-			return (-1);
-		}
-
-		this->sectorSize = 2352;
-	}
-	else if (!strncasecmp(".cue", ext, 4))
+	if (!strncasecmp(".cue", ext, 4))
 	{
 		if (LoadCUE(filename)) {
 			return (-1);
@@ -365,34 +353,6 @@ int satcdd_t::Load(const char *filename)
 
 	}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-	/*if (!memcmp("SEGADISCSYSTEM", header, 14))
-	{
-		this->sectorSize = 2048;
-	}
-	else
-	{
-		this->sectorSize = 2352;
-	}*/
 	/*if (this->toc.chd_f)
 	{
 		mister_chd_read_sector(this->toc.chd_f, 0, 0, 0, 0x10, (uint8_t *)header, this->chd_hunkbuf, &this->chd_hunknum);
@@ -402,6 +362,15 @@ int satcdd_t::Load(const char *filename)
 
 		FileSeek(fd_img, 0, SEEK_SET);
 		FileReadAdv(fd_img, header, 0x10);
+	}*/
+
+	/*if (!memcmp("SEGADISCSYSTEM", header, 14))
+	{
+		this->sectorSize = 2048;
+	}
+	else
+	{
+		this->sectorSize = 2352;
 	}*/
 
 #ifdef SATURN_DEBUG
@@ -425,85 +394,10 @@ int satcdd_t::Load(const char *filename)
 	return 0;
 }
 
-
-
-
-
-
-
-
-
-
-int satcdd_t::SwapPhys()
-{
-	toc_t nt = {};
-	if (physical_disc_current_toc(&nt) || !nt.last) return 0;   
-	memcpy(&this->toc, &nt, sizeof(this->toc));           
-	this->sectorSize = 2352;
-	this->toc.tracks[this->toc.last].start = this->toc.end;   
-	this->loaded = 1;
-
-
-	this->state = Stop;
-	this->track = 0;
-	this->lba = 0;
-	this->seek_lba = 0;
-	this->speed = 0;
-	this->audioLength = 0;
-	this->audioFirst = 0;
-	this->chd_audio_read_lba = 0;
-	this->seek_pend = false;
-	this->read_pend = false;
-	this->pause_pend = false;
-	this->read_toc = false;
-	this->seek_ring = false;
-	this->seek_ring2 = false;
-
-
-
-
-
-
-
-	this->lid_open = true;
-	this->stop_pend = true;
-	return 1;
-}
-
-void satcdd_t::SwapOpen()
-{
-
-
-
-	this->lid_open = true;
-}
-
-void satcdd_t::SwapClose()
-{
-
-
-
-
-
-	this->seek_pend = false;
-	this->read_pend = false;
-	this->pause_pend = false;
-	this->read_toc = false;
-	this->seek_ring = false;
-	this->seek_ring2 = false;
-	this->stop_pend = true;   
-	this->lid_open = false;   
-}
-
 void satcdd_t::Unload()
 {
 	if (this->loaded)
 	{
-		if (this->toc.phys)
-		{
-			physical_disc_close();
-		}
-
 		if (this->toc.chd_f)
 		{
 			chd_close(this->toc.chd_f);
@@ -538,31 +432,22 @@ void satcdd_t::Unload()
 
 int satcdd_t::GetBootHeader(uint8_t *buf) {
 	if (this->toc.last < 0) return -1;
-
+	
 	int offset = 16;
 	if (this->toc.tracks[0].sector_size == 2048)
 	{
 		offset = 0;
 	}
 
-	if (this->toc.phys)
+	if (this->toc.chd_f)
 	{
-
-		uint8_t raw[2352];
-		if (physical_disc_read_sector(this->toc.tracks[0].start, raw, NULL)) return -1;
-		memcpy(buf, raw + 16, 256);
+		if (mister_chd_read_sector(this->toc.chd_f, 0, 0, offset, 256, buf, this->chd_hunkbuf, &this->chd_hunknum) != CHDERR_NONE) return -1;
 	}
-	else if (this->toc.chd_f)
+	else 
 	{
-		mister_chd_read_sector(this->toc.chd_f, 0, 0, offset, 256, buf, this->chd_hunkbuf, &this->chd_hunknum);
-	}
-	else
-	{
-		if (this->toc.tracks[0].f.opened())
-		{
-			FileSeek(&this->toc.tracks[0].f, offset, SEEK_SET);
-			FileReadAdv(&this->toc.tracks[0].f, buf, 256);
-		}
+		if (!this->toc.tracks[0].f.opened() ||
+			!FileSeek(&this->toc.tracks[0].f, offset, SEEK_SET) ||
+			FileReadAdv(&this->toc.tracks[0].f, buf, 256) != 256) return -1;
 	}
 
 	return 1;
@@ -626,7 +511,7 @@ int satcdd_t::CalcSeekDelay(int lba_old, int lba_new)
 	else if (abs(diff) > 10000) n += 20;
 
 	if (diff < -4) n += 2;
-
+	 
 	return n;
 }
 
@@ -714,9 +599,6 @@ void satcdd_t::CommandExec() {
 		this->lba = fad - 150 - 4;
 		this->chd_audio_read_lba = this->lba;
 
-
-		if (this->toc.phys) physical_disc_seek_hint(this->lba);
-
 		this->track = this->toc.GetTrackByLBA(this->seek_lba);
 		this->index = this->toc.GetIndexByLBA(this->track, this->seek_lba);
 
@@ -735,7 +617,7 @@ void satcdd_t::CommandExec() {
 		printf("Command Read Data: tno = %u, idx = %u, fad = %u, FAD = %u, track = %u, track_start = %u, seek_delay = %u", cmd_tno, cmd_idx, cmd_fad, fad, this->track + 1, this->toc.tracks[this->track].start, this->seek_delay);
 		printf("\nlba_old = %u, lba_new = %u, seek_delay = %u", lba_old - 4, fad - 150, this->seek_delay);
 		printf(" (%u)\n\x1b[0m", saturn_frame_cnt);
-#endif // SATURN_DEBUG
+#endif // SATURN_DEBUG 
 	}
 		break;
 
@@ -757,8 +639,6 @@ void satcdd_t::CommandExec() {
 
 		this->seek_lba = fad - 150;
 		this->lba = fad - 150;
-
-		if (this->toc.phys) physical_disc_seek_hint(this->lba);
 
 		this->track = this->toc.GetTrackByLBA(this->seek_lba);
 		this->index = this->toc.GetIndexByLBA(this->track, this->seek_lba);
@@ -811,7 +691,7 @@ void satcdd_t::Process(uint8_t* time_mode) {
 	msf_t msf = { 0,2,0 };
 	uint8_t idx = 0;
 	uint8_t q = this->lba < this->toc.end && this->toc.tracks[this->track].type ? 0x40 : 0x00;
-
+		
 	if (this->lid_open) {
 		this->state = Open;
 
@@ -844,21 +724,21 @@ void satcdd_t::Process(uint8_t* time_mode) {
 			if (toc_pos >= this->toc.last) toc_pos = 0x100;
 		}
 		else {
-			if (toc_pos == 0x100) { //track A0
+			if (toc_pos == 0x100) {//track A0
 				msf.m = 1;
 				msf.s = 0;
 				msf.f = 0;
 				idx = 0xA0;
 				q = this->toc.tracks[0].type ? 0x40 : 0x00;
 			}
-			else if (toc_pos == 0x101) { //track A1
+			else if (toc_pos == 0x101) {//track A1
 				msf.m = this->toc.last;
 				msf.s = 0;
 				msf.f = 0;
 				idx = 0xA1;
 				q = this->toc.tracks[this->toc.last - 1].type ? 0x40 : 0x00;
 			}
-			else if (toc_pos == 0x102) { //track A2
+			else if (toc_pos == 0x102) {//track A2
 				int lba_ = this->toc.end + 150;
 				LBAToMSF(lba_, &msf);
 				idx = 0xA2;
@@ -918,7 +798,7 @@ void satcdd_t::Process(uint8_t* time_mode) {
 
 		this->final_read = false;
 
-		*time_mode = 1; // this->speed;
+		*time_mode = 1;// this->speed;
 
 #ifdef SATURN_DEBUG
 		//printf("\x1b[32mSaturn: ");
@@ -1308,17 +1188,11 @@ uint32_t satcdd_t::DataSectorCalcCRC(uint8_t* buf, int len)
 void satcdd_t::ReadData(uint8_t *buf)
 {
 	int offs = 0; 
-
+	
 	if (this->toc.tracks[this->track].type)
 	{
 		int lba_ = this->lba >= 0 ? this->lba : 0;
-		if (this->toc.phys)
-		{
-
-
-			physical_disc_read_sector(lba_, buf, NULL);
-		}
-		else if (this->toc.chd_f)
+		if (this->toc.chd_f)
 		{
 			int read_offset = 0;
 			if (this->toc.tracks[this->track].sector_size == 2048)
@@ -1354,16 +1228,7 @@ int satcdd_t::ReadCDDA(uint8_t *buf, int first)
 	int sec_offs = first ? 0 : 1;
 
 	uint8_t *dest = buf;
-	if (this->toc.phys)
-	{
-
-
-		for (int i = sec_offs; i < 2; i++, dest += 4096)
-		{
-			physical_disc_read_sector(this->chd_audio_read_lba + i, dest, NULL);
-		}
-	}
-	else if (this->toc.chd_f)
+	if (this->toc.chd_f)
 	{
 		for (int i = sec_offs; i < 2; i++, dest += 4096)
 		{
@@ -1435,7 +1300,7 @@ int satcdd_t::DataSectorSend(uint8_t* header, int speed)
 
 	buf_num_write++;
 	buf_num_write &= 3;
-
+	
 	uint16_t mode = (speed == 2 ? 0x0101 : 0x0000) | (boot ? 0x0808 : 0x0000) | (buf_num_read << 4) | (buf_num_read << 12);
 
 	buf_num_read++;

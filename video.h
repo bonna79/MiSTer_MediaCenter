@@ -15,6 +15,7 @@ struct VideoInfo
 	uint32_t ptime;
 	uint32_t ctime;
 	uint32_t vtimeh;
+	uint32_t frame_clocks;
 	uint32_t arx;
 	uint32_t ary;
 	uint32_t arxy;
@@ -32,6 +33,8 @@ struct VideoInfo
 
 // expose video timings for timerfd-based frame timer
 extern VideoInfo current_video_info;
+
+bool  video_is_direct();
 
 void  video_init();
 void  video_poll();

@@ -2,12 +2,16 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <algorithm>
+#include <vector>
 
 #include "../../hardware.h"
 #include "../../menu.h"
+#include "../../osd.h"
 #include "../../shmem.h"
 #include "../../lib/md5/md5.h"
 
@@ -27,6 +31,8 @@ static constexpr auto MD5_LENGTH = 16U;
 static constexpr auto CARTID_PREFIX = "ID:";
 static constexpr auto RESET_OPT = "[0]";
 static constexpr auto RELOAD_SAVE_OPT = "[40]";
+static constexpr auto SAVE_BACKUP_OPT = "[41]";
+static constexpr auto AUTOSAVE_OPT = "[42]";
 static constexpr auto AUTODETECT_OPT = "[64]";
 static constexpr auto CIC_TYPE_OPT = "[68:65]";
 static constexpr auto NO_EPAK_OPT = "[70]";
@@ -39,6 +45,7 @@ static constexpr auto SYS_TYPE_OPT = "[80:79]";
 static constexpr auto AUTOPAK_OPT = "[81]";
 static constexpr auto PATCHES_OPT = "[90]";
 static constexpr auto CHEATS_OPT = "[103]";
+static constexpr auto DD_DEVELOPMENT_OPT = "[107]";
 static constexpr const char* const CONTROLLER_OPTS[] = { "[51:49]", "[54:52]", "[57:55]", "[60:58]" };
 
 static constexpr size_t CPAK_PAGE_SIZE = 256; // N64 controller pak page size
@@ -114,6 +121,8 @@ enum class PadType : uint32_t {
 	N64_PAD_WITH_RPAK,
 	SNAC,
 	N64_PAD_WITH_TPAK,
+	KEYBOARD,
+	MOUSE,
 	UNKNOWN = ~0U
 };
 
@@ -159,6 +168,14 @@ struct patch_data {
 static uint8_t loaded = 0;
 static char current_rom_path[1024] = { '\0' };
 static char current_rom_path_gb[1024] = { '\0' };
+static char current_dd_disk_path[1024] = { '\0' };
+static char current_dd_ram_save_path[1024] = { '\0' };
+static uint32_t current_dd_load_addr = 0;
+static uint8_t current_dd_disk_loaded = 0;
+static uint8_t current_dd_skip_initial_osd_save = 0;
+static uint8_t current_dd_cart_expansion = 0;
+static uint8_t current_dd_disk_type = 0;
+static char current_dd_disk_id[5] = {};
 static char old_save_path[1024];
 static void* rdram_ptr = nullptr;
 static cheat_code* cheat_codes = nullptr;
@@ -266,7 +283,7 @@ static ByteOrder detect_rom_endianness(const uint8_t* data) {
 	}
 }
 
-static void normalize_data(uint8_t* data, size_t size, ByteOrder endianness) {
+static void normalize_data(uint8_t* data, const size_t size, const ByteOrder endianness) {
 	static uint8_t temp0, temp1, temp2;
 	switch (endianness) {
 	case ByteOrder::BYTE_SWAPPED:
@@ -361,6 +378,7 @@ static void cpak_format(uint8_t* data) {
 	read(rndfd, &seed, sizeof(seed));
 	close(rndfd);
 	srand(seed);
+	
 
 	memset(data, 0, get_save_size(MemoryType::CPAK));
 	uint8_t id_template[CPAK_ID_ENTRY_SIZE];
@@ -619,7 +637,7 @@ static uint8_t hex_to_dec(const char x) {
 	return 0;
 }
 
-static void trim(char* out, size_t max_len, const char* str)
+static void trim(char* out, const size_t max_len, const char* str)
 {
 	if (!*str || !max_len) {
 		*out = '\0';
@@ -658,12 +676,13 @@ static void trim(char* out, size_t max_len, const char* str)
 	memcpy(out, str, out_size);
 	out[out_size] = '\0';
 
-	// Obfuscate illegal characters
+	// Truncate at first occurance of an illegal character
 	for (size_t i = 0; (i < out_size) && out[i]; i++) {
 		if ((out[i] >= 0x20) && (out[i] < 0xa0)) {
 			continue;
 		}
-		out[i] = '?';
+		out[i] = '\0';
+		break;
 	}
 }
 
@@ -764,7 +783,8 @@ static bool parse_and_apply_db_tags(char* tags) {
 	user_io_status_set(RTC_OPT, (uint32_t)rtc);
 	set_cart_save_type(save_type);
 
-	if (is_autopak() && ((PadType)user_io_status_get(CONTROLLER_OPTS[0]) != PadType::SNAC)) {
+	auto pad0 = (PadType)user_io_status_get(CONTROLLER_OPTS[0]);
+	if (is_autopak() && pad0 != PadType::SNAC && pad0 != PadType::KEYBOARD && pad0 != PadType::MOUSE) {
 		user_io_status_set(CONTROLLER_OPTS[0], (uint32_t)prefered_pad);
 	}
 
@@ -905,6 +925,26 @@ static uint8_t detect_rom_settings_in_dbs_with_cartid(const char* lookup_id) {
 	return detected;
 }
 
+static void set_controller_system_settings(const uint8_t* controller_settings) {
+	// Rumble Pak
+	user_io_status_set(RPAK_OPT,
+		(controller_settings[0] == 0x01) ||
+		(controller_settings[1] == 0x01) ||
+		(controller_settings[2] == 0x01) ||
+		(controller_settings[3] == 0x01) ? 1 : 0);
+
+	// Controller Pak
+	user_io_status_set(CPAK_OPT,
+		(controller_settings[0] == 0x02) ||
+		(controller_settings[1] == 0x02) ||
+		(controller_settings[2] == 0x02) ||
+		(controller_settings[3] == 0x02) ? 1 : 0);
+
+	// Transfer Pak is P1 only
+	user_io_status_set(TPAK_OPT,
+		(controller_settings[0] == 0x03) ? 1 : 0);
+}
+
 // "Advanced" Homebrew ROM Header https://n64brew.dev/wiki/ROM_Header
 static bool detect_homebrew_header(const uint8_t* controller_settings, const char* cart_id) {
 	if ((cart_id[1] != 'E') || (cart_id[2] != 'D')) return false;
@@ -932,9 +972,6 @@ static bool detect_homebrew_header(const uint8_t* controller_settings, const cha
 	case 5:
 		set_cart_save_type(MemoryType::FLASH_128k);
 		break;
-		//case 6:
-		//	set_cart_save_type(MemoryType::SRAM_128k);
-		//	break;
 	default:
 		set_cart_save_type(MemoryType::NONE);
 		break;
@@ -943,30 +980,14 @@ static bool detect_homebrew_header(const uint8_t* controller_settings, const cha
 	printf("Auto-detect is ON, updating OSD settings.\n");
 
 	user_io_status_set(RTC_OPT, (uint32_t)(hex_to_dec(cart_id[5]) & 1)); // RTC
-
-	user_io_status_set(RPAK_OPT, (uint32_t)(
-		(controller_settings[0] == 0x01) ||
-		(controller_settings[1] == 0x01) ||
-		(controller_settings[2] == 0x01) ||
-		(controller_settings[3] == 0x01) ? 1 : 0)); // Rumble Pak
-
-	user_io_status_set(CPAK_OPT, (uint32_t)(
-		(controller_settings[0] == 0x02) ||
-		(controller_settings[1] == 0x02) ||
-		(controller_settings[2] == 0x02) ||
-		(controller_settings[3] == 0x02) ? 1 : 0)); // Controller Pak
-
-	user_io_status_set(TPAK_OPT, (uint32_t)(
-		(controller_settings[0] == 0x03) ||
-		(controller_settings[1] == 0x03) ||
-		(controller_settings[2] == 0x03) ||
-		(controller_settings[3] == 0x03) ? 1 : 0)); // Transfer Pak
+	set_controller_system_settings(controller_settings);
 
 	if (!is_autopak()) return true;
 
 	size_t c_idx = 0;
 	for (auto c_opt : CONTROLLER_OPTS) {
-		if (controller_settings[c_idx] && ((PadType)user_io_status_get(c_opt) != PadType::SNAC)) {
+		auto pad_type = (PadType)user_io_status_get(c_opt);
+		if (controller_settings[c_idx] && pad_type != PadType::SNAC && pad_type != PadType::KEYBOARD && pad_type != PadType::MOUSE) {
 			if (controller_settings[c_idx] < 0x80) {
 				user_io_status_set(c_opt, (uint32_t)(
 					(controller_settings[c_idx] == 0x01) ? PadType::N64_PAD_WITH_RPAK :
@@ -984,7 +1005,7 @@ static bool detect_homebrew_header(const uint8_t* controller_settings, const cha
 	return true;
 }
 
-static bool detect_rom_settings_from_first_chunk(const char region_code, const uint64_t* signatures, size_t sig_len) {
+static bool detect_rom_settings_from_first_chunk(const char region_code, const uint32_t* signatures, size_t sig_len) {
 	SystemType system_type;
 	CIC cic = CIC::UNKNOWN;
 	bool is_known_signature = true;
@@ -1022,42 +1043,100 @@ static bool detect_rom_settings_from_first_chunk(const char region_code, const u
 				signatures++;
 				break;
 			}
-			printf("Unknown CIC signature: 0x%016llx, uses default.\n", *signatures);
+			printf("Unknown CIC signature: 0x%08x, uses default.\n", *signatures);
 			is_known_signature = false;
 			// Fall through
-		case UINT64_C(0x000000a316adc55a): // CIC-6102/7101 IPL3
-		case UINT64_C(0x000000a30dacd530): // NOP:ed out CRC check
-		case UINT64_C(0x000000039c981107): // hcs64's CIC-6102 IPL3 replacement
-		case UINT64_C(0x000000d2828281b0): // Unknown. Used in some homebrew
-		case UINT64_C(0x000000d2531456f6): // Unknown. Used in some homebrew
-		case UINT64_C(0x000000d28bc5f6ae): // Unknown. Used in some homebrew
-		case UINT64_C(0x000000d2be3c4486): // Xeno Crisis custom IPL3
-		case UINT64_C(0x0000009acc31e644): // HW1 IPL3 (Turok E3 prototype)
-		case UINT64_C(0x0000009474732e6b): // IPL3 re-assembled with the GNU assembler (iQue)
-			cic = (system_type != SystemType::PAL) ? CIC::CIC_NUS_6102 : CIC::CIC_NUS_7101; break;
-		case UINT64_C(0x000000a405397b05): // CIC-7102 IPL3
-		case UINT64_C(0x000000a3fc388adb): // NOP:ed out CRC check
-			system_type = SystemType::PAL; cic = CIC::CIC_NUS_7102; break;
-		case UINT64_C(0x000000a0f26f62fe): // CIC-6101 IPL3
-		case UINT64_C(0x000000a0e96e72d4): // NOP:ed out CRC check
-			system_type = SystemType::NTSC; cic = CIC::CIC_NUS_6101; break;
-		case UINT64_C(0x000000a9229d7c45): // CIC-x103 IPL3
-		case UINT64_C(0x000000a9199c8c1b): // NOP:ed out CRC check
-		case UINT64_C(0x000000271316d406): // All zeros bar font (iQue Paper Mario)
-			cic = (system_type != SystemType::PAL) ? CIC::CIC_NUS_6103 : CIC::CIC_NUS_7103; break;
-		case UINT64_C(0x000000f8b860ed00): // CIC-x105 IPL3
-		case UINT64_C(0x000000f8af5ffcd6): // NOP:ed out CRC check
-			cic = (system_type != SystemType::PAL) ? CIC::CIC_NUS_6105 : CIC::CIC_NUS_7105; break;
-		case UINT64_C(0x000000ba5ba4b8cd): // CIC-x106 IPL3
-			cic = (system_type != SystemType::PAL) ? CIC::CIC_NUS_6106 : CIC::CIC_NUS_7106; break;
-		case UINT64_C(0x0000012daafc8aab): cic = CIC::CIC_NUS_5167; break;
-		case UINT64_C(0x000000a9df4b39e1): cic = CIC::CIC_NUS_8303; break;
-		case UINT64_C(0x000000aa764e39e1): cic = CIC::CIC_NUS_8401; break;
-		case UINT64_C(0x000000abb0b739e1): cic = CIC::CIC_NUS_DDUS; break;
-		case UINT64_C(0x00000081ce470326): // CIC-5101 IPL3
-		case UINT64_C(0x000000827a47195a): // Kuru Kuru Fever
-		case UINT64_C(0x00000082551e4848): // Tower & Shaft
-			cic = CIC::CIC_NUS_5101; break;
+
+		case UINT32_C(0x90bb6cb5): // CIC-6102/7101 IPL3
+		case UINT32_C(0x51b6203c): // NOP:ed out CRC check
+		case UINT32_C(0xb98ced9a): // HW1 IPL3 (Mirror House, iQue)
+		case UINT32_C(0xcd19fef1): // IPL3 re-assembled with the GNU assembler (iQue)
+		case UINT32_C(0x65f63844): // hcs64's CIC-6102 IPL3 replacement
+		case UINT32_C(0xd47bcc94): // Libdragon ipl3_prod	r0
+		case UINT32_C(0x2e264bdf): // Libdragon ipl3_dev	r0
+		case UINT32_C(0x607478f4): // Libdragon ipl3_prod	r1
+		case UINT32_C(0x8cc97201): // Libdragon ipl3_prod	r2
+		case UINT32_C(0x1bf5705a): // Libdragon ipl3_prod	r3
+		case UINT32_C(0xb364bc58): // Libdragon ipl3_compat	r4
+		case UINT32_C(0x9a5bb9aa): // Libdragon ipl3_prod	r5
+		case UINT32_C(0x02cdea0e): // Libdragon ipl3_compat	r5
+		case UINT32_C(0xf332e111): // Libdragon ipl3_prod	r6
+		case UINT32_C(0xc36199c4): // Libdragon ipl3_compat	r6
+		case UINT32_C(0xb531bde6): // Libdragon ipl3_prod	r7
+		case UINT32_C(0xaabeb54e): // Libdragon ipl3_compat	r7
+		case UINT32_C(0x345e1229): // Libdragon ipl3_prod	r8
+		case UINT32_C(0x9dda2d36): // Libdragon ipl3_compat	r8
+		case UINT32_C(0xef76c372): // Libdragon ipl3_prod	r9
+		case UINT32_C(0x498b2f65): // Libdragon ipl3_compat	r9
+		case UINT32_C(0x86472013): // Libdragon ipl3_prod	r10
+		case UINT32_C(0x971e77d3): // Libdragon ipl3_dev	r10
+		case UINT32_C(0xe2d9b974): // Libdragon ipl3_compat	r10
+		case UINT32_C(0x6d089c64): // Homebrew / Hack
+		case UINT32_C(0xb3b8ab39): // Homebrew / Hack
+		case UINT32_C(0xb814477b): // Homebrew / Hack
+		case UINT32_C(0xcfb39b3c): // Homebrew / Hack
+		case UINT32_C(0xc59d2f67): // Homebrew / Hack
+			cic = (system_type != SystemType::PAL) 
+				? CIC::CIC_NUS_6102 
+				: CIC::CIC_NUS_7101;
+			break;
+
+		case UINT32_C(0x009e9ea3): // CIC-7102 IPL3 (Lylat Wars)
+		case UINT32_C(0x3c283826): // NOP:ed out CRC check
+			system_type = SystemType::PAL;
+			cic = CIC::CIC_NUS_7102;
+			break;
+
+		case UINT32_C(0x6170a4a1): // CIC-6101 IPL3 (Star Fox)
+		case UINT32_C(0x67ee130d): // NOP:ed out CRC check
+			system_type = SystemType::NTSC;
+			cic = CIC::CIC_NUS_6101;
+			break;
+
+		case UINT32_C(0x0b050ee0): // CIC-x103 IPL3
+		case UINT32_C(0x9ce7c6e5): // NOP:ed out CRC check
+		case UINT32_C(0xe71c2766): // All zeros bar font (iQue Paper Mario)
+			cic = (system_type != SystemType::PAL)
+				? CIC::CIC_NUS_6103
+				: CIC::CIC_NUS_7103;
+			break;
+
+		case UINT32_C(0x98bc2c86): // CIC-x105 IPL3
+		case UINT32_C(0x5f8df1aa): // NOP:ed out CRC check
+			cic = (system_type != SystemType::PAL)
+				? CIC::CIC_NUS_6105
+				: CIC::CIC_NUS_7105;
+			break;
+
+		case UINT32_C(0xacc8580a): // CIC-x106 IPL3
+			cic = (system_type != SystemType::PAL)
+				? CIC::CIC_NUS_6106
+				: CIC::CIC_NUS_7106;
+			break;
+
+		case UINT32_C(0x0e018159): // Zoinkity's 64DD hacks
+			cic = CIC::CIC_NUS_5167;
+			break;
+
+		case UINT32_C(0x0c965795): // NDDJ2: Retail 64DD v1.2
+		case UINT32_C(0xbc605d0a): // Beta 1.0
+		case UINT32_C(0x502c4466): // Beta 1.1
+			cic = CIC::CIC_NUS_8303;
+			break;
+
+		case UINT32_C(0x10c68b18): // NDXJ0: Dev 64DD
+			cic = CIC::CIC_NUS_8401;
+			break;
+
+		case UINT32_C(0x8feba21e): // NDDE0: Dev 64DD (USA, Prototype)
+			cic = CIC::CIC_NUS_DDUS;
+			break;
+
+		case UINT32_C(0x587bd543): // CIC-5101 IPL3
+		case UINT32_C(0xe351f733): // Kuru Kuru Fever etc.
+		case UINT32_C(0x3b46348c): // Tower & Shaft
+			cic = CIC::CIC_NUS_5101;
+			break;
 		}
 	} while (cic == CIC::UNKNOWN);
 
@@ -1082,21 +1161,11 @@ static void md5_to_hex(uint8_t* md5, char* out) {
 		sprintf(out, "%02x", *md5);
 }
 
-static void calc_bootcode_checksums(uint64_t bootcode_sums[2], const uint8_t* buf) {
-	size_t i;
-	uint64_t sum = 0;
-
-	// Calculate boot code checksum for bytes 0x40 - 0xc00 (Aleck64)
-	for (i = 0x40 / sizeof(uint32_t); i < 0xc00 / sizeof(uint32_t); i++) {
-		sum += ((uint32_t*)buf)[i];
-	}
-	bootcode_sums[1] = sum;
-
-	// Calculate boot code checksum for bytes 0x40 - 0x1000
-	for (; i < 0x1000 / sizeof(uint32_t); i++) {
-		sum += ((uint32_t*)buf)[i];
-	}
-	bootcode_sums[0] = sum;
+// What kinf of CIC that should be used is determined by comparing the
+// CRC32 of the IPL3 (bootcode) section the ROM against a list of known ones.
+static void calc_bootcode_checksums(uint32_t crc[2], const uint8_t* buf) {
+	const size_t OFFSET = 0x0040, SIZE = 0x1000 - OFFSET, SIZE_ALECK = 0x0c00 - OFFSET;
+	crc[0] = crc32(crc[1] = crc32(0, buf + OFFSET, SIZE_ALECK), buf + OFFSET + SIZE_ALECK, SIZE - SIZE_ALECK);
 }
 
 static void create_save_path(char* save_path, const MemoryType type) {
@@ -1127,10 +1196,10 @@ static void create_save_path(char* save_path, const MemoryType type) {
 		strcpy(ext, ".fla");
 		break;
 	case MemoryType::CPAK:
+		sprintf(ext, "_%u.cpk", mounted_save_files + ((get_cart_save_type() == MemoryType::NONE) ? 1 : 0));
+		break;
 	case MemoryType::TPAK:
-		sprintf(ext, "_%u%s",
-			(mounted_save_files + ((get_cart_save_type() == MemoryType::NONE) ? 1 : 0)),
-			((type == MemoryType::CPAK) ? ".cpk" : ".tpk"));
+		sprintf(ext, "_%u.tpk", mounted_save_files + ((get_cart_save_type() == MemoryType::NONE) ? 1 : 0));
 		break;
 	default:
 		strcpy(ext, ".sav");
@@ -1334,8 +1403,8 @@ static void write_save_file(const uint64_t sector_index, const uint32_t sector_s
 		}
 
 		// Only write save data if it's different from the old one.
-		uint8_t existing_data[chunk_size];
-		if ((chunk_size != (uint32_t)FileReadAdv(img, existing_data, chunk_size)) || memcmp(buffer, existing_data, chunk_size)) {
+		std::vector<uint8_t> existing_data(chunk_size);
+		if ((chunk_size != (uint32_t)FileReadAdv(img, existing_data.data(), chunk_size)) || memcmp(buffer, existing_data.data(), chunk_size)) {
 			menu_process_save();
 			FileSeek(img, file_offset, SEEK_SET);
 			FileWriteAdv(img, buffer, chunk_size);
@@ -1396,7 +1465,7 @@ static void read_save_file(const uint64_t sector_index, const uint32_t sector_si
 }
 
 /* The N64 core handles all its save types by sending all of them concatenated together to/from the FPGA.
-   e.g. (EEPROM/SRAM/FLASH) (+ TPAK) (+ CPAK 1) (+ CPAK 2) (+ CPAK 3) (+ CPAK 4)
+   e.g. (EEPROM/SRAM/FLASH) (+ TPAK / CPAK 1) (+ CPAK 2) (+ CPAK 3) (+ CPAK 4)
    We need to split up the continuous data stream into files if we want to save.
    We need to merge the files into a single continuous data stream if we want to load. */
 bool n64_process_save(const bool use_save, const int op, const uint64_t sector_index, const uint32_t sector_size, const int ack_flags,
@@ -1521,6 +1590,8 @@ void n64_cheats_send(const void* buf_ptr, const uint32_t size) {
 	cheat_codes_count = size;
 }
 
+static void n64dd_poll_save();
+
 static unsigned long poll_timer = 0;
 
 void n64_reset() {
@@ -1589,7 +1660,1040 @@ void n64_poll() {
 				}
 			}
 		}
+
+		n64dd_poll_save();
 	}
+}
+
+static constexpr uint32_t N64_ROM_FASTLOAD_ADDR = 0x32000000;
+static constexpr uint32_t N64DD_IPL_LOAD_ADDR = 0x30C00000;
+static constexpr const char* N64DD_IPL_BOOT_FILE = "boot3.rom";
+static constexpr const char* N64DD_IPL_DEV_BOOT_FILE = "boot4.rom";
+static constexpr const char* N64DD_IPL_US_BOOT_FILE = "boot5.rom";
+static constexpr const char* N64DD_IPL_DISK_FILE = "dd_bios.rom";
+static constexpr uint32_t N64DD_IPL_SIZE = 4 * 1024 * 1024;
+static constexpr uint32_t N64DD_NDD_SIZE = 0x03DEC800;
+static constexpr uint32_t N64DD_EXPANDED_SIZE = 0x06E28000;
+static constexpr uint32_t N64DD_SYSTEM_SECTOR_LENGTH = 232;
+static constexpr uint32_t N64DD_DEV_SYSTEM_SECTOR_LENGTH = 192;
+static constexpr uint32_t N64DD_SECTORS_PER_BLOCK = 85;
+static constexpr uint32_t N64DD_BAD_TRACKS_PER_ZONE = 12;
+static constexpr uint32_t N64DD_FLAT_HEAD_STRIDE = 0x03714000;
+static constexpr uint32_t N64DD_FLAT_TRACK_STRIDE = 0x0000C000;
+static constexpr uint32_t N64DD_FLAT_BLOCK_STRIDE = 0x00006000;
+static constexpr uint32_t N64DD_FLAT_SECTOR_STRIDE = 0x00000100;
+static constexpr uint32_t N64DD_FLAT_TRACKS_PER_HEAD = 1175;
+static constexpr uint32_t N64DD_DIRTY_FLAG_OFFSET = 0x00005F00;
+static constexpr uint32_t N64DD_DIRTY_MARKER_SIZE = 8;
+static constexpr uint8_t N64DD_BAD_BLOCK_FILL = 0xDD;
+static constexpr uint32_t N64DD_SAVE_CHUNK_SIZE = 1024 * 1024;
+static constexpr uint8_t N64DD_DIRTY_MAGIC_BYTE = 0xD1;
+static constexpr uint16_t N64DD_RAM_START_LBA[7] = {0x05A2, 0x07C6, 0x09EA, 0x0C0E, 0x0E32, 0x1010, 0x10DC};
+static constexpr uint32_t N64DD_RAM_SIZE[7] = {
+	0x024A9DC0, 0x01C226C0, 0x01450F00, 0x00D35680, 0x006CFD40, 0x001DA240, 0
+};
+
+enum class N64DDDiskRegion : uint8_t {
+	UNKNOWN,
+	JAPAN,
+	USA,
+	DEVELOPMENT
+};
+
+static bool n64dd_load_ram_save_to_mem(const char* save_path, const char* disk_path, uint8_t* mem, uint8_t disk_type);
+static bool n64dd_save_ram_image(const char* save_path, const char* disk_path, uint8_t* mem, uint8_t disk_type, bool force);
+
+static void n64dd_clear_disk_save_state() {
+	current_dd_disk_path[0] = '\0';
+	current_dd_ram_save_path[0] = '\0';
+	current_dd_load_addr = 0;
+	current_dd_disk_loaded = 0;
+	current_dd_skip_initial_osd_save = 0;
+	current_dd_cart_expansion = 0;
+	current_dd_disk_type = 0;
+	current_dd_disk_id[0] = '\0';
+}
+
+static void n64dd_create_ram_save_path(char* save_path, const char* disk_path) {
+	create_path(SAVE_DIR, CoreName2);
+
+	const char* fname = strrchr(disk_path, '/');
+	const char* fname_backslash = strrchr(disk_path, '\\');
+	if (fname_backslash && (!fname || fname_backslash > fname)) fname = fname_backslash;
+	fname = fname ? fname + 1 : disk_path;
+
+	char base_name[1024];
+	strncpy(base_name, fname, sizeof(base_name) - 1);
+	base_name[sizeof(base_name) - 1] = '\0';
+
+	char* ext = strrchr(base_name, '.');
+	if (ext) *ext = '\0';
+
+	snprintf(save_path, 1024, SAVE_DIR"/%s/%s.ram", CoreName2, base_name);
+}
+
+static const char* n64_leaf_name(const char* path) {
+	if (!path) return nullptr;
+	const char* slash = strrchr(path, '/');
+	const char* backslash = strrchr(path, '\\');
+	if (backslash && (!slash || backslash > slash)) slash = backslash;
+	return slash ? slash + 1 : path;
+}
+
+static void n64dd_progress(const char* title, const char* name, uint64_t current, uint64_t max) {
+	if (!title || !name || !max) return;
+	if (current > max) current = max;
+	ProgressMessage(title, n64_leaf_name(name), (int)current, (int)max);
+}
+
+static bool n64dd_save_ram_to_file(bool force) {
+	if (!current_dd_disk_loaded || !current_dd_load_addr ||
+		!current_dd_ram_save_path[0] || !current_dd_disk_path[0]) return false;
+
+	const uint8_t preserve_osd = user_io_osd_is_visible() ? 1 : 0;
+	uint8_t* mem = (uint8_t*)shmem_map(fpga_mem(current_dd_load_addr), N64DD_EXPANDED_SIZE);
+	if (!mem || mem == (uint8_t*)-1) {
+		printf("64DD save: failed to map DDRAM disk image.\n");
+		return false;
+	}
+
+	const bool ram_ok = n64dd_save_ram_image(current_dd_ram_save_path, current_dd_disk_path,
+		mem, current_dd_disk_type, force);
+
+	shmem_unmap(mem, N64DD_EXPANDED_SIZE);
+	if (!preserve_osd) ProgressMessage();
+	return ram_ok;
+}
+
+static bool n64dd_save_now(bool force, const char* reason) {
+	if (!current_dd_disk_loaded) return false;
+	const char* save_reason = reason ? reason : "forced";
+	const bool ok = n64dd_save_ram_to_file(force);
+	if (!ok) printf("64DD save: %s save failed.\n", save_reason);
+	return ok;
+}
+
+static bool n64dd_flush_pending_save_before_disk_change() {
+	return n64dd_save_now(true, "disk-change");
+}
+
+void n64_save_dd_disk() {
+	n64dd_save_now(true, "manual");
+	current_dd_skip_initial_osd_save = 0;
+}
+
+static void n64dd_poll_save() {
+	static uint8_t previous_manual_save = 0;
+	static uint8_t previous_osd_visible = 0;
+	const uint8_t manual_save = user_io_status_get(SAVE_BACKUP_OPT) ? 1 : 0;
+	const uint8_t osd_visible = user_io_osd_is_visible() ? 1 : 0;
+	const bool autosave_enabled = !user_io_status_get(AUTOSAVE_OPT);
+	bool saved_this_poll = false;
+
+	if (!current_dd_disk_loaded) {
+		previous_manual_save = manual_save;
+		previous_osd_visible = osd_visible;
+		current_dd_skip_initial_osd_save = 0;
+		return;
+	}
+
+	if (manual_save && !previous_manual_save) {
+		n64dd_save_now(true, "manual");
+		saved_this_poll = true;
+		current_dd_skip_initial_osd_save = 0;
+	}
+	previous_manual_save = manual_save;
+
+	if (autosave_enabled && !previous_osd_visible && osd_visible) {
+		if (current_dd_skip_initial_osd_save) {
+			current_dd_skip_initial_osd_save = 0;
+		} else if (!saved_this_poll) {
+			n64dd_save_now(true, "OSD-open");
+		}
+	}
+	if (!osd_visible && current_dd_skip_initial_osd_save) {
+		current_dd_skip_initial_osd_save = 0;
+	}
+	previous_osd_visible = osd_visible;
+}
+
+struct n64dd_zone {
+	uint8_t head;
+	uint16_t sector_length;
+	uint16_t tracks;
+	uint16_t track_offset;
+};
+
+struct n64dd_sector_map_entry {
+	uint32_t flat_offset;
+	uint16_t sector_length;
+};
+
+static constexpr n64dd_zone N64DD_ZONES[16] = {
+	{0, 232, 158, 0},    {0, 216, 158, 158},  {0, 208, 149, 316},  {0, 192, 149, 465},
+	{0, 176, 149, 614},  {0, 160, 149, 763},  {0, 144, 149, 912},  {0, 128, 114, 1061},
+	{1, 216, 158, 0},    {1, 208, 158, 158},  {1, 192, 149, 316},  {1, 176, 149, 465},
+	{1, 160, 149, 614},  {1, 144, 149, 763},  {1, 128, 149, 912},  {1, 112, 114, 1061},
+};
+
+static constexpr uint8_t N64DD_VZONE_TO_PZONE[7][16] = {
+	{0, 1, 2, 9, 8, 3, 4, 5, 6, 7, 15, 14, 13, 12, 11, 10},
+	{0, 1, 2, 3, 10, 9, 8, 4, 5, 6, 7, 15, 14, 13, 12, 11},
+	{0, 1, 2, 3, 4, 11, 10, 9, 8, 5, 6, 7, 15, 14, 13, 12},
+	{0, 1, 2, 3, 4, 5, 12, 11, 10, 9, 8, 6, 7, 15, 14, 13},
+	{0, 1, 2, 3, 4, 5, 6, 13, 12, 11, 10, 9, 8, 7, 15, 14},
+	{0, 1, 2, 3, 4, 5, 6, 7, 14, 13, 12, 11, 10, 9, 8, 15},
+	{0, 1, 2, 3, 4, 5, 6, 7, 15, 14, 13, 12, 11, 10, 9, 8},
+};
+static constexpr uint16_t N64DD_BLOCK_SIZE[16] = {
+	0x4D08, 0x47B8, 0x4510, 0x3FC0, 0x3A70, 0x3520, 0x2FD0, 0x2A80,
+	0x47B8, 0x4510, 0x3FC0, 0x3A70, 0x3520, 0x2FD0, 0x2A80, 0x2530,
+};
+
+static bool n64dd_read_exact(fileTYPE* file, uint64_t offset, uint8_t* data, uint32_t size) {
+	if (!FileSeek(file, offset, SEEK_SET)) return false;
+	const int read = FileReadAdv(file, data, size);
+	return read >= 0 && static_cast<uint32_t>(read) == size;
+}
+
+static N64DDDiskRegion n64dd_detect_retail_region(fileTYPE* file) {
+	static constexpr uint8_t JAPAN_SIGNATURE[4] = {0xE8, 0x48, 0xD3, 0x16};
+	static constexpr uint8_t USA_SIGNATURE[4] = {0x22, 0x63, 0xEE, 0x56};
+	uint8_t signature[4];
+
+	if (!n64dd_read_exact(file, 0, signature, sizeof(signature))) return N64DDDiskRegion::UNKNOWN;
+	if (!memcmp(signature, JAPAN_SIGNATURE, sizeof(signature))) return N64DDDiskRegion::JAPAN;
+	if (!memcmp(signature, USA_SIGNATURE, sizeof(signature))) return N64DDDiskRegion::USA;
+	return N64DDDiskRegion::UNKNOWN;
+}
+
+static bool n64dd_copy_ipl_to_mem(fileTYPE* file, const char* name, uint8_t* ddipl_dest, uint8_t* boot_dest, uint32_t size) {
+	static uint8_t buf[4096];
+	ByteOrder rom_endianness = ByteOrder::BIG_ENDIAN;
+	bool is_first_chunk = true;
+	uint32_t copied = 0;
+
+	if (!FileSeek(file, 0, SEEK_SET)) return false;
+
+	while (copied < size) {
+		uint32_t chunk = std::min<uint32_t>(sizeof(buf), size - copied);
+		const int read = FileReadAdv(file, buf, chunk);
+		if (read < 0 || static_cast<uint32_t>(read) != chunk) return false;
+
+		if (is_first_chunk) {
+			if (chunk < 4096) {
+				printf("Failed to load 64DD IPL: must be at least 4096 bytes.\n");
+				return false;
+			}
+
+			rom_endianness = detect_rom_endianness(buf);
+		}
+
+		normalize_data(buf, chunk, rom_endianness);
+
+		if (is_first_chunk) {
+			const bool development_ipl = !memcmp(buf + 0x3B, "NDXJ", 4);
+			user_io_status_set(DD_DEVELOPMENT_OPT, development_ipl ? 1 : 0);
+			printf("64DD IPL: %s drive ID selected.\n", development_ipl ? "development" : "retail");
+		}
+
+		if (is_first_chunk && boot_dest) {
+			uint32_t bootcode_crc[2] = { };
+			calc_bootcode_checksums(bootcode_crc, buf);
+			detect_rom_settings_from_first_chunk((char)buf[0x3e], bootcode_crc, sizeof(bootcode_crc) / sizeof(*bootcode_crc));
+			if (is_auto()) set_cart_save_type(MemoryType::NONE);
+		}
+
+		memcpy(ddipl_dest + copied, buf, chunk);
+		if (boot_dest) memcpy(boot_dest + copied, buf, chunk);
+
+		copied += chunk;
+		is_first_chunk = false;
+		n64dd_progress("Loading", name, copied, size);
+	}
+
+	return true;
+}
+
+static uint32_t n64dd_flat_offset(uint32_t track, uint32_t head, uint32_t block, uint32_t sector) {
+	if (sector >= 90) sector -= 90;
+	if (sector > 84) sector = 84;
+
+	return (head ? N64DD_FLAT_HEAD_STRIDE : 0) +
+		(track * N64DD_FLAT_TRACK_STRIDE) +
+		(block * N64DD_FLAT_BLOCK_STRIDE) +
+		(sector * N64DD_FLAT_SECTOR_STRIDE);
+}
+
+static bool n64dd_mark_bad_flat_block(uint8_t* dest, uint32_t track, uint32_t head, uint32_t block) {
+	const uint32_t dest_offset = n64dd_flat_offset(track, head, block, 0);
+	if ((dest_offset + N64DD_FLAT_BLOCK_STRIDE) > N64DD_EXPANDED_SIZE) return false;
+	for (uint32_t sector = 0; sector < N64DD_SECTORS_PER_BLOCK; sector++) {
+		memset(dest + dest_offset + (sector * N64DD_FLAT_SECTOR_STRIDE) + 0xF8, N64DD_BAD_BLOCK_FILL, 8);
+	}
+	return true;
+}
+
+static bool n64dd_copy_block_to_flat(fileTYPE* file, uint64_t source_offset, uint8_t* dest,
+	uint32_t track, uint32_t head, uint32_t block, uint32_t sector_length, std::vector<uint8_t>& block_data) {
+	const uint32_t block_length = sector_length * N64DD_SECTORS_PER_BLOCK;
+	block_data.resize(block_length);
+
+	if (!n64dd_read_exact(file, source_offset, block_data.data(), block_length)) return false;
+
+	for (uint32_t sector = 0; sector < N64DD_SECTORS_PER_BLOCK; sector++) {
+		const uint32_t dest_offset = n64dd_flat_offset(track, head, block, sector);
+		if ((dest_offset + sector_length) > N64DD_EXPANDED_SIZE) return false;
+		memcpy(dest + dest_offset, block_data.data() + (sector * sector_length), sector_length);
+	}
+
+	return true;
+}
+
+static bool n64dd_copy_file_to_vector(fileTYPE* file, std::vector<uint8_t>& data, uint32_t expected_size,
+	const char* progress_title, const char* progress_name) {
+	data.resize(expected_size);
+	if (!FileSeek(file, 0, SEEK_SET)) return false;
+
+	uint32_t copied = 0;
+	while (copied < expected_size) {
+		const uint32_t chunk = std::min<uint32_t>(N64DD_SAVE_CHUNK_SIZE, expected_size - copied);
+		const int read = FileReadAdv(file, data.data() + copied, (int)chunk);
+		if (read < 0 || static_cast<uint32_t>(read) != chunk) return false;
+
+		copied += chunk;
+		if (progress_title) n64dd_progress(progress_title, progress_name, copied, expected_size);
+	}
+
+	return true;
+}
+
+static bool n64dd_write_vector_to_file(const char* save_path, const std::vector<uint8_t>& data) {
+	const uint32_t total_size = (uint32_t)data.size();
+	fileTYPE save_file = {};
+	if (!FileOpenEx(&save_file, save_path, O_CREAT | O_TRUNC | O_RDWR | O_SYNC, 0, 0)) {
+		printf("64DD save: failed to create \"%s\".\n", save_path);
+		return false;
+	}
+
+	uint32_t written = 0;
+	while (written < total_size) {
+		const uint32_t chunk = std::min<uint32_t>(N64DD_SAVE_CHUNK_SIZE, total_size - written);
+		const int ret = FileWriteAdv(&save_file, const_cast<uint8_t*>(data.data() + written), (int)chunk);
+		if (ret < 0 || static_cast<uint32_t>(ret) != chunk) {
+			printf("64DD save: failed writing \"%s\" at 0x%08x.\n", save_path, written);
+			FileClose(&save_file);
+			return false;
+		}
+		written += chunk;
+		n64dd_progress("Saving", save_path, written, total_size);
+	}
+
+	FileClose(&save_file);
+	return true;
+}
+
+static bool n64dd_flat_block_is_dirty(const uint8_t* flat, uint32_t block_offset) {
+	const uint32_t marker_offset = block_offset + N64DD_DIRTY_FLAG_OFFSET;
+	if ((marker_offset + N64DD_DIRTY_MARKER_SIZE) > N64DD_EXPANDED_SIZE) return false;
+
+	for (uint32_t i = 0; i < N64DD_DIRTY_MARKER_SIZE; i++) {
+		if (flat[marker_offset + i] != N64DD_DIRTY_MAGIC_BYTE) return false;
+	}
+	return true;
+}
+
+static bool n64dd_find_dirty_flat_blocks(const uint8_t* flat, std::vector<uint32_t>& dirty_blocks) {
+	dirty_blocks.clear();
+	for (uint32_t head = 0; head < 2; head++) {
+		for (uint32_t track = 0; track < N64DD_FLAT_TRACKS_PER_HEAD; track++) {
+			for (uint32_t block = 0; block < 2; block++) {
+				const uint32_t block_offset = n64dd_flat_offset(track, head, block, 0);
+				if ((block_offset + N64DD_DIRTY_FLAG_OFFSET + N64DD_DIRTY_MARKER_SIZE) > N64DD_EXPANDED_SIZE) {
+					return false;
+				}
+				if (n64dd_flat_block_is_dirty(flat, block_offset)) dirty_blocks.push_back(block_offset);
+			}
+		}
+	}
+	return true;
+}
+
+static void n64dd_clear_dirty_flat_blocks(uint8_t* flat, const std::vector<uint32_t>& dirty_blocks) {
+	for (uint32_t block_offset : dirty_blocks) {
+		const uint32_t marker_offset = block_offset + N64DD_DIRTY_FLAG_OFFSET;
+		if ((marker_offset + N64DD_DIRTY_MARKER_SIZE) <= N64DD_EXPANDED_SIZE) {
+			memset(flat + marker_offset, 0, N64DD_DIRTY_MARKER_SIZE);
+		}
+	}
+}
+
+static bool n64dd_file_matches_vector(const char* path, const std::vector<uint8_t>& data) {
+	if (!FileExists(path, 0)) return false;
+
+	fileTYPE file = {};
+	if (!FileOpenEx(&file, path, O_RDONLY, 0, 0)) return false;
+	if ((uint64_t)file.size != data.size()) {
+		FileClose(&file);
+		return false;
+	}
+
+	static std::vector<uint8_t> existing;
+	existing.resize(N64DD_SAVE_CHUNK_SIZE);
+	uint32_t checked = 0;
+	while (checked < data.size()) {
+		const uint32_t chunk = std::min<uint32_t>(N64DD_SAVE_CHUNK_SIZE, (uint32_t)data.size() - checked);
+		const int read = FileReadAdv(&file, existing.data(), (int)chunk);
+		if (read < 0 || static_cast<uint32_t>(read) != chunk || memcmp(existing.data(), data.data() + checked, chunk)) {
+			FileClose(&file);
+			return false;
+		}
+		checked += chunk;
+	}
+
+	FileClose(&file);
+	return true;
+}
+
+static bool n64dd_repeat_check(const std::vector<uint8_t>& data, uint32_t repeat, uint32_t size) {
+	if (data.size() < repeat * size) return false;
+	for (uint32_t i = 0; i < size; i++) {
+		for (uint32_t j = 1; j < repeat; j++) {
+			if (data[i] != data[(j * size) + i]) return false;
+		}
+	}
+	return true;
+}
+
+static bool n64dd_valid_system_block(const std::vector<uint8_t>& block, uint32_t sector_length, bool dev) {
+	if (block.size() < N64DD_BLOCK_SIZE[0]) return false;
+
+	const bool retail_magic =
+		(block[0] == 0xE8 && block[1] == 0x48 && block[2] == 0xD3 && block[3] == 0x16) ||
+		(block[0] == 0x22 && block[1] == 0x63 && block[2] == 0xEE && block[3] == 0x56);
+	const bool dev_magic = block[0] == 0x00 && block[1] == 0x00 && block[2] == 0x00 && block[3] == 0x00;
+
+	if (dev ? !dev_magic : !retail_magic) return false;
+	if (block[4] != 0x10) return false;
+	if (block[5] < 0x10 || block[5] >= 0x17) return false;
+	if (block[0x18] != 0xFF || block[0x19] != 0xFF || block[0x1A] != 0xFF || block[0x1B] != 0xFF) return false;
+	if (block[0x1C] != 0x80) return false;
+
+	return n64dd_repeat_check(block, N64DD_SECTORS_PER_BLOCK, sector_length);
+}
+
+static bool n64dd_valid_id_block(fileTYPE* file, uint32_t lba, char* disk_id) {
+	std::vector<uint8_t> block(N64DD_BLOCK_SIZE[0]);
+	if (!n64dd_read_exact(file, (uint64_t)lba * N64DD_BLOCK_SIZE[0], block.data(), (uint32_t)block.size())) return false;
+	if (!n64dd_repeat_check(block, N64DD_SECTORS_PER_BLOCK, N64DD_SYSTEM_SECTOR_LENGTH)) return false;
+	if (disk_id && !disk_id[0]) {
+		memcpy(disk_id, block.data(), 4);
+		disk_id[4] = '\0';
+	}
+	return true;
+}
+
+static bool n64dd_read_disk_id(fileTYPE* file, char* disk_id) {
+	static constexpr uint8_t id_blocks[2] = {15, 14};
+	if (disk_id) disk_id[0] = '\0';
+
+	bool valid_id = false;
+	for (uint8_t id_block : id_blocks) {
+		if (n64dd_valid_id_block(file, id_block, disk_id)) valid_id = true;
+	}
+	return valid_id;
+}
+
+static bool n64dd_find_ndd_system_block(fileTYPE* file, std::vector<uint8_t>& sys_data, uint8_t& disk_type,
+	std::vector<uint8_t>& bad_lbas, char* disk_id, bool verbose = true, bool* development = nullptr) {
+	static constexpr uint8_t retail_system_blocks[4] = {9, 8, 1, 0};
+	static constexpr uint8_t dev_system_blocks[4] = {11, 10, 3, 2};
+	static constexpr uint8_t retail_bad_blocks[13] = {2, 3, 10, 11, 12, 16, 17, 18, 19, 20, 21, 22, 23};
+	static constexpr uint8_t dev_bad_blocks[12] = {0, 1, 8, 9, 16, 17, 18, 19, 20, 21, 22, 23};
+	std::vector<uint8_t> block(N64DD_BLOCK_SIZE[0]);
+	std::vector<uint8_t> best_sys_data;
+	uint8_t best_disk_type = 0;
+	uint8_t best_system_block = 0;
+	bool found = false;
+	if (disk_id) disk_id[0] = '\0';
+	if (development) *development = false;
+
+	bad_lbas.assign(0x10DC, 0);
+	for (uint8_t system_block : retail_system_blocks) {
+		if (!n64dd_read_exact(file, (uint64_t)system_block * N64DD_BLOCK_SIZE[0], block.data(), (uint32_t)block.size())) {
+			return false;
+		}
+		if (n64dd_valid_system_block(block, N64DD_SYSTEM_SECTOR_LENGTH, false)) {
+			best_sys_data.assign(block.begin(), block.begin() + N64DD_SYSTEM_SECTOR_LENGTH);
+			best_disk_type = block[5] & 0x0F;
+			best_system_block = system_block;
+			found = true;
+		} else {
+			bad_lbas[system_block] = 1;
+		}
+	}
+	if (found) {
+		for (uint8_t lba : retail_bad_blocks) bad_lbas[lba] = 1;
+		if (!n64dd_read_disk_id(file, disk_id)) return false;
+
+		sys_data.swap(best_sys_data);
+		disk_type = best_disk_type;
+		if (verbose) {
+			printf("64DD NDD: retail system block %u, disk type %u.\n", (unsigned)best_system_block, (unsigned)disk_type);
+			if (disk_id && disk_id[0]) printf("64DD NDD: disk ID %.4s.\n", disk_id);
+			printf("64DD NDD: IPL load LBA blocks %u, load address 0x%08x.\n",
+				(unsigned)((sys_data[0x06] << 8) | sys_data[0x07]),
+				(unsigned)((sys_data[0x1C] << 24) | (sys_data[0x1D] << 16) | (sys_data[0x1E] << 8) | sys_data[0x1F]));
+		}
+		return disk_type < 7;
+	}
+
+	bad_lbas.assign(0x10DC, 0);
+	for (uint8_t system_block : dev_system_blocks) {
+		if (!n64dd_read_exact(file, (uint64_t)system_block * N64DD_BLOCK_SIZE[0], block.data(), (uint32_t)block.size())) {
+			return false;
+		}
+		if (n64dd_valid_system_block(block, 192, true)) {
+			best_sys_data.assign(block.begin(), block.begin() + N64DD_SYSTEM_SECTOR_LENGTH);
+			best_disk_type = block[5] & 0x0F;
+			best_system_block = system_block;
+			found = true;
+		} else {
+			bad_lbas[system_block] = 1;
+		}
+	}
+	if (found) {
+		for (uint8_t lba : dev_bad_blocks) bad_lbas[lba] = 1;
+		if (!n64dd_read_disk_id(file, disk_id)) return false;
+
+		sys_data.swap(best_sys_data);
+		disk_type = best_disk_type;
+		if (development) *development = true;
+		if (verbose) {
+			printf("64DD NDD: development system block %u, disk type %u.\n", (unsigned)best_system_block, (unsigned)disk_type);
+			if (disk_id && disk_id[0]) printf("64DD NDD: disk ID %.4s.\n", disk_id);
+			printf("64DD NDD: IPL load LBA blocks %u, load address 0x%08x.\n",
+				(unsigned)((sys_data[0x06] << 8) | sys_data[0x07]),
+				(unsigned)((sys_data[0x1C] << 24) | (sys_data[0x1D] << 16) | (sys_data[0x1E] << 8) | sys_data[0x1F]));
+		}
+		return disk_type < 7;
+	}
+
+	return false;
+}
+
+static bool n64dd_expand_ndd_to_flat(fileTYPE* file, uint8_t* dest, bool& cart_expansion_disk, char* disk_id,
+	uint8_t& disk_type, bool* development_out = nullptr, const char* progress_name = nullptr) {
+	if (file->size != N64DD_NDD_SIZE) return false;
+
+	std::vector<uint8_t> sys_data;
+	std::vector<uint8_t> bad_lbas;
+	bool development = false;
+	if (!n64dd_find_ndd_system_block(file, sys_data, disk_type, bad_lbas, disk_id, true, &development)) return false;
+	if (development_out) *development_out = development;
+	cart_expansion_disk = disk_id && disk_id[0] == 'E';
+	if (cart_expansion_disk) {
+		printf("64DD NDD: cart expansion disk detected.\n");
+	}
+
+	uint64_t source_offset = 0;
+	uint32_t lba = 0;
+	uint32_t starting_block = 0;
+	std::vector<uint8_t> block_data;
+
+	for (uint32_t vzone = 0; vzone < 16; vzone++) {
+		const uint32_t pzone = N64DD_VZONE_TO_PZONE[disk_type][vzone];
+		const auto& zone = N64DD_ZONES[pzone];
+		const uint32_t block_size = zone.sector_length * N64DD_SECTORS_PER_BLOCK;
+		const uint32_t defect_start = pzone ? sys_data[0x07 + pzone] : 0;
+		const uint32_t defect_stop = sys_data[0x07 + pzone + 1];
+		uint32_t listed_bad_tracks = 0;
+		std::vector<uint8_t> bad_tracks(zone.tracks, 0);
+
+		for (uint32_t defect_offset = defect_start; defect_offset < defect_stop; defect_offset++) {
+			const uint32_t bad_track = sys_data[0x20 + defect_offset];
+			if (bad_track < zone.tracks) bad_tracks[bad_track] = 1;
+			listed_bad_tracks++;
+		}
+
+		for (uint32_t filler_track = 0; listed_bad_tracks < N64DD_BAD_TRACKS_PER_ZONE && filler_track < zone.tracks; filler_track++) {
+			bad_tracks[zone.tracks - 1 - filler_track] = 1;
+			listed_bad_tracks++;
+		}
+
+		for (uint32_t zone_track_index = 0; zone_track_index < zone.tracks; zone_track_index++) {
+			const uint32_t zone_track = zone.head ? (zone.tracks - 1 - zone_track_index) : zone_track_index;
+			const uint32_t track = zone.track_offset + zone_track;
+			if (bad_tracks[zone_track]) {
+				for (uint32_t block = 0; block < 2; block++) {
+					if (!n64dd_mark_bad_flat_block(dest, track, zone.head, block)) return false;
+				}
+				continue;
+			}
+
+			for (uint32_t block = 0; block < 2; block++) {
+				const uint32_t flat_block = starting_block ^ block;
+				if (lba >= bad_lbas.size()) return false;
+				const bool development_system_lba = development && (lba == 2 || lba == 3 || lba == 10 || lba == 11);
+				const uint32_t sector_length = development_system_lba ? N64DD_DEV_SYSTEM_SECTOR_LENGTH : zone.sector_length;
+				if (!n64dd_copy_block_to_flat(file, source_offset, dest, track, zone.head, flat_block, sector_length, block_data)) {
+					return false;
+				}
+				if (bad_lbas[lba]) {
+					if (!n64dd_mark_bad_flat_block(dest, track, zone.head, flat_block)) return false;
+				}
+
+				source_offset += block_size;
+				lba++;
+				n64dd_progress("Loading", progress_name, source_offset, file->size);
+			}
+			starting_block ^= 1;
+		}
+	}
+
+	return lba == 0x10DC && source_offset == (uint64_t)file->size;
+}
+
+static bool n64dd_build_compact_ndd_sector_map(fileTYPE* file, uint8_t& disk_type, std::vector<n64dd_sector_map_entry>& map) {
+	if (file->size != N64DD_NDD_SIZE) return false;
+
+	std::vector<uint8_t> sys_data;
+	std::vector<uint8_t> bad_lbas;
+	if (!n64dd_find_ndd_system_block(file, sys_data, disk_type, bad_lbas, nullptr, false)) return false;
+
+	map.clear();
+	map.reserve(0x10DC * N64DD_SECTORS_PER_BLOCK);
+
+	uint32_t lba = 0;
+	uint32_t starting_block = 0;
+	uint32_t source_offset = 0;
+	for (uint32_t vzone = 0; vzone < 16; vzone++) {
+		const uint32_t pzone = N64DD_VZONE_TO_PZONE[disk_type][vzone];
+		const auto& zone = N64DD_ZONES[pzone];
+		const uint32_t source_block_size = zone.sector_length * N64DD_SECTORS_PER_BLOCK;
+		const uint32_t defect_start = pzone ? sys_data[0x07 + pzone] : 0;
+		const uint32_t defect_stop = sys_data[0x07 + pzone + 1];
+		uint32_t listed_bad_tracks = 0;
+		std::vector<uint8_t> bad_tracks(zone.tracks, 0);
+
+		for (uint32_t defect_offset = defect_start; defect_offset < defect_stop; defect_offset++) {
+			if ((0x20 + defect_offset) >= sys_data.size()) return false;
+			const uint32_t bad_track = sys_data[0x20 + defect_offset];
+			if (bad_track < zone.tracks) bad_tracks[bad_track] = 1;
+			listed_bad_tracks++;
+		}
+
+		for (uint32_t filler_track = 0; listed_bad_tracks < N64DD_BAD_TRACKS_PER_ZONE && filler_track < zone.tracks; filler_track++) {
+			bad_tracks[zone.tracks - 1 - filler_track] = 1;
+			listed_bad_tracks++;
+		}
+
+		for (uint32_t zone_track_index = 0; zone_track_index < zone.tracks; zone_track_index++) {
+			const uint32_t zone_track = zone.head ? (zone.tracks - 1 - zone_track_index) : zone_track_index;
+			const uint32_t track = zone.track_offset + zone_track;
+			if (bad_tracks[zone_track]) continue;
+
+			for (uint32_t block = 0; block < 2; block++) {
+				if (lba >= bad_lbas.size()) return false;
+				const uint32_t flat_block = starting_block ^ block;
+				if ((source_offset + source_block_size) > N64DD_NDD_SIZE) return false;
+
+				for (uint32_t sector = 0; sector < N64DD_SECTORS_PER_BLOCK; sector++) {
+					n64dd_sector_map_entry entry = {};
+					entry.flat_offset = n64dd_flat_offset(track, zone.head, flat_block, sector);
+					entry.sector_length = zone.sector_length;
+					if ((entry.flat_offset + entry.sector_length) > N64DD_EXPANDED_SIZE) return false;
+					map.push_back(entry);
+				}
+
+				source_offset += source_block_size;
+				lba++;
+			}
+			starting_block ^= 1;
+		}
+	}
+
+	return lba == 0x10DC && source_offset == N64DD_NDD_SIZE;
+}
+
+static bool n64dd_build_ram_sector_map(const char* disk_path, uint8_t disk_type,
+	std::vector<n64dd_sector_map_entry>& map, size_t& first_sector) {
+	map.clear();
+	first_sector = 0;
+	if (disk_type >= 7) return false;
+	if (!N64DD_RAM_SIZE[disk_type]) return true;
+
+	fileTYPE file = {};
+	if (!FileOpen(&file, disk_path, 1)) {
+		printf("64DD RAM save: failed to reopen source disk \"%s\".\n", disk_path);
+		return false;
+	}
+
+	if (file.size != N64DD_NDD_SIZE) {
+		FileClose(&file);
+		printf("64DD RAM save: source disk is not a compact NDD image.\n");
+		return false;
+	}
+
+	uint8_t detected_disk_type = disk_type;
+	const bool ok = n64dd_build_compact_ndd_sector_map(&file, detected_disk_type, map);
+	FileClose(&file);
+	if (!ok) return false;
+	if (detected_disk_type != disk_type) {
+		printf("64DD RAM save: source disk type changed from %u to %u.\n",
+			(unsigned)disk_type,
+			(unsigned)detected_disk_type);
+		return false;
+	}
+
+	first_sector = (size_t)N64DD_RAM_START_LBA[disk_type] * N64DD_SECTORS_PER_BLOCK;
+	if (first_sector > map.size()) return false;
+
+	uint32_t ram_size = 0;
+	for (size_t i = first_sector; i < map.size(); i++) ram_size += map[i].sector_length;
+	if (ram_size != N64DD_RAM_SIZE[disk_type]) {
+		printf("64DD RAM save: mapped size %u does not match disk type %u size %u.\n",
+			(unsigned)ram_size,
+			(unsigned)disk_type,
+			(unsigned)N64DD_RAM_SIZE[disk_type]);
+		return false;
+	}
+
+	return true;
+}
+
+static void n64dd_begin_save_ui() {
+	menu_process_save();
+	if (user_io_osd_is_visible()) {
+		HandleUI();
+		OsdUpdate();
+	}
+}
+
+static bool n64dd_build_ram_image(const char* disk_path, const uint8_t* flat, uint8_t disk_type,
+	std::vector<uint8_t>& ram) {
+	ram.clear();
+	if (disk_type >= 7) return false;
+	if (!N64DD_RAM_SIZE[disk_type]) return true;
+
+	std::vector<n64dd_sector_map_entry> map;
+	size_t first_sector = 0;
+	if (!n64dd_build_ram_sector_map(disk_path, disk_type, map, first_sector)) return false;
+
+	ram.reserve(N64DD_RAM_SIZE[disk_type]);
+	for (size_t i = first_sector; i < map.size(); i++) {
+		const auto& entry = map[i];
+		if ((entry.flat_offset + entry.sector_length) > N64DD_EXPANDED_SIZE) return false;
+		ram.insert(ram.end(), flat + entry.flat_offset, flat + entry.flat_offset + entry.sector_length);
+	}
+
+	return ram.size() == N64DD_RAM_SIZE[disk_type];
+}
+
+static bool n64dd_save_ram_image(const char* save_path, const char* disk_path, uint8_t* mem,
+	uint8_t disk_type, bool force) {
+	if (disk_type >= 7) return false;
+	if (!N64DD_RAM_SIZE[disk_type]) return true;
+
+	std::vector<uint8_t> ram;
+	if (!n64dd_build_ram_image(disk_path, mem, disk_type, ram)) return false;
+
+	std::vector<uint32_t> dirty_blocks;
+	if (!n64dd_find_dirty_flat_blocks(mem, dirty_blocks)) return false;
+	if (n64dd_file_matches_vector(save_path, ram)) {
+		n64dd_clear_dirty_flat_blocks(mem, dirty_blocks);
+		if (force) printf("64DD RAM save \"%s\" is already up to date.\n", save_path);
+		return true;
+	}
+
+	diskled_on();
+	n64dd_begin_save_ui();
+	if (!n64dd_write_vector_to_file(save_path, ram)) return false;
+
+	n64dd_clear_dirty_flat_blocks(mem, dirty_blocks);
+	printf("Saved 64DD MFS RAM area to \"%s\" (%u bytes).\n",
+		save_path,
+		(unsigned)ram.size());
+	return true;
+}
+
+static bool n64dd_load_ram_save_to_mem(const char* save_path, const char* disk_path, uint8_t* mem,
+	uint8_t disk_type) {
+	if (!FileExists(save_path, 0)) return false;
+	if (disk_type >= 7 || !N64DD_RAM_SIZE[disk_type]) return false;
+
+	fileTYPE save_file = {};
+	if (!FileOpenEx(&save_file, save_path, O_RDONLY, 0, 0)) {
+		printf("64DD RAM save: failed to open \"%s\".\n", save_path);
+		return false;
+	}
+	if ((uint64_t)save_file.size != N64DD_RAM_SIZE[disk_type]) {
+		printf("64DD RAM save: ignoring \"%s\" with size %llu; disk type %u requires %u bytes.\n",
+			save_path,
+			(unsigned long long)save_file.size,
+			(unsigned)disk_type,
+			(unsigned)N64DD_RAM_SIZE[disk_type]);
+		FileClose(&save_file);
+		return false;
+	}
+
+	std::vector<n64dd_sector_map_entry> map;
+	size_t first_sector = 0;
+	if (!n64dd_build_ram_sector_map(disk_path, disk_type, map, first_sector)) {
+		FileClose(&save_file);
+		return false;
+	}
+
+	std::vector<uint8_t> ram;
+	const bool read_ok = n64dd_copy_file_to_vector(&save_file, ram, N64DD_RAM_SIZE[disk_type],
+		"Loading", save_path);
+	FileClose(&save_file);
+	if (!read_ok) return false;
+
+	size_t ram_offset = 0;
+	for (size_t i = first_sector; i < map.size(); i++) {
+		const auto& entry = map[i];
+		if ((entry.flat_offset + entry.sector_length) > N64DD_EXPANDED_SIZE ||
+			(ram_offset + entry.sector_length) > ram.size()) return false;
+		memcpy(mem + entry.flat_offset, ram.data() + ram_offset, entry.sector_length);
+		ram_offset += entry.sector_length;
+	}
+	if (ram_offset != ram.size()) return false;
+
+	printf("Loaded 64DD MFS RAM area \"%s\" (%u bytes).\n",
+		save_path,
+		(unsigned)ram.size());
+	return true;
+}
+
+static int n64_dd_ipl_tx(fileTYPE* file, const char* name, const unsigned char idx, const uint32_t load_addr) {
+	uint32_t data_size = file->size;
+	const bool boot_ipl = ((idx & 0x3f) == 4);
+
+	if (!load_addr) {
+		printf("64DD IPL loading requires a DDRAM load address.\n");
+		FileClose(file);
+		return 0;
+	}
+
+	if (data_size > N64DD_IPL_SIZE) {
+		printf("64DD IPL file is too large: %u bytes, max %u bytes.\n", data_size, N64DD_IPL_SIZE);
+		FileClose(file);
+		return 0;
+	}
+	if (data_size < 4096) {
+		printf("64DD IPL file is too small: %u bytes.\n", data_size);
+		FileClose(file);
+		return 0;
+	}
+
+	printf("Loading 64DD IPL \"%s\" to DDRAM at 0x%08x%s.\n",
+		name,
+		load_addr,
+		boot_ipl ? " and staging it for boot" : "");
+	user_io_set_index(idx);
+	user_io_set_download(1, N64DD_IPL_SIZE);
+	ProgressMessage();
+
+	uint8_t* ddipl_mem = (uint8_t*)shmem_map(fpga_mem(load_addr), N64DD_IPL_SIZE);
+	uint8_t* boot_mem = boot_ipl ? (uint8_t*)shmem_map(fpga_mem(N64_ROM_FASTLOAD_ADDR), N64DD_IPL_SIZE) : nullptr;
+
+	if (!ddipl_mem || ddipl_mem == (uint8_t*)-1 || (boot_ipl && (!boot_mem || boot_mem == (uint8_t*)-1))) {
+		if (ddipl_mem && ddipl_mem != (uint8_t*)-1) shmem_unmap(ddipl_mem, N64DD_IPL_SIZE);
+		if (boot_mem && boot_mem != (uint8_t*)-1) shmem_unmap(boot_mem, N64DD_IPL_SIZE);
+		user_io_set_download(0);
+		FileClose(file);
+		printf("Failed to map 64DD IPL DDRAM buffers.\n");
+		return 0;
+	}
+
+	memset(ddipl_mem, 0, N64DD_IPL_SIZE);
+	if (boot_mem) memset(boot_mem, 0, N64DD_IPL_SIZE);
+	bool ok = n64dd_copy_ipl_to_mem(file, name, ddipl_mem, boot_mem, data_size);
+
+	shmem_unmap(ddipl_mem, N64DD_IPL_SIZE);
+	if (boot_mem) shmem_unmap(boot_mem, N64DD_IPL_SIZE);
+	FileClose(file);
+
+	user_io_set_download(0);
+	ProgressMessage();
+
+	if (!ok) {
+		printf("Failed to load 64DD IPL \"%s\".\n", name);
+		return 0;
+	}
+
+	if (boot_ipl) {
+		strcpy(current_rom_path, name);
+		loaded = 1;
+	}
+
+	printf("Done loading 64DD IPL.\n");
+	return 1;
+}
+
+static bool n64dd_make_companion_path(const char* disk_path, const char* companion_name,
+	char* companion_path, size_t companion_path_size) {
+	const char* slash = strrchr(disk_path, '/');
+	const char* backslash = strrchr(disk_path, '\\');
+	if (backslash && (!slash || backslash > slash)) slash = backslash;
+
+	if (slash) {
+		const size_t dir_len = slash - disk_path;
+		if (dir_len + 1 + strlen(companion_name) >= companion_path_size) return false;
+		snprintf(companion_path, companion_path_size, "%.*s/%s", (int)dir_len, disk_path, companion_name);
+	} else {
+		if (strlen(companion_name) >= companion_path_size) return false;
+		snprintf(companion_path, companion_path_size, "%s", companion_name);
+	}
+
+	return true;
+}
+
+static bool n64dd_open_disk_ipl(fileTYPE* file, const char* disk_path, char* boot_path, size_t boot_path_size) {
+	if (!n64dd_make_companion_path(disk_path, N64DD_IPL_DISK_FILE, boot_path, boot_path_size)) return false;
+	return FileOpen(file, boot_path, 1);
+}
+
+static bool n64dd_make_cart_path(const char* disk_path, char* cart_path, size_t cart_path_size) {
+	const size_t disk_path_len = strlen(disk_path);
+	if (disk_path_len + 1 > cart_path_size) return false;
+
+	strcpy(cart_path, disk_path);
+	char* slash = strrchr(cart_path, '/');
+	char* backslash = strrchr(cart_path, '\\');
+	if (backslash && (!slash || backslash > slash)) slash = backslash;
+	char* extension = strrchr(cart_path, '.');
+	if (extension && (!slash || extension > slash)) {
+		if ((size_t)(extension - cart_path) + strlen(".rom") + 1 > cart_path_size) return false;
+		strcpy(extension, ".rom");
+	} else {
+		if (disk_path_len + strlen(".rom") + 1 > cart_path_size) return false;
+		strcat(cart_path, ".rom");
+	}
+
+	return true;
+}
+
+static int n64dd_autoload_ipl(const char* disk_path, bool boot_ipl, N64DDDiskRegion disk_region) {
+	fileTYPE ipl_file = {};
+	char boot_path[1024];
+
+	if (!n64dd_open_disk_ipl(&ipl_file, disk_path, boot_path, sizeof(boot_path))) {
+		const char* root_ipl = N64DD_IPL_BOOT_FILE;
+		if (disk_region == N64DDDiskRegion::DEVELOPMENT) root_ipl = N64DD_IPL_DEV_BOOT_FILE;
+		else if (disk_region == N64DDDiskRegion::USA) root_ipl = N64DD_IPL_US_BOOT_FILE;
+		snprintf(boot_path, sizeof(boot_path), "%s/%s", HomeDir(), root_ipl);
+		if (!strcmp(current_rom_path, boot_path)) {
+			printf("64DD IPL autoload: root %s is already loaded; keeping current IPL.\n", root_ipl);
+			return 1;
+		}
+		if (!FileOpen(&ipl_file, boot_path, 1)) {
+			printf("64DD IPL autoload: root %s not found; keeping current IPL.\n", root_ipl);
+			return 1;
+		}
+	}
+
+	printf("64DD IPL autoload: %s \"%s\".\n",
+		boot_ipl ? "booting" : "preloading before companion cart",
+		boot_path);
+	if (boot_ipl) unmount_all_saves();
+	return n64_dd_ipl_tx(&ipl_file, boot_path, boot_ipl ? 4 : 5, N64DD_IPL_LOAD_ADDR);
+}
+
+static int n64_dd_disk_tx(fileTYPE* file, const char* name, const unsigned char idx, const uint32_t load_addr) {
+	if (!load_addr) {
+		printf("64DD disk loading requires a DDRAM load address.\n");
+		FileClose(file);
+		return 0;
+	}
+
+	n64dd_flush_pending_save_before_disk_change();
+	n64dd_clear_disk_save_state();
+
+	char ram_save_path[1024] = {};
+	n64dd_create_ram_save_path(ram_save_path, name);
+
+	printf("Loading 64DD disk \"%s\" to DDRAM at 0x%08x.\n", name, load_addr);
+	user_io_set_index(idx);
+	user_io_set_download(1, N64DD_EXPANDED_SIZE);
+	ProgressMessage();
+
+	uint8_t* mem = (uint8_t*)shmem_map(fpga_mem(load_addr), N64DD_EXPANDED_SIZE);
+	if (!mem || mem == (uint8_t*)-1) {
+		user_io_set_download(0);
+		FileClose(file);
+		printf("Failed to map DDRAM for 64DD disk load.\n");
+		return 0;
+	}
+
+	memset(mem, 0, N64DD_EXPANDED_SIZE);
+	bool ok = false;
+	bool cart_expansion_disk = false;
+	bool development_disk = false;
+	N64DDDiskRegion disk_region = N64DDDiskRegion::UNKNOWN;
+	uint8_t disk_type = 0;
+	char disk_id[5] = {};
+	if (file->size == N64DD_NDD_SIZE) {
+		printf("64DD disk loader: compact NDD image, expanding to flat DDR layout (%u bytes).\n", N64DD_EXPANDED_SIZE);
+		ok = n64dd_expand_ndd_to_flat(file, mem, cart_expansion_disk, disk_id, disk_type, &development_disk, name);
+	} else {
+		printf("Unsupported 64DD disk image size: %llu bytes; expected compact NDD size %u.\n",
+			(unsigned long long)file->size,
+			(unsigned)N64DD_NDD_SIZE);
+	}
+
+	if (ok) {
+		disk_region = development_disk ? N64DDDiskRegion::DEVELOPMENT : n64dd_detect_retail_region(file);
+		if (disk_region == N64DDDiskRegion::JAPAN) {
+			printf("64DD disk: Japanese retail region detected.\n");
+		} else if (disk_region == N64DDDiskRegion::USA) {
+			printf("64DD disk: USA retail region detected.\n");
+		} else if (disk_region == N64DDDiskRegion::DEVELOPMENT) {
+			printf("64DD disk: development media detected.\n");
+		} else {
+			printf("64DD disk: unknown retail region signature; defaulting to %s.\n", N64DD_IPL_BOOT_FILE);
+		}
+		if (cart_expansion_disk) {
+			printf("64DD disk: cart expansion disk detected.\n");
+		}
+		strncpy(current_dd_ram_save_path, ram_save_path, sizeof(current_dd_ram_save_path) - 1);
+		current_dd_ram_save_path[sizeof(current_dd_ram_save_path) - 1] = '\0';
+		n64dd_load_ram_save_to_mem(current_dd_ram_save_path, name, mem, disk_type);
+	}
+
+	shmem_unmap(mem, N64DD_EXPANDED_SIZE);
+	FileClose(file);
+
+	user_io_set_download(0);
+	ProgressMessage();
+
+	if (!ok) {
+		printf("Failed to load 64DD disk image \"%s\".\n", name);
+		return 0;
+	}
+
+	strncpy(current_dd_disk_path, name, sizeof(current_dd_disk_path) - 1);
+	current_dd_disk_path[sizeof(current_dd_disk_path) - 1] = '\0';
+	current_dd_load_addr = load_addr;
+	current_dd_disk_loaded = 1;
+	current_dd_skip_initial_osd_save = user_io_osd_is_visible() ? 1 : 0;
+	current_dd_cart_expansion = cart_expansion_disk ? 1 : 0;
+	current_dd_disk_type = disk_type;
+	strncpy(current_dd_disk_id, disk_id, sizeof(current_dd_disk_id) - 1);
+	current_dd_disk_id[sizeof(current_dd_disk_id) - 1] = '\0';
+	printf("Done loading 64DD disk image.\n");
+
+	char cart_path[1024] = {};
+	const bool autoload_cart =
+		n64dd_make_cart_path(name, cart_path, sizeof(cart_path)) &&
+		FileExists(cart_path, 0);
+	if (!n64dd_autoload_ipl(name, !autoload_cart, disk_region)) return 0;
+	if (!autoload_cart) return 1;
+
+	printf("64DD cart autoload: loading \"%s\" after disk and IPL.\n", cart_path);
+	uint32_t cart_crc = 0;
+	return n64_rom_tx(cart_path, 1, N64_ROM_FASTLOAD_ADDR, cart_crc);
 }
 
 int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_addr, uint32_t& file_crc) {
@@ -1605,33 +2709,42 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 
 	printf("N64 file \"%s\" with %u bytes to send for index %02x.\n", name, data_size, idx);
 
-	unmount_all_saves();
-
-	// Set index byte
-	user_io_set_index(idx);
+	if (((idx & 0x3f) == 3) && data_size) {
+		file_crc = 0;
+		return n64_dd_disk_tx(&f, name, idx, load_addr);
+	}
+	if (((idx & 0x3f) == 4) && data_size) {
+		file_crc = 0;
+		unmount_all_saves();
+		return n64_dd_ipl_tx(&f, name, idx, load_addr);
+	}
 
 	if (((idx & 0x3f) == 2) && data_size) {
-		// Handle non-N64 files (Game Boy)
-
+		// Handle non-N64 files (Game Boy) for Transfer Pak.
+		const bool gb_changed = !(*current_rom_path_gb) || strcmp(current_rom_path_gb, name);
 		bool should_reset = false;
+		file_crc = 0;
 
-		if (!(*current_rom_path_gb) || strcmp(current_rom_path_gb, name)) {
-			strcpy(current_rom_path_gb, name);
-			if (*current_rom_path && user_io_status_get(TPAK_OPT)) {
-				mount_all_saves();
+		if (gb_changed) strcpy(current_rom_path_gb, name);
 
-				// Force reload of backup RAM
+		unmount_all_saves();
+		user_io_set_index(idx);
+
+		if (*current_rom_path && user_io_status_get(TPAK_OPT)) {
+			mount_all_saves();
+
+			if (gb_changed) {
+				// Force reload of backup RAM after switching the mounted Game Boy save.
 				user_io_status_set(RELOAD_SAVE_OPT, 1);
 				usleep(100000);
 				user_io_status_set(RELOAD_SAVE_OPT, 0);
 
-				// Hold reset
+				// Hold reset while the new Game Boy ROM is streamed.
 				user_io_status_set(RESET_OPT, 1);
 				should_reset = true;
 			}
 		}
 
-		// Prepare transmission of Game Boy file
 		user_io_set_download(1);
 		ProgressMessage();
 
@@ -1641,24 +2754,37 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 
 			user_io_file_tx_data(buf, chunk);
 
-			ProgressMessage("Loading", f.name, data_size - data_left, data_size);
+			ProgressMessage("Loading", n64_leaf_name(f.name), data_size - data_left, data_size);
 			data_left -= chunk;
 		}
 
 		printf("Done loading Game Boy ROM.\n");
 		FileClose(&f);
 
-		// Signal end of transmission
 		user_io_set_download(0);
 		ProgressMessage();
 
 		if (should_reset) {
-			// Release reset
 			user_io_status_set(RESET_OPT, 0);
 		}
 
 		return 1;
 	}
+
+	const uint8_t dd_disk_was_loaded = current_dd_disk_loaded;
+	const uint8_t dd_disk_was_cart_expansion = current_dd_cart_expansion;
+	const char dd_disk_was_id[5] = {
+		current_dd_disk_id[0],
+		current_dd_disk_id[1],
+		current_dd_disk_id[2],
+		current_dd_disk_id[3],
+		'\0'
+	};
+	n64dd_flush_pending_save_before_disk_change();
+	unmount_all_saves();
+
+	// Set index byte
+	user_io_set_index(idx);
 
 	loaded = 0;
 
@@ -1678,7 +2804,7 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 	ByteOrder rom_endianness;
 	uint8_t md5[MD5_LENGTH];
 	char md5_hex[MD5_LENGTH * 2 + 1];
-	uint64_t bootcode_sums[2] = { };
+	uint32_t bootcode_crc[2] = { };
 	uint8_t controller_settings[4] = { };
 	bool is_first_chunk = true;
 	char cart_id[CARTID_LENGTH + 1] = { };
@@ -1737,7 +2863,7 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 			trim(internal_name, sizeof(internal_name), (char*)&buf[0x20]);
 			rom_settings_detected = detect_rom_settings_in_dbs_with_md5(md5_hex);
 			memcpy(controller_settings, &buf[0x34], sizeof(controller_settings));
-			calc_bootcode_checksums(bootcode_sums, buf);
+			calc_bootcode_checksums(bootcode_crc, buf);
 
 			/* The first byte (starting at 0x3b) indicates the type of ROM
 				 'N' = Cartridge
@@ -1747,7 +2873,7 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 				 'Z' = Aleck64 cart
 			   The 2nd and 3rd byte form a 2-letter ID for the game
 			   The 4th byte indicates the region and language for the game
-			   The 5th byte indicates the revision of the game */
+			   The 5th and 6th byte indicates the revision of the game */
 
 			auto p_cid = (char*)&buf[0x3b];
 			for (auto i = 0; i < 4; i++, p_cid++) {
@@ -1778,7 +2904,7 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 			user_io_file_tx_data(buf, chunk);
 		}
 
-		ProgressMessage("Loading", f.name, data_size - data_left, data_size);
+		ProgressMessage("Loading", n64_leaf_name(f.name), data_size - data_left, data_size);
 		data_left -= chunk;
 		is_first_chunk = false;
 
@@ -1806,12 +2932,10 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 				else {
 					printf("No ROM information found for Cart ID.\n");
 					if (is_auto()) {
-						// Defaulting misc. System Settings, everything OFF
+						// Defaulting misc. System Settings
 						user_io_status_set(NO_EPAK_OPT, 0); // Enable Expansion Pak
-						user_io_status_set(CPAK_OPT, 0); // Disable Controller Pak
-						user_io_status_set(RPAK_OPT, 0); // Disable Rumble Pak
-						user_io_status_set(TPAK_OPT, 0); // Disable Transfer Pak
 						user_io_status_set(RTC_OPT, 0); // Disable RTC
+						set_controller_system_settings(controller_settings); // Depending on Pak Type
 						set_cart_save_type(MemoryType::NONE); // Disable Save
 					}
 				}
@@ -1819,9 +2943,9 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 		}
 	}
 
+	// Try detect (partial) ROM settings by analyzing the ROM itself. (System region and CIC)
 	if (!(rom_settings_detected & 1) &&
-		detect_rom_settings_from_first_chunk(cart_id[3], bootcode_sums, sizeof(bootcode_sums) / sizeof(*bootcode_sums))) {
-		// Try detect (partial) ROM settings by analyzing the ROM itself. (System region and CIC)
+		detect_rom_settings_from_first_chunk(cart_id[3], bootcode_crc, sizeof(bootcode_crc) / sizeof(*bootcode_crc))) {
 		rom_settings_detected |= 1;
 	}
 
@@ -1851,6 +2975,22 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 
 	strcpy(current_rom_path, name);
 
+	const bool dd_disk_matches_cart =
+		dd_disk_was_id[0] &&
+		cart_id[0] &&
+		!memcmp(dd_disk_was_id + 1, cart_id + 1, 3);
+	const bool preserve_dd_disk =
+		dd_disk_was_loaded &&
+		(cart_id[0] == 'C' || (dd_disk_was_cart_expansion && dd_disk_matches_cart));
+	if (preserve_dd_disk) {
+		printf("64DD cart expansion: preserving loaded disk %.4s for cart ID %.4s.\n", dd_disk_was_id, cart_id);
+	} else {
+		if (dd_disk_was_loaded) {
+			printf("64DD cart expansion: clearing loaded disk %.4s for cart ID %.4s.\n", dd_disk_was_id, cart_id);
+		}
+		n64dd_clear_disk_save_state();
+	}
+
 	mount_all_saves();
 
 	// Signal end of transmission
@@ -1863,28 +3003,26 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 		return 1;
 	}
 
-	auto system_type = SystemType::UNKNOWN;
-	auto cic = CIC::UNKNOWN;
-
 	char info[256];
 	size_t len = sprintf(info, "Auto-detect:");
-	if (*cart_id && ((cart_id[1] != 'E') || (cart_id[2] != 'D'))) len += sprintf(info + len, "\n[%.4s] v.%u.%u", cart_id, hex_to_dec(cart_id[4]) + 1, hex_to_dec(cart_id[5]));
-	if (*internal_name) len += sprintf(info + len, "\n\"%s\"", internal_name);
-	if (!(rom_settings_detected & 1)) {
-		len += sprintf(info + len, "\nUnknown Region/CIC");
+	if (*cart_id && 
+		!((cart_id[1] == 'E') && (cart_id[2] == 'D')) && 
+		!((cart_id[0] == '?') || (cart_id[1] == '?') || (cart_id[2] == '?') || (cart_id[3] == '?')))
+		len += sprintf(info + len, "\n[%.4s] v.%u.%u", cart_id, hex_to_dec(cart_id[4]) + 1, hex_to_dec(cart_id[5]));
+	if (*internal_name) 
+		len += sprintf(info + len, "\n\"%s\"", internal_name);
+	SystemType system_type = (SystemType)user_io_status_get(SYS_TYPE_OPT);
+	len += sprintf(info + len, "\nRegion: %s", stringify(system_type));
+	
+	if (rom_settings_detected & 1) {
+		CIC cic = (CIC)user_io_status_get(CIC_TYPE_OPT);
+		len += sprintf(info + len, " (%s)", stringify(cic));
 	}
 	else {
-		system_type = (SystemType)user_io_status_get(SYS_TYPE_OPT);
-		cic = (CIC)user_io_status_get(CIC_TYPE_OPT);
-		len += sprintf(info + len, "\nRegion: %s (%s)", stringify(system_type), stringify(cic));
+		len += sprintf(info + len, " (Unknown CIC)");
 	}
 
-	if (!(rom_settings_detected & 2)) {
-		sprintf(info + len, "\nROM missing from database.\nYou might not be able to save.");
-
-		Info(info, cfg.controller_info * 1000);
-	}
-	else {
+	if (rom_settings_detected & 2) {
 		auto save_type = get_cart_save_type();
 		auto no_epak = (bool)user_io_status_get(NO_EPAK_OPT);
 		auto tpak = (bool)user_io_status_get(TPAK_OPT);
@@ -1899,9 +3037,12 @@ int n64_rom_tx(const char* name, const unsigned char idx, const uint32_t load_ad
 		if (rtc) len += sprintf(info + len, "\nRTC \x96");
 		if (no_epak) len += sprintf(info + len, "\nDisable Exp. Pak \x96");
 		if (is_patched) sprintf(info + len, "\nPatched \x96");
-
-		Info(info, cfg.controller_info * 1000);
 	}
+	else {
+		sprintf(info + len, "\nROM missing from database.\nYou might not be able to save.");
+	}
+
+	Info(info, cfg.controller_info * 1000);
 
 	return 1;
 }

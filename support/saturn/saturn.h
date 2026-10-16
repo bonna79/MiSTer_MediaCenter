@@ -3,11 +3,9 @@
 
 #include "../../cd.h"
 
-
-
+//#define SATURN_DEBUG				1
 
 // CDD command
-//#define SATURN_DEBUG				1
 #define SATURN_COMM_NOP				0x00
 #define SATURN_COMM_SEEK_RING		0x02
 #define SATURN_COMM_TOC				0x03
@@ -60,10 +58,6 @@ public:
 	uint8_t* GetStatus();
 	int SetCommand(uint8_t* data);
 	int GetBootHeader(uint8_t *buf);
-	int SwapPhys();                       
-	void SwapOpen();                      
-	void SwapClose();                     
-	int is_phys() { return toc.phys; }
 
 	bool wwf_hack;
 	bool roadrash_hack;
@@ -122,7 +116,7 @@ extern uint32_t saturn_frame_cnt;
 #define SAVE_IO_INDEX		0x4 // fake download to trigger save loading
 
 void saturn_poll();
-int saturn_set_image(int num, const char *filename);
+void saturn_set_image(int num, const char *filename);
 void saturn_reset();
 void saturn_fill_blanksave(uint8_t *buffer, uint32_t lba);
 int saturn_send_data(uint8_t* buf, int len, uint8_t index);

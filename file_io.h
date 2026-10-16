@@ -86,7 +86,7 @@ int  isUSBMounted();
 int  FileOpenZip(fileTYPE *file, const char *name, uint32_t crc32);
 int  FileOpenEx(fileTYPE *file, const char *name, int mode, char mute = 0, int use_zip = 1);
 int  FileOpen(fileTYPE *file, const char *name, char mute = 0);
-void FileClose(fileTYPE *file);
+int FileClose(fileTYPE *file);
 
 __off64_t FileGetSize(fileTYPE *file);
 
@@ -154,10 +154,13 @@ const char *getRootDir();
 const char *getFullPath(const char *name);
 
 uint32_t getFileType(const char *name);
+uint64_t getFileSize(const char *name);
 int isXmlName(const char *path); // 1 - MRA, 2 - MGL
 
 bool FileOpenTextReader(fileTextReader *reader, const char *path);
 const char* FileReadLine(fileTextReader *reader);
+
+bool caps_init(void);
 
 #define LOADBUF_SZ (1024*1024)
 
