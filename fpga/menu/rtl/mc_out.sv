@@ -110,18 +110,79 @@ wire        hdone, vdone;
 mc_div hdiv(.clk(clk_vid), .start(div_go), .num({w, 16'd0}), .den(pic_w[10:0]), .q(hq), .done(hdone));
 mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(pic_hh[10:0]), .q(vq), .done(vdone));
 
-// The frame buffer's address is taken once per frame, before its first
-// field: a player that draws into pages and switches between them never shows
-// two pictures at once, and on an interlaced output each picture is shown as a
-// whole frame, its first field first. Taken at any field, a picture that came
-// on the second one would be shown with its fields out of order: the picture
-// jumps up and down by a line.
+// The frame buffer's address (the page the player shows) is taken once per
+// field, or on an interlaced output once per frame, before its first field:
+// each picture is then shown as a whole frame, its first field first. Taken
+// at any field, a picture that came on the second one would be shown with its
+// fields out of order: the picture jumps up and down by a line.
+//
+// The player switches pages at its own pace (25 pictures a second for a PAL
+// DVD, timed by the sound and the HDMI refresh), which drifts slowly against
+// the CRT's 25 frames. When the switches come close to the moment a frame
+// takes its page, their small irregularities make some pictures last two
+// frames and the next one none: the motion stutters. So the new page waits
+// half a frame before it can be taken whenever the switches keep arriving
+// near that moment: they then land in the middle of the frame, away from it.
 reg [31:0] base;
+reg [31:0] fb_s1, fb_s2, seen, pend, ready;
+reg        pend_v = 0, dly = 0;
+reg  [1:0] danger = 0;
+reg  [9:0] fpos = 0, flen = 0, pcnt = 0;
+
+wire       frame_go = div_go && ilc && field;  // the page is taken here
+wire       line_go  = ce_pix && hc == 0;
+wire [9:0] half     = flen >> 1;
 
 always @(posedge clk_vid) begin
+	reg  [9:0] q;
+	reg        near, d;
+
 	if(hdone) hstep <= hq;
 	if(vdone) vstep <= vq;
-	if((div_go && (!ilc || field)) || !active) base <= fb_base;
+
+	fb_s1 <= fb_base;
+	fb_s2 <= fb_s1;
+
+	if(frame_go) begin
+		flen <= fpos;
+		fpos <= 0;
+	end
+	else if(line_go && fpos != 10'h3FF) fpos <= fpos + 1'd1;
+
+	if(fb_s1 == fb_s2 && fb_s2 != seen) begin
+		// a new page: where it came in the frame, after the wait
+		seen <= fb_s2;
+		q = fpos + (dly ? half : 10'd0);
+		if(q >= flen) q = q - flen;
+		near = flen && (q < 10'd96 || q + 10'd96 > flen);
+		d = dly;
+		if(near && danger == 2'd2) begin
+			d = ~dly;
+			danger <= 0;
+		end
+		else if(near) danger <= danger + 1'd1;
+		else if(danger) danger <= danger - 1'd1;
+		dly <= d;
+		if(pend_v) ready <= pend;
+		pend   <= fb_s2;
+		pend_v <= 1;
+		pcnt   <= d ? half : 10'd0;
+	end
+	else if(pend_v && line_go) begin
+		if(!pcnt) begin
+			ready  <= pend;
+			pend_v <= 0;
+		end
+		else pcnt <= pcnt - 1'd1;
+	end
+
+	if(!active) begin
+		base   <= fb_base;
+		ready  <= fb_base;
+		pend_v <= 0;
+	end
+	else if(div_go && !ilc) base <= fb_base;
+	else if(frame_go) base <= (pend_v && !pcnt) ? pend : ready;
 end
 
 // The line about to be shown, as a line of the whole picture.
