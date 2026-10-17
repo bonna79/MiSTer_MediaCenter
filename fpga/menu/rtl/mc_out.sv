@@ -136,7 +136,7 @@ mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(pic_hh[10:0]),
 // address has stayed the same for a while, or the moment between the two
 // writes would count as a page of its own, pointing to the wrong memory.
 reg [31:0] base;
-reg [31:0] fb_s1, fb_s2, seen, pend, ready;
+reg [31:0] fb_s1 = 0, fb_s2 = 0, seen = 0, pend = 0, ready = 0;
 reg [11:0] stable = 0;
 reg        pend_v = 0, dly = 0;
 reg  [1:0] danger = 0;
