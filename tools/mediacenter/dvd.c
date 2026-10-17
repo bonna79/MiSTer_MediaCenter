@@ -733,26 +733,40 @@ static void dvd_expire_subs(void)
 }
 
 // Draws the subpicture (subtitles, menu graphics) and the selected button.
+// On a progressive picture (or one whose fields are kept) each line of the
+// subpicture is blended with the one above, as the deinterlacing does for an
+// interlaced picture: the white letters then have no edge one line tall,
+// which on an interlaced CRT output is in one field only and flickers.
 static void dvd_overlay_locked(void)
 {
 	const dvd_sub_t *cur = dvd_current_sub();
 	if (!cur) return;
+	static uint16_t *buf;  // premultiplied r, g, b and alpha of a rectangle
+	static size_t buf_n;
 	for (unsigned n = 0; n < cur->sub.num_rects; n++)
 	{
 		AVSubtitleRect *r = cur->sub.rects[n];
-		if (r->type != SUBTITLE_BITMAP || !r->data[0]) continue;
+		if (r->type != SUBTITLE_BITMAP || !r->data[0] || r->w <= 0 || r->h <= 0) continue;
 		const uint32_t *pal = (const uint32_t *)r->data[1];
+		int rows = r->h + 1; // one more line below for the blend
+		size_t need = (size_t)r->w * rows * 4;
+		if (need > buf_n)
+		{
+			free(buf);
+			buf = (uint16_t *)malloc(need * sizeof(uint16_t));
+			buf_n = buf ? need : 0;
+			if (!buf) return;
+		}
+		memset(buf, 0, need * sizeof(uint16_t));
 		for (int y = 0; y < r->h; y++)
 		{
 			int sy = r->y + y;
-			if (sy < 0 || sy >= src_h) continue;
 			const uint8_t *row = r->data[0] + (size_t)y * r->linesize[0];
-			uint8_t *dst = frame_rgb + (size_t)sy * src_w * 4;
 			int in_row = dvd.hl_on && sy >= (int)dvd.hl.sy && sy <= (int)dvd.hl.ey;
-			for (int x = 0; x < r->w; x++)
+			uint16_t *o = buf + (size_t)y * r->w * 4;
+			for (int x = 0; x < r->w; x++, o += 4)
 			{
 				int sx = r->x + x;
-				if (sx < 0 || sx >= src_w) continue;
 				int code = row[x] & 3;
 				int cr, cg, cb, a;
 				if (in_row && sx >= (int)dvd.hl.sx && sx <= (int)dvd.hl.ex)
@@ -769,7 +783,33 @@ static void dvd_overlay_locked(void)
 					a = (c >> 24) & 0xff;
 					cr = (c >> 16) & 0xff; cg = (c >> 8) & 0xff; cb = c & 0xff;
 				}
-				if (a) blend(dst + sx * 4, cr, cg, cb, a);
+				o[0] = (uint16_t)(cr * a); o[1] = (uint16_t)(cg * a); o[2] = (uint16_t)(cb * a); o[3] = (uint16_t)a;
+			}
+		}
+		int out_rows = r->h;
+		if (overlay_soften)
+		{
+			// from the bottom up: line y becomes the mean of lines y - 1 and y
+			for (int y = rows - 1; y >= 0; y--)
+			{
+				uint16_t *o = buf + (size_t)y * r->w * 4;
+				const uint16_t *up = y ? o - (size_t)r->w * 4 : NULL;
+				for (int i = 0; i < r->w * 4; i++) o[i] = (uint16_t)((o[i] + (up ? up[i] : 0)) / 2);
+			}
+			out_rows = rows;
+		}
+		for (int y = 0; y < out_rows; y++)
+		{
+			int sy = r->y + y;
+			if (sy < 0 || sy >= src_h) continue;
+			uint8_t *dst = frame_rgb + (size_t)sy * src_w * 4;
+			const uint16_t *o = buf + (size_t)y * r->w * 4;
+			for (int x = 0; x < r->w; x++, o += 4)
+			{
+				int sx = r->x + x;
+				int a = o[3];
+				if (!a || sx < 0 || sx >= src_w) continue;
+				blend(dst + sx * 4, o[0] / a, o[1] / a, o[2] / a, a);
 			}
 		}
 	}

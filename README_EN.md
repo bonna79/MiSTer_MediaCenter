@@ -214,6 +214,17 @@ If the CRT's geometry is off, the picture can be narrowed, widened and moved wit
 
 The adjustments apply to the player's video on the 15 kHz output; HDMI does not change. The menu core redraws the picture in the new rectangle without changing the sync, so the CRT never loses lock and the colours stay the original ones. The idea comes from rmonic79's [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) (Umberto Parisi, Beceri Videoludici), adapted to the way MMC draws the picture.
 
+The same screen has two entries for the 15 kHz output, handled by the menu's FPGA core:
+
+| Entry | Values |
+| --- | --- |
+| **Modo uscita 15 kHz** (15 kHz mode) | **Auto** (576i for PAL DVDs, 480i for NTSC ones; lists in 480i or 576i following `menu_pal`), or fixed **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
+| **Filtro anti-sfarfallio** (flicker filter) | **Auto** (on for the player's lists and screens, off for video), **Spento** (off), **Acceso** (on) |
+
+The filter blends every line with the one below it: thin white text no longer flickers on the interlaced output. In Auto it stays off for video because the player already smooths the controls and subtitles, and the film stays sharp.
+
+Below the entries, **Uscita misurata** (measured output) shows the mode the Main actually measures on the core's output (for example `640x576i interlacciato, 15.63 kHz, 50.00 Hz`). The same line, with the expected mode, also goes to `/tmp/mediacenter.log`.
+
 ## Tested on a real MiSTer
 
 Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 16 October 2026; Sony Trinitron CRT over SCART RGB.
@@ -300,7 +311,7 @@ MC_AV_OFFSET=0.05
 | Setting | Effect |
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Moves the sound later (positive value) or earlier (negative), in seconds. Useful with TVs that delay the picture |
-| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
+| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
 | `MC_FIELDS=1` | Interlaced DVDs: sends the two original fields to the CRT instead of blending them. More detail in motion, but fine details flicker a little |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
 

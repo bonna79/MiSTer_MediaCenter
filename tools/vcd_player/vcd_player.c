@@ -552,7 +552,17 @@ static void fb_draw(plm_frame_t *frame)
 
 #define OSD_TIMEOUT 10.0
 
-static int ui = 1; // scale: 1 for 640 wide, 2 for 1280, 3 for 1920
+// Sizes of the controls, in pixels of the frame buffer. "ui" is the unit
+// across (1 for 640 wide, 2 for 1280, 3 for 1920); the 8x8 glyphs are drawn
+// at sx2/2 pixels across and sy2/2 lines down per glyph pixel. A frame buffer
+// of TV lines (a DVD's own 720x576 or 720x480, shown 1:1 on a CRT) gets
+// larger glyphs, at least two lines per glyph line: a white stroke one line
+// tall is in one field of the interlaced picture only and flickers.
+static int ui = 1;
+static int sx2 = 2, sy2 = 2;
+static int legend_rows = 1; // the legend may take two rows
+#define SX(n) ((n) * sx2 / 2)
+#define SY(n) ((n) * sy2 / 2)
 
 static void ovl_px(int x, int y, uint8_t v, uint8_t a)
 {
@@ -571,12 +581,13 @@ static void ovl_rect(int x, int y, int w, int h, uint8_t v, uint8_t a)
 		for (int i = 0; i < w; i++) ovl_px(x + i, y + j, v, a);
 }
 
-static void ovl_frame(int x, int y, int w, int h, int t, uint8_t v, uint8_t a)
+// Outline: tx pixels thick on the sides, ty lines at the top and bottom.
+static void ovl_frame(int x, int y, int w, int h, int tx, int ty, uint8_t v, uint8_t a)
 {
-	ovl_rect(x + t, y, w - 2 * t, t, v, a);
-	ovl_rect(x + t, y + h - t, w - 2 * t, t, v, a);
-	ovl_rect(x, y + t, t, h - 2 * t, v, a);
-	ovl_rect(x + w - t, y + t, t, h - 2 * t, v, a);
+	ovl_rect(x + tx, y, w - 2 * tx, ty, v, a);
+	ovl_rect(x + tx, y + h - ty, w - 2 * tx, ty, v, a);
+	ovl_rect(x, y, tx, h, v, a);
+	ovl_rect(x + w - tx, y, tx, h, v, a);
 }
 
 #define TEXT_A 235
@@ -585,33 +596,37 @@ static void ovl_frame(int x, int y, int w, int h, int t, uint8_t v, uint8_t a)
 
 static int text_width(const char *s)
 {
-	return (int)strlen(s) * GLYPH_W * ui;
+	return (int)strlen(s) * SX(GLYPH_W);
 }
 
 static void ovl_glyphs(int x, int y, const char *s, uint8_t v, uint8_t a)
 {
-	for (; *s; s++, x += GLYPH_W * ui)
+	for (; *s; s++, x += SX(GLYPH_W))
 	{
 		const unsigned char *g = vcd_font[(unsigned char)*s & 0x7F];
 		for (int c = 0; c < 8; c++)
 			for (int r = 0; r < 8; r++)
-				if ((g[c] >> r) & 1) ovl_rect(x + c * ui, y + r * ui, ui, ui, v, a);
+				if ((g[c] >> r) & 1)
+					ovl_rect(x + SX(c), y + SY(r), SX(c + 1) - SX(c), SY(r + 1) - SY(r), v, a);
 	}
 }
+
+// Shadow offset: about half a glyph pixel, at least one pixel and one line.
+static int shadow_x(void) { int d = SX(1) / 2; return d < 1 ? 1 : d; }
+static int shadow_y(void) { int d = SY(1) / 2; return d < 1 ? 1 : d; }
 
 // White text with a soft dark shadow so it stays readable on bright scenes.
 static int ovl_text(int x, int y, const char *s)
 {
-	int d = ui > 1 ? ui / 2 : 1;
-	ovl_glyphs(x + d, y + d, s, 0, SHADE_A);
+	ovl_glyphs(x + shadow_x(), y + shadow_y(), s, 0, SHADE_A);
 	ovl_glyphs(x, y, s, 255, TEXT_A);
 	return x + text_width(s);
 }
 
-// Filled triangle pointing right (dir > 0) or left, h pixels tall.
-static void ovl_triangle(int x, int y, int h, int dir, uint8_t v, uint8_t a)
+// Filled triangle w pixels wide and h lines tall, pointing right (dir > 0)
+// or left.
+static void ovl_triangle(int x, int y, int w, int h, int dir, uint8_t v, uint8_t a)
 {
-	int w = h * 3 / 4;
 	for (int i = 0; i < w; i++)
 	{
 		int col = dir > 0 ? i : w - 1 - i;
@@ -622,60 +637,63 @@ static void ovl_triangle(int x, int y, int h, int dir, uint8_t v, uint8_t a)
 
 enum { ST_PLAY, ST_PAUSE, ST_STOP, ST_FF, ST_REW };
 
-static int icon_width(int state, int h)
+// The state icons are one glyph tall (8 glyph pixels) and 6 glyph pixels
+// across per triangle.
+static int icon_width(int state)
 {
 	switch (state)
 	{
 	case ST_FF:
-	case ST_REW: return h * 3 / 2;
-	default: return h * 3 / 4;
+	case ST_REW: return 2 * SX(6);
+	default: return SX(6);
 	}
 }
 
-static void ovl_icon(int x, int y, int h, int state, uint8_t v, uint8_t a)
+static void ovl_icon(int x, int y, int state, uint8_t v, uint8_t a)
 {
-	int w = h * 3 / 4;
+	int w = SX(6), h = SY(8);
 	switch (state)
 	{
-	case ST_PLAY: ovl_triangle(x, y, h, 1, v, a); break;
+	case ST_PLAY: ovl_triangle(x, y, w, h, 1, v, a); break;
 	case ST_PAUSE:
 		ovl_rect(x, y, w / 3, h, v, a);
 		ovl_rect(x + w - w / 3, y, w / 3, h, v, a);
 		break;
-	case ST_STOP: ovl_rect(x, y + (h - w) / 2, w, w, v, a); break;
+	case ST_STOP: ovl_rect(x, y + (h - SY(6)) / 2, w, SY(6), v, a); break;
 	case ST_FF:
-		ovl_triangle(x, y, h, 1, v, a);
-		ovl_triangle(x + w, y, h, 1, v, a);
+		ovl_triangle(x, y, w, h, 1, v, a);
+		ovl_triangle(x + w, y, w, h, 1, v, a);
 		break;
 	case ST_REW:
-		ovl_triangle(x, y, h, -1, v, a);
-		ovl_triangle(x + w, y, h, -1, v, a);
+		ovl_triangle(x, y, w, h, -1, v, a);
+		ovl_triangle(x + w, y, w, h, -1, v, a);
 		break;
 	}
 }
 
-static void icon_with_shadow(int x, int y, int h, int state)
+static void icon_with_shadow(int x, int y, int state)
 {
-	int d = ui > 1 ? ui / 2 : 1;
-	ovl_icon(x + d, y + d, h, state, 0, SHADE_A);
-	ovl_icon(x, y, h, state, 255, TEXT_A);
+	ovl_icon(x + shadow_x(), y + shadow_y(), state, 0, SHADE_A);
+	ovl_icon(x, y, state, 255, TEXT_A);
 }
 
 // Button name in an outlined box followed by its action.
+#define LEGEND_H (SY(8) + 2 * SY(3))
 static int legend_item(int x, int y, const char *button, const char *label, int draw)
 {
-	int pad = 3 * ui;
-	int bw = text_width(button) + 2 * pad;
-	int bh = 8 * ui + 2 * pad;
+	int padx = SX(3), pady = SY(3);
+	int bw = text_width(button) + 2 * padx;
+	int bh = LEGEND_H;
 	if (draw)
 	{
-		ovl_frame(x + 1, y + 1, bw, bh, ui, 0, SHADE_A / 2);
+		int tx = SX(1) < 1 ? 1 : SX(1), ty = SY(1) < 1 ? 1 : SY(1);
+		ovl_frame(x + 1, y + 1, bw, bh, tx, ty, 0, SHADE_A / 2);
 		ovl_rect(x, y, bw, bh, 255, 40);
-		ovl_frame(x, y, bw, bh, ui, 255, 190);
-		ovl_text(x + pad, y + pad, button);
-		ovl_text(x + bw + 3 * ui, y + pad, label);
+		ovl_frame(x, y, bw, bh, tx, ty, 255, 190);
+		ovl_text(x + padx, y + pady, button);
+		ovl_text(x + bw + SX(3), y + pady, label);
 	}
-	return bw + 3 * ui + text_width(label);
+	return bw + SX(3) + text_width(label);
 }
 
 typedef const char *const legend_t[2];
@@ -705,16 +723,33 @@ static legend_t legend_menu[] =
 	{ "X", "Esci" },
 };
 
-static void legend_row(int y, legend_t *legend, int n)
+// One row of button items, centred, spread up to a maximum gap.
+static void legend_one_row(int y, legend_t *legend, int n)
 {
 	int total = 0;
 	for (int i = 0; i < n; i++) total += legend_item(0, 0, legend[i][0], legend[i][1], 0);
-	int avail = fb_w - 2 * 12 * ui;
+	int avail = fb_w - 2 * SX(12);
 	int gap = n > 1 ? (avail - total) / (n - 1) : 0;
-	if (gap > 14 * ui) gap = 14 * ui;
-	if (gap < 2 * ui) gap = 2 * ui;
+	if (gap > SX(14)) gap = SX(14);
+	if (gap < SX(2)) gap = SX(2);
 	int x = (fb_w - (total + gap * (n - 1))) / 2;
 	for (int i = 0; i < n; i++) x += legend_item(x, y, legend[i][0], legend[i][1], 1) + gap;
+}
+
+// The legend row ending at y + LEGEND_H; with two rows available and a
+// legend too wide for one, the first half goes on the row above.
+static void legend_row(int y, legend_t *legend, int n)
+{
+	int total = 0;
+	for (int i = 0; i < n; i++) total += legend_item(0, 0, legend[i][0], legend[i][1], 0) + SX(2);
+	if (legend_rows < 2 || n < 2 || total <= fb_w - 2 * SX(12))
+	{
+		legend_one_row(y, legend, n);
+		return;
+	}
+	int first = (n + 1) / 2;
+	legend_one_row(y - LEGEND_H - SY(4), legend, first);
+	legend_one_row(y, legend + first, n - first);
 }
 
 static void format_time(double t, char *out, size_t len)
@@ -745,16 +780,32 @@ typedef struct
 
 static const char *exit_question = "Uscire dal Video CD?";
 
+// Lines of the controls, from the bottom: margin, legend row(s), progress
+// bar, status line. Positions are in lines of the frame buffer.
+static void osd_positions(int *legend_y, int *bar_y, int *status_y)
+{
+	*legend_y = fb_h - SY(10) - LEGEND_H;
+	int top = *legend_y - (legend_rows > 1 ? LEGEND_H + SY(4) : 0);
+	*bar_y = top - SY(10);
+	*status_y = *bar_y - SY(6) - SY(8);
+}
+
 static void osd_layout(void)
 {
 	ui = fb_w / 640;
 	if (ui < 1) ui = 1;
-	// From the bottom: margin, legend row, progress bar, status line.
-	int legend_h = 8 * ui + 6 * ui;
-	int legend_y = fb_h - 10 * ui - legend_h;
-	int bar_y = legend_y - 10 * ui;
-	int status_y = bar_y - 6 * ui - 8 * ui;
-	ovl_y = status_y - 4 * ui;
+	sx2 = sy2 = 2 * ui;
+	legend_rows = 1;
+	if (fb_w < 1000 && fb_h >= 400)
+	{
+		// TV lines: glyphs 12 pixels across, 20 lines (576) or 16 (480) tall
+		sx2 = 3;
+		sy2 = fb_h >= 540 ? 5 : 4;
+		legend_rows = 2;
+	}
+	int legend_y, bar_y, status_y;
+	osd_positions(&legend_y, &bar_y, &status_y);
+	ovl_y = status_y - SY(4);
 	if (ovl_y < 0) ovl_y = 0;
 	ovl_h = fb_h - ovl_y;
 	ovl_a = (uint8_t *)calloc((size_t)fb_w * ovl_h, 1);
@@ -763,16 +814,34 @@ static void osd_layout(void)
 	if (!ovl_a || !ovl_v || !full_line) ovl_y = fb_h;
 }
 
-static void osd_build(const osd_info_t *info)
+// Every line of the controls blended with the next one: their edges are
+// then shared by the two fields of an interlaced output (and by the lines
+// a scaler keeps), so nothing white flickers on a CRT.
+static void ovl_smooth(void)
 {
-	memset(ovl_a, 0, (size_t)fb_w * ovl_h);
-	memset(ovl_v, 0, (size_t)fb_w * ovl_h);
+	for (int y = 0; y + 1 < ovl_h; y++)
+	{
+		uint8_t *a0 = ovl_a + (size_t)y * fb_w, *v0 = ovl_v + (size_t)y * fb_w;
+		const uint8_t *a1 = a0 + fb_w, *v1 = v0 + fb_w;
+		for (int x = 0; x < fb_w; x++)
+		{
+			if (a0[x] == a1[x] && v0[x] == v1[x]) continue;
+			unsigned p = a0[x] * v0[x] + a1[x] * v1[x];
+			unsigned a = a0[x] + a1[x];
+			v0[x] = a ? (uint8_t)(p / a) : 0;
+			a0[x] = (uint8_t)(a / 2);
+		}
+	}
+}
 
-	int legend_h = 8 * ui + 6 * ui;
-	int legend_y = fb_h - 10 * ui - legend_h - ovl_y;
-	int bar_y = legend_y - 10 * ui;
-	int status_y = bar_y - 6 * ui - 8 * ui;
-	int mx = 24 * ui;
+static void osd_draw(const osd_info_t *info)
+{
+	int legend_y, bar_y, status_y;
+	osd_positions(&legend_y, &bar_y, &status_y);
+	legend_y -= ovl_y;
+	bar_y -= ovl_y;
+	status_y -= ovl_y;
+	int mx = SX(24);
 	char buf[64], t1[16], t2[16];
 
 	// A light shade towards the bottom keeps the white readable on bright
@@ -785,9 +854,9 @@ static void osd_build(const osd_info_t *info)
 		// Menu: the current choice, changed with up/down and taken with A.
 		x = ovl_text(mx, status_y, "MENU");
 		snprintf(buf, sizeof(buf), "Scelta: %d", info->sel);
-		x = ovl_text(x + 16 * ui, status_y, buf);
+		x = ovl_text(x + SX(16), status_y, buf);
 		snprintf(buf, sizeof(buf), "(%d-%d)", info->sel_min, info->sel_max);
-		ovl_text(x + 8 * ui, status_y, buf);
+		ovl_text(x + SX(8), status_y, buf);
 		legend_row(legend_y, legend_menu, sizeof(legend_menu) / sizeof(legend_menu[0]));
 		return;
 	}
@@ -795,23 +864,32 @@ static void osd_build(const osd_info_t *info)
 	// Status line: state icon and name, chapter, audio, time.
 	static const char *const names[] = { "PLAY", "PAUSA", "STOP", "AVANTI 10x", "INDIETRO 10x" };
 	static const char *const audio[] = { "Audio Stereo", "Audio Sinistro", "Audio Destro" };
-	int ih = 8 * ui;
-	icon_with_shadow(mx, status_y, ih, info->state);
-	x = ovl_text(mx + icon_width(info->state, ih) + 4 * ui, status_y, info->state_label ? info->state_label : names[info->state]);
-	if (info->chapters > 0 && info->chapter > 0)
-	{
-		snprintf(buf, sizeof(buf), "Capitolo %d/%d", info->chapter, info->chapters);
-		x = ovl_text(x + 16 * ui, status_y, buf);
-	}
-	if (info->state != ST_STOP) ovl_text(x + 16 * ui, status_y, info->audio_label ? info->audio_label : audio[info->audio_mode % 3]);
 	format_time(info->time, t1, sizeof(t1));
 	format_time(info->duration, t2, sizeof(t2));
 	snprintf(buf, sizeof(buf), "%s / %s", t1, t2);
-	ovl_text(fb_w - mx - text_width(buf), status_y, buf);
+	int time_x = fb_w - mx - text_width(buf);
+	ovl_text(time_x, status_y, buf);
+	icon_with_shadow(mx, status_y, info->state);
+	x = ovl_text(mx + icon_width(info->state) + SX(4), status_y, info->state_label ? info->state_label : names[info->state]);
+	if (info->chapters > 0 && info->chapter > 0)
+	{
+		snprintf(buf, sizeof(buf), "Capitolo %d/%d", info->chapter, info->chapters);
+		if (x + SX(16) + text_width(buf) < time_x) x = ovl_text(x + SX(16), status_y, buf);
+	}
+	if (info->state != ST_STOP)
+	{
+		const char *al = info->audio_label ? info->audio_label : audio[info->audio_mode % 3];
+		// with large glyphs a long track name may not fit before the time
+		char cut[64];
+		snprintf(cut, sizeof(cut), "%s", al);
+		int room = (time_x - SX(16) - (x + SX(16))) / SX(GLYPH_W);
+		if (room < (int)strlen(cut) && room >= 0) cut[room] = 0;
+		if (room > 0) ovl_text(x + SX(16), status_y, cut);
+	}
 
 	// Progress bar.
 	int bw = fb_w - 2 * mx;
-	int bh = 3 * ui;
+	int bh = SY(3);
 	double f = info->duration > 0 ? info->time / info->duration : 0;
 	if (f < 0) f = 0;
 	if (f > 1) f = 1;
@@ -819,17 +897,27 @@ static void osd_build(const osd_info_t *info)
 	ovl_rect(mx + 1, bar_y + 1, bw, bh, 0, SHADE_A / 2);
 	ovl_rect(mx, bar_y, bw, bh, 255, 80);
 	ovl_rect(mx, bar_y, fill, bh, 255, TEXT_A);
-	ovl_rect(mx + fill - ui, bar_y - 2 * ui, 3 * ui, bh + 4 * ui, 255, TEXT_A);
+	ovl_rect(mx + fill - SX(1), bar_y - SY(2), SX(3), bh + SY(4), 255, TEXT_A);
 
 	// Button legend, or the exit confirmation.
 	if (info->confirm_exit)
 	{
 		const char *q = exit_question;
-		int w = text_width(q) + 16 * ui + legend_item(0, 0, "A", "Conferma", 0) + 16 * ui + text_width("Altro tasto: Annulla");
-		x = (fb_w - w) / 2;
-		x = ovl_text(x, legend_y + 3 * ui, q) + 16 * ui;
-		x += legend_item(x, legend_y, "A", "Conferma", 1) + 16 * ui;
-		ovl_text(x, legend_y + 3 * ui, "Altro tasto: Annulla");
+		int w = text_width(q) + SX(16) + legend_item(0, 0, "A", "Conferma", 0) + SX(16) + text_width("Altro tasto: Annulla");
+		if (w > fb_w - 2 * SX(12) && legend_rows > 1)
+		{
+			// two rows: the question above, the answers below
+			ovl_text((fb_w - text_width(q)) / 2, legend_y - LEGEND_H - SY(4) + SY(3), q);
+			w = legend_item(0, 0, "A", "Conferma", 0) + SX(16) + text_width("Altro tasto: Annulla");
+			x = (fb_w - w) / 2;
+		}
+		else
+		{
+			x = (fb_w - w) / 2;
+			x = ovl_text(x, legend_y + SY(3), q) + SX(16);
+		}
+		x += legend_item(x, legend_y, "A", "Conferma", 1) + SX(16);
+		ovl_text(x, legend_y + SY(3), "Altro tasto: Annulla");
 	}
 	else if (info->legend)
 	{
@@ -840,6 +928,14 @@ static void osd_build(const osd_info_t *info)
 		int n = sizeof(legend_play) / sizeof(legend_play[0]);
 		legend_row(legend_y, legend_play, info->has_menu ? n : n - 1);
 	}
+}
+
+static void osd_build(const osd_info_t *info)
+{
+	memset(ovl_a, 0, (size_t)fb_w * ovl_h);
+	memset(ovl_v, 0, (size_t)fb_w * ovl_h);
+	osd_draw(info);
+	ovl_smooth();
 }
 
 // ---------------------------------------------------------------------------

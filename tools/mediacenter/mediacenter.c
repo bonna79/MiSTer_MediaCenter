@@ -781,6 +781,7 @@ static void fill(void)
 // Called after a picture is converted and before it is shown: the DVD player
 // draws subtitles and menu buttons on frame_rgb here.
 static void (*frame_overlay)(void) = NULL;
+static int overlay_soften = 0; // the overlay blends each of its lines with the one above
 
 // Interlaced pictures (DVD, MPEG-2) carry two fields taken at different
 // moments: in fast motion the lines of one field do not match the other and
@@ -933,6 +934,7 @@ static void screen_rebuild(void)
 static int yuv_ok = 1;
 
 static void fb_native_fmt(int w, int h, double aspect, int yuv);
+static void crt_fb_changed(void);
 
 static void fb_native(int w, int h, double aspect)
 {
@@ -1015,6 +1017,7 @@ static void fb_native_fmt(int w, int h, double aspect, int yuv)
 	native_aspect = aspect;
 	fb_par = w ? aspect * h / w : 1.0;
 	screen_rebuild();
+	crt_fb_changed();
 }
 
 // Time spent drawing pictures, reported in the log.
@@ -1207,8 +1210,12 @@ static void draw_video_frame(AVFrame *f)
 		sws_scale(mc.sws, (const uint8_t *const *)f->data, linesize, 0, h, dst, dst_stride);
 		for (int y = 0; y < h; y++) memcpy(frame_rgb + (size_t)y * stride, tmp + (size_t)y * tstride, stride);
 	}
-	if ((f->flags & AV_FRAME_FLAG_INTERLACED) && !pic_fields) deinterlace_rgb();
+	// Subtitles and menu buttons are drawn before the deinterlacing, which
+	// blends them like the picture; otherwise the overlay softens them.
+	int deint = (f->flags & AV_FRAME_FLAG_INTERLACED) && !pic_fields;
+	overlay_soften = !deint;
 	if (frame_overlay) frame_overlay();
+	if (deint) deinterlace_rgb();
 	have_frame = 1;
 	double t_conv = now_seconds();
 	fb_present_paged();
@@ -2435,31 +2442,117 @@ static int browse(const char *root)
 // core resamples the picture into the new rectangle; the sync timing does not
 // change, so the CRT keeps its lock. HDMI is not affected. Saved in
 // mediacenter.ini as MC_CRT_HSIZE, MC_CRT_HPOS, MC_CRT_VSIZE, MC_CRT_VPOS.
+//
+// The same screen chooses the mode of the 15 kHz output (MC_CRT_MODE) and its
+// flicker filter (MC_CRT_FILTER), both done by the menu core:
+// - mode Auto: 576i for a PAL DVD, 480i for an NTSC one and for the lists,
+//   or the forced 576i, 288p, 480i or 240p;
+// - filter Auto: on for the lists and screens of the player (white text one
+//   line tall would flicker on an interlaced output), off for the video,
+//   whose subtitles and controls are already smoothed here.
 // ---------------------------------------------------------------------------
 
-static const struct { const char *key, *label; int min, max; } crt_items[4] = {
+#define CRT_ITEMS 6
+#define CRT_MODE 4
+#define CRT_FILTER 5
+static const struct { const char *key, *label; int min, max; } crt_items[CRT_ITEMS] = {
 	{ "MC_CRT_HSIZE", "Larghezza", -16, 15 },
 	{ "MC_CRT_HPOS", "Posizione orizzontale", -32, 31 },
 	{ "MC_CRT_VSIZE", "Altezza", -16, 15 },
 	{ "MC_CRT_VPOS", "Posizione verticale", -16, 15 },
+	{ "MC_CRT_MODE", "Modo uscita 15 kHz", 0, 4 },
+	{ "MC_CRT_FILTER", "Filtro anti-sfarfallio", 0, 2 },
 };
-static int crt_val[4];
+static const char *const crt_mode_names[5] = { "Auto", "576i PAL", "288p PAL", "480i NTSC", "240p NTSC" };
+static const char *const crt_filter_names[3] = { "Auto", "Spento", "Acceso" };
+static int crt_val[CRT_ITEMS];
+static int crt_sent_mode = -1, crt_sent_filter = -1;
 
-static void crt_send(void)
+static int crt_write(const char *cmd)
 {
 	int fd = open("/dev/MiSTer_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-	if (fd < 0) return;
-	char cmd[64];
-	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 crt %d %d %d %d\n", crt_val[0], crt_val[1], crt_val[2], crt_val[3]);
-	if (write(fd, cmd, n) != n) fprintf(stderr, "mediacenter: CRT adjust not sent\n");
+	if (fd < 0) return -1;
+	int n = (int)strlen(cmd);
+	int ok = write(fd, cmd, n) == n;
 	close(fd);
+	return ok ? 0 : -1;
+}
+
+// The filter actually used: Auto turns it on outside the video pictures.
+static int crt_filter_on(void)
+{
+	if (crt_val[CRT_FILTER]) return crt_val[CRT_FILTER] == 2;
+	return !native_w;
+}
+
+// The mode the menu core chooses for the current frame buffer, with the same
+// rules (menu.sv), for the log.
+static const char *crt_expected(char *buf, size_t len)
+{
+	int m = crt_val[CRT_MODE];
+	int h = fb_h;
+	const char *mode;
+	if (m) mode = crt_mode_names[m];
+	else
+	{
+		int pal = h == 576 || h == 288 ? 1 : h == 480 || h == 240 ? 0 : -1;
+		int lines = pal == 1 ? 288 : 240;
+		int scaled = fb_w > 640 || h > lines;
+		if (!scaled) mode = pal == 1 ? "288p PAL (1:1)" : pal == 0 ? "240p NTSC (1:1)" : "240p/288p secondo menu_pal (1:1)";
+		else if (h >= 400) mode = pal == 1 ? "576i PAL" : pal == 0 ? "480i NTSC" : "480i/576i secondo menu_pal";
+		else mode = pal == 1 ? "288p PAL" : pal == 0 ? "240p NTSC" : "240p/288p secondo menu_pal";
+	}
+	snprintf(buf, len, "%s, filtro %s", mode, crt_filter_on() ? "acceso" : "spento");
+	return buf;
+}
+
+// Sends the settings to the Main; the mode and the filter only when they
+// change (the filter follows the frame buffer in Auto).
+static void crt_send(void)
+{
+	char cmd[64];
+	snprintf(cmd, sizeof(cmd), "fb_cmd3 crt %d %d %d %d\n", crt_val[0], crt_val[1], crt_val[2], crt_val[3]);
+	if (crt_write(cmd)) fprintf(stderr, "mediacenter: CRT adjust not sent\n");
+	int flt = crt_filter_on();
+	if (crt_val[CRT_MODE] != crt_sent_mode || flt != crt_sent_filter)
+	{
+		snprintf(cmd, sizeof(cmd), "fb_cmd3 crtmode %d %d\n", crt_val[CRT_MODE], flt);
+		crt_write(cmd);
+		crt_sent_mode = crt_val[CRT_MODE];
+		crt_sent_filter = flt;
+	}
+}
+
+// The mode measured by the Main on the core's 15 kHz output; "" until known.
+static const char *crt_measured(char *buf, size_t len)
+{
+	buf[0] = 0;
+	FILE *f = fopen("/tmp/mediacenter_crt", "r");
+	if (!f) return buf;
+	unsigned w = 0, h = 0;
+	int il = 0;
+	double hz = 0, vz = 0;
+	if (fscanf(f, "%u %u %d %lf %lf", &w, &h, &il, &hz, &vz) == 5 && h)
+		snprintf(buf, len, "%ux%u%s %s, %.2f kHz, %.2f Hz", w, h, il ? "i" : "p",
+			il ? "interlacciato" : "progressivo", hz, vz);
+	fclose(f);
+	return buf;
+}
+
+// Called when the frame buffer changes: Auto filter, and the log line.
+static void crt_fb_changed(void)
+{
+	char e[96], m[96];
+	crt_send();
+	fprintf(stderr, "mediacenter: CRT 15 kHz atteso: %dx%d -> %s\n", fb_w, fb_h, crt_expected(e, sizeof(e)));
+	if (crt_measured(m, sizeof(m))[0]) fprintf(stderr, "mediacenter: CRT 15 kHz misurato dal Main (ultimo): %s\n", m);
 }
 
 // Reads the settings (mediacenter.ini, already in the environment) and sends
 // them to the Main.
 static void crt_load(void)
 {
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < CRT_ITEMS; i++)
 	{
 		const char *e = getenv(crt_items[i].key);
 		int v = e ? atoi(e) : 0;
@@ -2501,7 +2594,7 @@ static int crt_save(void)
 		line += n;
 	}
 	if (len && old[len - 1] != '\n') fputc('\n', f);
-	for (int i = 0; i < 4; i++)
+	for (int i = 0; i < CRT_ITEMS; i++)
 	{
 		char v[16];
 		snprintf(v, sizeof(v), "%d", crt_val[i]);
@@ -2535,51 +2628,83 @@ static void crt_draw(int sel, const char *message)
 	fb_fill_rect(0, 0, t, fb_h, red);
 	fb_fill_rect(fb_w - t, 0, t, fb_h, red);
 
-	int bw = 62 * GLYPH_W * s, bh = 92 * s;
+	int bw = 62 * GLYPH_W * s, bh = 136 * s;
 	int bx = (fb_w - bw) / 2, by = fb_h / 2 - bh / 2;
 	fb_fill_rect(bx, by, bw, bh, fb_rgb(0, 0, 0));
 	int x = bx + 8 * s, y = by + 6 * s;
 	fb_text(x, y, s, "Regola CRT: il bordo rosso tocchi i lati", white);
 	y += 16 * s;
-	for (int i = 0; i < 4; i++, y += 12 * s)
+	for (int i = 0; i < CRT_ITEMS; i++, y += 12 * s)
 	{
 		char line[64];
-		snprintf(line, sizeof(line), "%-24s %+4d", crt_items[i].label, crt_val[i]);
+		if (i == CRT_MODE) snprintf(line, sizeof(line), "%-24s %s", crt_items[i].label, crt_mode_names[crt_val[i]]);
+		else if (i == CRT_FILTER) snprintf(line, sizeof(line), "%-24s %s", crt_items[i].label, crt_filter_names[crt_val[i]]);
+		else snprintf(line, sizeof(line), "%-24s %+4d", crt_items[i].label, crt_val[i]);
 		if (i == sel) fb_fill_rect(bx + 4 * s, y - 2 * s, bw - 8 * s, 12 * s, accent);
 		fb_text(x, y, s, line, white);
 	}
-	y += 6 * s;
+	y += 4 * s;
+	char m[96], line[128];
+	snprintf(line, sizeof(line), "Uscita misurata: %s", crt_measured(m, sizeof(m))[0] ? m : "non ancora nota");
+	fb_text(x, y, s, line, grey);
+	y += 14 * s;
 	fb_text(x, y, s, message ? message : "Su/Giu Scegli  \x10\x11 Cambia  A Salva  B Annulla  Y Azzera", grey);
+}
+
+// Waits for a key up to secs seconds; 0 also when the time runs out.
+static int wait_key_for(double secs)
+{
+	double end = now_seconds() + secs;
+	while (!quit_requested && now_seconds() < end)
+	{
+		int code = input_key(now_seconds());
+		if (code) return code;
+		usleep(20000);
+	}
+	return 0;
 }
 
 static void crt_adjust_screen(void)
 {
-	int saved[4];
+	int saved[CRT_ITEMS];
 	memcpy(saved, crt_val, sizeof(saved));
 	int sel = 0;
 	const char *message = NULL;
+	char shown[96] = "", m[96];
+	crt_draw(sel, message);
 	while (!quit_requested)
 	{
-		crt_draw(sel, message);
+		// the measured mode is shown again when the Main reports a change
+		int code = wait_key_for(0.5);
+		if (!code)
+		{
+			if (strcmp(crt_measured(m, sizeof(m)), shown))
+			{
+				snprintf(shown, sizeof(shown), "%s", m);
+				crt_draw(sel, message);
+			}
+			continue;
+		}
 		message = NULL;
-		int code = wait_key();
-		if (!code) break;
 		int d = 0;
 		switch (code)
 		{
-		case KEY_UP: sel = (sel + 3) % 4; continue;
-		case KEY_DOWN: sel = (sel + 1) % 4; continue;
+		case KEY_UP: sel = (sel + CRT_ITEMS - 1) % CRT_ITEMS; crt_draw(sel, message); continue;
+		case KEY_DOWN: sel = (sel + 1) % CRT_ITEMS; crt_draw(sel, message); continue;
 		case KEY_LEFT: d = -1; break;
 		case KEY_RIGHT: d = 1; break;
 		case KEY_PAGEUP: case KEY_REWIND: d = -4; break;
 		case KEY_PAGEDOWN: case KEY_FASTFORWARD: d = 4; break;
-		case KEY_SPACE: memset(crt_val, 0, sizeof(crt_val)); crt_send(); continue;
+		case KEY_SPACE: memset(crt_val, 0, sizeof(crt_val)); crt_send(); crt_draw(sel, message); continue;
 		case KEY_ENTER: case KEY_PLAY:
 			if (crt_save())
 			{
 				message = "Impossibile salvare mediacenter.ini";
+				crt_draw(sel, message);
 				continue;
 			}
+			fprintf(stderr, "mediacenter: CRT salvato: %d %d %d %d, modo %s, filtro %s\n", crt_val[0], crt_val[1], crt_val[2],
+				crt_val[3], crt_mode_names[crt_val[CRT_MODE]], crt_filter_names[crt_val[CRT_FILTER]]);
 			return;
 		case KEY_ESC: case KEY_TAB: case KEY_STOP: case KEY_STOPCD:
 			memcpy(crt_val, saved, sizeof(saved));
@@ -2592,6 +2717,7 @@ static void crt_adjust_screen(void)
 		if (v > crt_items[sel].max) v = crt_items[sel].max;
 		crt_val[sel] = v;
 		crt_send();
+		crt_draw(sel, message);
 	}
 }
 
@@ -2868,6 +2994,39 @@ static void load_settings(void)
 	fclose(f);
 }
 
+// Which Main runs and what it did with the menu core, for the log: after a
+// game another Main (Physical Disc's, the official one) may be in charge, and
+// only MiSTer MediaCenter's Main loads the menu core with the CRT output.
+static void log_main_info(void)
+{
+	DIR *d = opendir("/proc");
+	if (d)
+	{
+		struct dirent *e;
+		while ((e = readdir(d)))
+		{
+			if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+			char link[64], exe[256];
+			snprintf(link, sizeof(link), "/proc/%s/exe", e->d_name);
+			ssize_t n = readlink(link, exe, sizeof(exe) - 1);
+			if (n <= 0) continue;
+			exe[n] = 0;
+			if (!strncmp(exe, "/media/fat/MiSTer", 17)) fprintf(stderr, "mediacenter: Main in uso: %s\n", exe);
+		}
+		closedir(d);
+	}
+	FILE *f = fopen("/tmp/mediacenter_main.log", "r");
+	if (f)
+	{
+		char line[256], last[4][256] = { "", "", "", "" };
+		int n = 0;
+		while (fgets(line, sizeof(line), f)) snprintf(last[n++ % 4], sizeof(last[0]), "%s", line);
+		fclose(f);
+		for (int i = n > 4 ? n - 4 : 0; i < n; i++) fprintf(stderr, "mediacenter: Main: %s", last[i % 4]);
+	}
+	else fprintf(stderr, "mediacenter: Main: nessun registro del menu (Main non di MiSTer MediaCenter?)\n");
+}
+
 int main(int argc, char *argv[])
 {
 	load_settings();
@@ -2937,6 +3096,8 @@ int main(int argc, char *argv[])
 	}
 	osd_layout();
 	input_open();
+	log_main_info();
+	crt_fb_changed();
 
 	int rc = 0;
 	if (arg) rc = play_file(arg, 0) == END_DONE ? 0 : 0;

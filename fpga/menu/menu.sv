@@ -64,7 +64,7 @@ localparam CONF_STR = {
 };
 
 wire forced_scandoubler;
-wire [31:0] status;
+wire [127:0] status;
 
 hps_io #(.CONF_STR(CONF_STR)) hps_io
 (
@@ -370,14 +370,24 @@ wire signed [4:0] ADJ_VPOS  = status[31:27];
 // PAL for 576/288 lines, NTSC for 480/240, otherwise the menu_pal setting;
 // interlaced (480i/576i) when it has 400 lines or more and the output is
 // 15 kHz. Otherwise the menu's own 240p/288p (480p/576p with the scandoubler).
+//
+// MiSTer MediaCenter can force the 15 kHz mode of its pictures (CRT_MODE, set
+// by the player): 1 576i, 2 288p, 3 480i, 4 240p; 0 chooses as above. The
+// frame buffer is then always scaled to the chosen mode. VFILTER blends each
+// line with the next one of the frame buffer (a flicker filter): thin
+// horizontal lines, such as text, no longer flicker on an interlaced output.
+wire [2:0] CRT_MODE = status[34:32];
+wire VFILTER = status[35];
 reg  PAL = 0, ILACE = 0, SCALED = 0;
 wire fb_ok = FB && (LFB_FMT[2:0] == 3'b110 || (LFB_FMT[5] && LFB_FMT[2:0] == 3'b100)) && LFB_WIDTH && LFB_HEIGHT;
+wire force_mode = fb_ok && !forced_scandoubler && CRT_MODE >= 3'd1 && CRT_MODE <= 3'd4;
 wire std_pal = (LFB_HEIGHT == 576 || LFB_HEIGHT == 288) ? 1'b1 :
                (LFB_HEIGHT == 480 || LFB_HEIGHT == 240) ? 1'b0 : status[4];
-wire next_pal = fb_ok ? std_pal : status[4];
+wire next_pal = force_mode ? (CRT_MODE <= 3'd2) : fb_ok ? std_pal : status[4];
 wire [11:0] next_lines = next_pal ? (forced_scandoubler ? 12'd576 : 12'd288) : (forced_scandoubler ? 12'd480 : 12'd240);
-wire next_scaled = fb_ok && (LFB_WIDTH > 640 || LFB_HEIGHT > next_lines);
-wire next_ilace = next_scaled && !forced_scandoubler && LFB_HEIGHT >= 400;
+wire next_scaled = fb_ok && (force_mode || LFB_WIDTH > 640 || LFB_HEIGHT > next_lines);
+wire next_ilace = force_mode ? (CRT_MODE == 3'd1 || CRT_MODE == 3'd3)
+                             : next_scaled && !forced_scandoubler && LFB_HEIGHT >= 400;
 
 reg   [9:0] hc;
 reg   [9:0] vc;
@@ -503,6 +513,7 @@ mc_out mc_out
 	.wide(WIDE),
 	.ilace(ILACE),
 	.fields(FIELDS),
+	.vfilter(VFILTER),
 	.adj_hsize(ADJ_HSIZE),
 	.adj_hpos(ADJ_HPOS),
 	.adj_vsize(ADJ_VSIZE),

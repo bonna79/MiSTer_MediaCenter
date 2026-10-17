@@ -1637,9 +1637,23 @@ void user_io_init(const char *path, const char *xml)
 			else if (is_menu())
 			{
 				// MiSTer MediaCenter's menu core is in place of the stock one
-				// (loaded at boot and by the other Mains): load it once per visit, the
-				// file guards against a loop with a core that is not ours.
-				if (!menu_is_mediacenter() && !access(MEDIACENTER_MENU_RBF, R_OK) && access("/tmp/mediacenter_menu", F_OK))
+				// (loaded at boot and by the other Mains, such as Physical
+				// Disc's after a PSX game): it is loaded whenever the stock
+				// one is found. The file is there only between that load and
+				// the start of the new menu: if the new menu is still not
+				// ours, the load is not tried again (no endless loop).
+				int mmc = menu_is_mediacenter();
+				int tried = !access("/tmp/mediacenter_menu", F_OK);
+				FILE *lg = fopen("/tmp/mediacenter_main.log", "a");
+				if (lg)
+				{
+					fprintf(lg, "%ld menu: %s menu core%s\n", (long)time(NULL), mmc ? "MediaCenter" : "stock",
+						mmc ? "" : access(MEDIACENTER_MENU_RBF, R_OK) ? ", " MEDIACENTER_MENU_RBF " missing" :
+						tried ? ", MediaCenter core already tried: not loading it again" : ", loading the MediaCenter core");
+					fclose(lg);
+				}
+				if (mmc) unlink("/tmp/mediacenter_menu");
+				else if (!access(MEDIACENTER_MENU_RBF, R_OK) && !tried)
 				{
 					FILE *f = fopen("/tmp/mediacenter_menu", "w");
 					if (f) fclose(f);

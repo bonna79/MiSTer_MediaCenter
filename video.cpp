@@ -3034,6 +3034,19 @@ static void show_video_info(const VideoInfo *vi, const vmode_custom_t *vm)
 	printf("\033[1;33mINFO: pr = %d, de_h = %d, de_v = %d\033[0m\n", vi->pixrep, vi->de_h, vi->de_v);
 	printf("\033[1;33mINFO: Frame time (100MHz counter): VGA = %d, HDMI = %d\033[0m\n", vi->vtime, vi->vtimeh);
 	printf("\033[1;33mINFO: AR = %d:%d, fb_en = %d, fb_width = %d, fb_height = %d\033[0m\n", vi->arx, vi->ary, vi->fb_en, vi->fb_width, vi->fb_height);
+	// MiSTer MediaCenter: the mode measured on the menu core's own output
+	// (the 15 kHz CRT one), read by the player for its log and its CRT screen:
+	// width, lines of a whole frame, interlaced, line and field rates.
+	if (is_menu() && menu_is_mediacenter())
+	{
+		FILE *f = fopen("/tmp/mediacenter_crt.tmp", "w");
+		if (f)
+		{
+			fprintf(f, "%u %u %d %.2f %.2f\n", vi->width, vi->height, vi->interlaced ? 1 : 0, hrate, vrate);
+			fclose(f);
+			rename("/tmp/mediacenter_crt.tmp", "/tmp/mediacenter_crt");
+		}
+	}
 	if (vi->vtimeh) api1_5 = 1;
 	if (hasAPI1_5() && cfg.video_info)
 	{
@@ -4382,6 +4395,21 @@ void video_cmd(char *cmd)
 			user_io_status_set("[26:22]", (uint32_t)vs & 0x1F);
 			user_io_status_set("[31:27]", (uint32_t)vp & 0x1F);
 		}
+	}
+
+	// fb_cmd3 crtmode <mode> <filter>: the mode of the menu core's 15 kHz
+	// output for MiSTer MediaCenter's pictures (0 automatic, 1 576i, 2 288p,
+	// 3 480i, 4 240p) and its flicker filter (1 on).
+	const char *crtm = strstr(cmd, "fb_cmd3 crtmode ");
+	if (crtm)
+	{
+		int mode, flt;
+		if (sscanf(crtm, "fb_cmd3 crtmode %d %d", &mode, &flt) == 2 && is_menu() && menu_is_mediacenter())
+		{
+			user_io_status_set("[34:32]", (mode >= 0 && mode <= 4) ? (uint32_t)mode : 0);
+			user_io_status_set("[35]", flt ? 1 : 0);
+		}
+		return;
 	}
 
 	if (video_fb_state())

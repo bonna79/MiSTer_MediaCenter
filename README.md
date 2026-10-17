@@ -212,6 +212,17 @@ Se il CRT ha la geometria sballata, l'immagine si può stringere, allargare e sp
 
 Le regolazioni valgono per il video del lettore sull'uscita a 15 kHz; l'HDMI non cambia. Il core del menu ridisegna l'immagine nel nuovo riquadro senza cambiare il sincronismo, quindi il CRT non perde mai l'aggancio e i colori restano quelli originali. L'idea viene da [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) di rmonic79 (Umberto Parisi, Beceri Videoludici), adattata al modo in cui MMC disegna l'immagine.
 
+Nella stessa schermata ci sono due voci per l'uscita a 15 kHz, gestite dal core FPGA del menu:
+
+| Voce | Valori |
+| --- | --- |
+| **Modo uscita 15 kHz** | **Auto** (576i per i DVD PAL, 480i per gli NTSC; elenchi in 480i o 576i secondo `menu_pal`), oppure fisso **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
+| **Filtro anti-sfarfallio** | **Auto** (acceso negli elenchi e nelle schermate del lettore, spento sul video), **Spento**, **Acceso** |
+
+Il filtro fonde ogni riga con quella sotto: le scritte bianche sottili non sfarfallano più sull'uscita interlacciata. Sul video resta spento in Auto perché i comandi e i sottotitoli sono già ammorbiditi dal lettore, e il film resta nitido.
+
+Sotto le voci compare **Uscita misurata**: la risoluzione che il Main misura davvero sull'uscita del core (per esempio `640x576i interlacciato, 15.63 kHz, 50.00 Hz`). La stessa riga, con il modo atteso, finisce anche in `/tmp/mediacenter.log`.
+
 ## Prove su un MiSTer vero
 
 Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, uscita HDMI a 1280x720, fino al 16 ottobre 2026; CRT Sony Trinitron via SCART RGB.
@@ -298,7 +309,7 @@ MC_AV_OFFSET=0.05
 | Impostazione | Effetto |
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Sposta l'audio più tardi (valore positivo) o più presto (negativo), in secondi. Serve con i televisori che ritardano l'immagine |
-| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
+| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
 | `MC_FIELDS=1` | DVD interlacciati: manda al CRT i due semiquadri originali invece di fonderli. Più dettaglio nel movimento, ma i dettagli fini tremolano un po' |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
 

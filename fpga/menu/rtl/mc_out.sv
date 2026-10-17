@@ -12,6 +12,11 @@
 // CRT's geometry. Only the picture is resampled; the sync timing never
 // changes, so the CRT cannot lose lock, and the colours are the source's.
 //
+// Flicker filter ("vfilter"): every output line is the average of its source
+// line and the next one, both fetched. A detail one line tall (white text, a
+// thin border) then shows in both fields of an interlaced output at half
+// strength instead of in one field only, where it flickers at 25/30 Hz.
+//
 // Formats: 32 bits per pixel, or YUV 4:2:2 (bytes Y0 U Y1 V, frame buffer
 // format bit 5 with 16 bits per pixel) that the player writes for decoded
 // video and that is converted to RGB here.
@@ -41,6 +46,7 @@ module mc_out
 	input             wide,     // 16:9 picture: letterbox
 	input             ilace,    // interlaced output: two fields per frame
 	input             fields,   // the picture is interlaced: keep its fields apart
+	input             vfilter,  // blend each line with the next (flicker filter)
 	input             field,    // field being shown (1: odd lines)
 	input       [9:0] hc,
 	input       [9:0] vc,
@@ -58,6 +64,7 @@ localparam BURST = 32;
 
 reg  [5:0] fmt;
 reg [11:0] w, h;
+reg        flt;
 reg  [9:0] out_h, cols, lines, left, top;
 reg  [1:0] show_s = 0;
 reg        scale, ilc, wd, fld;
@@ -91,6 +98,7 @@ always @(posedge clk_vid) begin
 	ilc    <= ilace;
 	wd     <= wide;
 	fld    <= fields;
+	flt    <= vfilter;
 	cols   <= w[9:0];
 	lines  <= h[9:0];
 	left   <= (WIDTH[9:0] - cols) >> 1;
@@ -198,7 +206,7 @@ function [10:0] pic_line(input [9:0] y, input f);
 endfunction
 
 reg        req_t = 0;
-reg [11:0] req_line;
+reg [11:0] req_line, req_line2;  // the line and the next one (flicker filter)
 reg        req_bank;
 
 always @(posedge clk_vid) begin
@@ -222,15 +230,17 @@ always @(posedge clk_vid) begin
 			sy = (ilc & fld) ? (ay >> 1) * vstep : ay * vstep;
 			if(ilc & fld) sy[27:16] = {sy[26:16], ay[0]};
 			if(ays >= 0 && ays < pic_hh && sy[27:16] < h) begin
-				req_line <= sy[27:16];
-				req_bank <= ny[0];
-				req_t    <= ~req_t;
+				req_line  <= sy[27:16];
+				req_line2 <= (sy[27:16] + 1'd1 < h) ? sy[27:16] + 1'd1 : sy[27:16];
+				req_bank  <= ny[0];
+				req_t     <= ~req_t;
 			end
 		end
 		else if(ny >= top && ny - top < lines) begin
-			req_line <= ny - top;
-			req_bank <= ny[0];
-			req_t    <= ~req_t;
+			req_line  <= ny - top;
+			req_line2 <= (ny - top + 1'd1 < lines) ? ny - top + 1'd1 : ny - top;
+			req_bank  <= ny[0];
+			req_t     <= ~req_t;
 		end
 	end
 end
@@ -238,13 +248,13 @@ end
 reg  [2:0] req_s = 0;
 reg  [1:0] start = 0;
 reg        fetch = 0;
-reg [11:0] line;
-reg        bank, wbank;
+reg [11:0] line, line2;
+reg        bank, wbank, sub = 0, wsub, flt_s;
 reg [25:0] offset;
 reg [10:0] words;
 reg  [9:0] waddr;
 reg  [7:0] beats = 0;
-reg        bwe = 0;
+reg        bwe = 0, bsub = 0;
 reg [10:0] baddr;
 reg [63:0] bdata;
 
@@ -267,6 +277,7 @@ always @(posedge clk_sys) begin
 	if(ddr_dout_ready && fetch && beats) begin
 		bwe   <= 1;
 		baddr <= {wbank, waddr};
+		bsub  <= wsub;
 		bdata <= ddr_dout;
 		waddr <= waddr + 1'd1;
 		beats <= beats - 1'd1;
@@ -275,7 +286,10 @@ always @(posedge clk_sys) begin
 	case(start)
 		0: if(!fetch && req_s[2] != req_s[1] && ddr_grant) begin
 				line  <= req_line;
+				line2 <= req_line2;
 				bank  <= req_bank;
+				sub   <= 0;
+				flt_s <= flt;
 				start <= 1;
 			end
 		1: begin
@@ -286,6 +300,7 @@ always @(posedge clk_sys) begin
 				laddr    = base + offset;
 				ddr_addr <= laddr[31:3];
 				wbank    <= bank;
+				wsub     <= sub;
 				waddr    <= 0;
 				words    <= yuv ? {1'b0, colsp3[11:2]} : colsp1[11:1];
 				fetch    <= 1;
@@ -294,7 +309,15 @@ always @(posedge clk_sys) begin
 	endcase
 
 	if(fetch && !start && !ddr_rd && !beats && ddr_grant) begin
-		if(!words) fetch <= 0;
+		if(!words) begin
+			fetch <= 0;
+			// the flicker filter needs the next line too
+			if(flt_s && !sub) begin
+				sub   <= 1;
+				line  <= line2;
+				start <= 1;
+			end
+		end
 		else begin
 			ddr_burst <= (words > BURST) ? BURST[7:0] : words[7:0];
 			beats     <= (words > BURST) ? BURST[7:0] : words[7:0];
@@ -304,12 +327,15 @@ always @(posedge clk_sys) begin
 	end
 end
 
+// line buffers: the source line, and the next one for the flicker filter
 reg [63:0] buffer[2048];
-always @(posedge clk_sys) if(bwe) buffer[baddr] <= bdata;
+reg [63:0] buffer2[2048];
+always @(posedge clk_sys) if(bwe && !bsub) buffer[baddr]  <= bdata;
+always @(posedge clk_sys) if(bwe &&  bsub) buffer2[baddr] <= bdata;
 
-reg [63:0] q;
-reg  [1:0] hi;
-reg        shown, shown2;
+reg [63:0] q, q0, q1;
+reg  [1:0] hi, hi0;
+reg        shown, shown0, shown2;
 
 // the current line's source line is inside the picture (letterbox bars)
 reg        line_on;
@@ -339,11 +365,22 @@ always @(posedge clk_vid) begin
 	else begin
 		sx = hc - left;
 	end
-	if(yuv) q <= buffer[{vc[0], 1'b0, sx[10:2]}];
-	else    q <= buffer[{vc[0], sx[10:1]}];
-	hi    <= sx[1:0];
-	shown <= scale ? (active && hc < WIDTH && hx >= 0 && hx < pic_w && px[27:16] < w && vc < out_h && line_on)
+	if(yuv) begin
+		q0 <= buffer[{vc[0], 1'b0, sx[10:2]}];
+		q1 <= buffer2[{vc[0], 1'b0, sx[10:2]}];
+	end
+	else begin
+		q0 <= buffer[{vc[0], sx[10:1]}];
+		q1 <= buffer2[{vc[0], sx[10:1]}];
+	end
+	hi0    <= sx[1:0];
+	shown0 <= scale ? (active && hc < WIDTH && hx >= 0 && hx < pic_w && px[27:16] < w && vc < out_h && line_on)
 	               : (active && hc >= left && sx < cols && vc >= top && vc - top < lines);
+
+	// the two lines averaged byte by byte (RGB or YUV alike)
+	q     <= flt ? (q0 & q1) + (((q0 ^ q1) & {8{8'hFE}}) >> 1) : q0;
+	hi    <= hi0;
+	shown <= shown0;
 end
 
 // RGB, or the products of the YUV to RGB conversion (BT.601 limited range,
