@@ -4368,6 +4368,22 @@ static void fb_set_page(int n)
 
 void video_cmd(char *cmd)
 {
+	// fb_cmd3 crt <h size> <h position> <v size> <v position>: MiSTer
+	// MediaCenter's CRT Adjust, size and position of the picture on the menu
+	// core's 15 kHz output. Can come together with page switches.
+	const char *crt = strstr(cmd, "fb_cmd3 crt ");
+	if (crt)
+	{
+		int hs, hp, vs, vp;
+		if (sscanf(crt, "fb_cmd3 crt %d %d %d %d", &hs, &hp, &vs, &vp) == 4 && is_menu() && menu_is_mediacenter())
+		{
+			user_io_status_set("[15:11]", (uint32_t)hs & 0x1F);
+			user_io_status_set("[21:16]", (uint32_t)hp & 0x3F);
+			user_io_status_set("[26:22]", (uint32_t)vs & 0x1F);
+			user_io_status_set("[31:27]", (uint32_t)vp & 0x1F);
+		}
+	}
+
 	if (video_fb_state())
 	{
 		// Page switches come once per picture: the last one queued wins.

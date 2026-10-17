@@ -200,6 +200,20 @@ Do **not** put `vga_scaler=1`, `video_mode`, `direct_video` or other scaler over
 
 Tested by rgm on a Sony Trinitron TV with a SCART RGB cable: DVD and DivX centred and whole, interlaced at 576i; at the same time HDMI at 720p correct.
 
+### CRT Adjust (geometry)
+
+If the CRT's geometry is off, the picture can be narrowed, widened and moved without touching the TV's trimmers. Open the **mediacenter** script and pick the last entry, **Regola CRT (dimensioni e posizione)**. A test picture with a red border appears: adjust **Larghezza** (width), **Posizione orizzontale** (horizontal position), **Altezza** (height) and **Posizione verticale** (vertical position) until the border touches the sides of the screen.
+
+| Button | What it does |
+| --- | --- |
+| ▲ ▼ | Picks the entry |
+| ◄ ► | Changes the value by one step (L / R by four steps) |
+| A | Saves to `mediacenter.ini` and exits |
+| B | Exits without saving |
+| Y | Resets everything to zero |
+
+The adjustments apply to the player's video on the 15 kHz output; HDMI does not change. The menu core redraws the picture in the new rectangle without changing the sync, so the CRT never loses lock and the colours stay the original ones. The idea comes from rmonic79's [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) (Umberto Parisi, Beceri Videoludici), adapted to the way MMC draws the picture.
+
 ## Tested on a real MiSTer
 
 Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 16 October 2026; Sony Trinitron CRT over SCART RGB.
@@ -286,6 +300,7 @@ MC_AV_OFFSET=0.05
 | Setting | Effect |
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Moves the sound later (positive value) or earlier (negative), in seconds. Useful with TVs that delay the picture |
+| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
 
 The same settings can also be given as environment variables, like the test variables below.

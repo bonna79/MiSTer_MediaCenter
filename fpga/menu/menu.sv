@@ -358,6 +358,12 @@ wire WIDE = status[9];
 // MiSTer MediaCenter: the picture is interlaced (DVD video): its two fields
 // go to the two fields of the 15 kHz output
 wire FIELDS = status[10];
+// MiSTer MediaCenter's CRT Adjust (set by the player): size and position of
+// the video picture on the 15 kHz output
+wire signed [4:0] ADJ_HSIZE = status[15:11];
+wire signed [5:0] ADJ_HPOS  = status[21:16];
+wire signed [4:0] ADJ_VSIZE = status[26:22];
+wire signed [4:0] ADJ_VPOS  = status[31:27];
 
 // Video standard and scan, chosen at the start of each frame. A frame buffer
 // larger than the output (MiSTer MediaCenter playing a video) is scaled to it:
@@ -497,6 +503,10 @@ mc_out mc_out
 	.wide(WIDE),
 	.ilace(ILACE),
 	.fields(FIELDS),
+	.adj_hsize(ADJ_HSIZE),
+	.adj_hpos(ADJ_HPOS),
+	.adj_vsize(ADJ_VSIZE),
+	.adj_vpos(ADJ_VPOS),
 	.field(field),
 	.hc(hc),
 	.vc(vc),

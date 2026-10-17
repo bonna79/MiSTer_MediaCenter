@@ -1693,6 +1693,7 @@ static void scan_sources(void)
 		add_source(label, path);
 	}
 	if (dir_has_entries("/media/fat/cifs")) add_source("Rete (CIFS)", "/media/fat/cifs");
+	add_source("Regola CRT (dimensioni e posizione)", "crt:");
 }
 
 static void draw_browser(const char *title, const char *const *labels, const int *dirs, int count, int sel, const char *message)
@@ -2414,6 +2415,172 @@ static int browse(const char *root)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// CRT Adjust (after rmonic79's MiSTer CRT Adjust): size and position of the
+// picture on the 15 kHz CRT output, for a CRT whose geometry is off. The menu
+// core resamples the picture into the new rectangle; the sync timing does not
+// change, so the CRT keeps its lock. HDMI is not affected. Saved in
+// mediacenter.ini as MC_CRT_HSIZE, MC_CRT_HPOS, MC_CRT_VSIZE, MC_CRT_VPOS.
+// ---------------------------------------------------------------------------
+
+static const struct { const char *key, *label; int min, max; } crt_items[4] = {
+	{ "MC_CRT_HSIZE", "Larghezza", -16, 15 },
+	{ "MC_CRT_HPOS", "Posizione orizzontale", -32, 31 },
+	{ "MC_CRT_VSIZE", "Altezza", -16, 15 },
+	{ "MC_CRT_VPOS", "Posizione verticale", -16, 15 },
+};
+static int crt_val[4];
+
+static void crt_send(void)
+{
+	int fd = open("/dev/MiSTer_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	if (fd < 0) return;
+	char cmd[64];
+	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 crt %d %d %d %d\n", crt_val[0], crt_val[1], crt_val[2], crt_val[3]);
+	if (write(fd, cmd, n) != n) fprintf(stderr, "mediacenter: CRT adjust not sent\n");
+	close(fd);
+}
+
+// Reads the settings (mediacenter.ini, already in the environment) and sends
+// them to the Main.
+static void crt_load(void)
+{
+	for (int i = 0; i < 4; i++)
+	{
+		const char *e = getenv(crt_items[i].key);
+		int v = e ? atoi(e) : 0;
+		crt_val[i] = v < crt_items[i].min ? crt_items[i].min : v > crt_items[i].max ? crt_items[i].max : v;
+	}
+	crt_send();
+}
+
+// Writes the values into mediacenter.ini, keeping its other lines.
+static int crt_save(void)
+{
+	const char *path = "/media/fat/linux/mediacenter.ini";
+	char *old = NULL;
+	size_t len = 0;
+	FILE *f = fopen(path, "r");
+	if (f)
+	{
+		fseek(f, 0, SEEK_END);
+		long sz = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		if (sz > 0 && sz < 65536 && (old = (char *)malloc(sz + 1)))
+		{
+			len = fread(old, 1, sz, f);
+			old[len] = 0;
+		}
+		fclose(f);
+	}
+	char tmp[64];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	f = fopen(tmp, "w");
+	if (!f) { free(old); return -1; }
+	for (char *line = old; line && *line;)
+	{
+		char *next = strchr(line, '\n');
+		size_t n = next ? (size_t)(next - line + 1) : strlen(line);
+		const char *p = line;
+		while (*p == ' ' || *p == '\t') p++;
+		if (strncmp(p, "MC_CRT_", 7)) fwrite(line, 1, n, f);
+		line += n;
+	}
+	if (len && old[len - 1] != '\n') fputc('\n', f);
+	for (int i = 0; i < 4; i++)
+	{
+		char v[16];
+		snprintf(v, sizeof(v), "%d", crt_val[i]);
+		if (crt_val[i]) fprintf(f, "%s=%d\n", crt_items[i].key, crt_val[i]);
+		setenv(crt_items[i].key, v, 1);
+	}
+	free(old);
+	int err = fclose(f);
+	if (!err) err = rename(tmp, path);
+	sync();
+	return err;
+}
+
+// A test picture for the adjustment: border, grid, centre cross and values.
+static void crt_draw(int sel, const char *message)
+{
+	fb_clear();
+	int s = fb_w >= 1280 ? 2 : 1;
+	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(150, 150, 150), accent = fb_rgb(60, 110, 200);
+	uint32_t red = fb_rgb(220, 40, 40), green = fb_rgb(40, 200, 40);
+	for (int i = 1; i < 8; i++)
+	{
+		fb_fill_rect(fb_w * i / 8, 0, s, fb_h, grey);
+		fb_fill_rect(0, fb_h * i / 8, fb_w, s, grey);
+	}
+	fb_fill_rect(fb_w / 2 - s, 0, 2 * s, fb_h, green);
+	fb_fill_rect(0, fb_h / 2 - s, fb_w, 2 * s, green);
+	int t = 4 * s;
+	fb_fill_rect(0, 0, fb_w, t, red);
+	fb_fill_rect(0, fb_h - t, fb_w, t, red);
+	fb_fill_rect(0, 0, t, fb_h, red);
+	fb_fill_rect(fb_w - t, 0, t, fb_h, red);
+
+	int bw = 62 * GLYPH_W * s, bh = 92 * s;
+	int bx = (fb_w - bw) / 2, by = fb_h / 2 - bh / 2;
+	fb_fill_rect(bx, by, bw, bh, fb_rgb(0, 0, 0));
+	int x = bx + 8 * s, y = by + 6 * s;
+	fb_text(x, y, s, "Regola CRT: il bordo rosso tocchi i lati", white);
+	y += 16 * s;
+	for (int i = 0; i < 4; i++, y += 12 * s)
+	{
+		char line[64];
+		snprintf(line, sizeof(line), "%-24s %+4d", crt_items[i].label, crt_val[i]);
+		if (i == sel) fb_fill_rect(bx + 4 * s, y - 2 * s, bw - 8 * s, 12 * s, accent);
+		fb_text(x, y, s, line, white);
+	}
+	y += 6 * s;
+	fb_text(x, y, s, message ? message : "Su/Giu Scegli  \x10\x11 Cambia  A Salva  B Annulla  Y Azzera", grey);
+}
+
+static void crt_adjust_screen(void)
+{
+	int saved[4];
+	memcpy(saved, crt_val, sizeof(saved));
+	int sel = 0;
+	const char *message = NULL;
+	while (!quit_requested)
+	{
+		crt_draw(sel, message);
+		message = NULL;
+		int code = wait_key();
+		if (!code) break;
+		int d = 0;
+		switch (code)
+		{
+		case KEY_UP: sel = (sel + 3) % 4; continue;
+		case KEY_DOWN: sel = (sel + 1) % 4; continue;
+		case KEY_LEFT: d = -1; break;
+		case KEY_RIGHT: d = 1; break;
+		case KEY_PAGEUP: case KEY_REWIND: d = -4; break;
+		case KEY_PAGEDOWN: case KEY_FASTFORWARD: d = 4; break;
+		case KEY_SPACE: memset(crt_val, 0, sizeof(crt_val)); crt_send(); continue;
+		case KEY_ENTER: case KEY_PLAY:
+			if (crt_save())
+			{
+				message = "Impossibile salvare mediacenter.ini";
+				continue;
+			}
+			return;
+		case KEY_ESC: case KEY_TAB: case KEY_STOP: case KEY_STOPCD:
+			memcpy(crt_val, saved, sizeof(saved));
+			crt_send();
+			return;
+		default: continue;
+		}
+		int v = crt_val[sel] + d;
+		if (v < crt_items[sel].min) v = crt_items[sel].min;
+		if (v > crt_items[sel].max) v = crt_items[sel].max;
+		crt_val[sel] = v;
+		crt_send();
+	}
+}
+
 static int run_browser(void)
 {
 	int sel = 0;
@@ -2432,6 +2599,11 @@ static int run_browser(void)
 		if (code == KEY_TAB || code == KEY_ESC) break;
 		if (code != KEY_ENTER && code != KEY_PLAY && code != KEY_SPACE) continue;
 
+		if (!strcmp(sources[sel].path, "crt:"))
+		{
+			crt_adjust_screen();
+			continue;
+		}
 		if (!sources[sel].path[0])
 		{
 			if (play_disc_in_drive(NULL))
@@ -2685,6 +2857,7 @@ static void load_settings(void)
 int main(int argc, char *argv[])
 {
 	load_settings();
+	crt_load();
 	fb_present_yuv = yuv_draw;
 	signal(SIGINT, on_signal);
 	signal(SIGTERM, on_signal);
@@ -2737,7 +2910,8 @@ int main(int argc, char *argv[])
 			printf("test: ended with %d\n", r);
 			return 0;
 		}
-		int r = play_file(arg, 0);
+		// "browser": the source list and its screens
+		int r = arg && !strcmp(arg, "browser") ? run_browser() : play_file(arg, 0);
 		printf("test: ended with %d\n", r);
 		return 0;
 	}

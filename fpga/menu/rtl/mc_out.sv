@@ -7,6 +7,11 @@
 // interlaced output (480i/576i) gets the frame buffer's own lines in each
 // field. With "wide" a 16:9 picture is letterboxed on the 4:3 screen.
 //
+// CRT Adjust (after rmonic79's MiSTer CRT Adjust): a scaled picture can be
+// made narrower or wider, shorter or taller and moved on the screen to fit a
+// CRT's geometry. Only the picture is resampled; the sync timing never
+// changes, so the CRT cannot lose lock, and the colours are the source's.
+//
 // Formats: 32 bits per pixel, or YUV 4:2:2 (bytes Y0 U Y1 V, frame buffer
 // format bit 5 with 16 bits per pixel) that the player writes for decoded
 // video and that is converted to RGB here.
@@ -40,6 +45,10 @@ module mc_out
 	input       [9:0] hc,
 	input       [9:0] vc,
 	input       [9:0] height,   // active lines of one field
+	input signed [4:0] adj_hsize, // width: 8 pixels per step
+	input signed [5:0] adj_hpos,  // horizontal position: 2 pixels per step
+	input signed [4:0] adj_vsize, // height: 4 lines of the picture per step
+	input signed [4:0] adj_vpos,  // vertical position: 1 line of the field per step
 	output reg [23:0] rgb,
 	output reg        active = 0
 );
@@ -59,6 +68,19 @@ wire [10:0] pic_h  = ilc ? {out_h, 1'b0} : {1'b0, out_h};
 // lines used by the picture: 3/4 of them for a letterboxed 16:9 picture
 wire [10:0] act_h  = wd ? (pic_h - (pic_h >> 2)) : pic_h;
 wire [10:0] act_y0 = wd ? (pic_h >> 3) : 11'd0;
+
+// The picture's rectangle after CRT Adjust: width and left edge in output
+// pixels, height and top in lines of the whole picture (both fields). The top
+// stays even on an interlaced output, so the fields keep their order.
+reg signed [11:0] pic_w = 640, pic_x0 = 0, pic_hh = 0, pic_y0 = 0;
+always @(posedge clk_vid) begin
+	pic_w  <= 12'sd640 + $signed({{4{adj_hsize[4]}}, adj_hsize, 3'b000});
+	pic_x0 <= ((12'sd640 - pic_w) >>> 1) + $signed({{5{adj_hpos[5]}}, adj_hpos, 1'b0});
+	pic_hh <= $signed({1'b0, act_h}) + (ilc ? $signed({{4{adj_vsize[4]}}, adj_vsize, 3'b000})
+	                                        : $signed({{5{adj_vsize[4]}}, adj_vsize, 2'b00}));
+	pic_y0 <= $signed({1'b0, act_y0}) + ((($signed({1'b0, act_h}) - pic_hh) >>> 2) <<< 1) +
+	          (ilc ? $signed({{6{adj_vpos[4]}}, adj_vpos, 1'b0}) : $signed({{7{adj_vpos[4]}}, adj_vpos}));
+end
 
 always @(posedge clk_vid) begin
 	fmt    <= fb_fmt;
@@ -85,8 +107,8 @@ wire       div_go = ce_pix && hc == 0 && vc == out_h;
 wire [27:0] hq, vq;
 wire        hdone, vdone;
 
-mc_div hdiv(.clk(clk_vid), .start(div_go), .num({w, 16'd0}), .den(11'd640), .q(hq), .done(hdone));
-mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(act_h), .q(vq), .done(vdone));
+mc_div hdiv(.clk(clk_vid), .start(div_go), .num({w, 16'd0}), .den(pic_w[10:0]), .q(hq), .done(hdone));
+mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(pic_hh[10:0]), .q(vq), .done(vdone));
 
 // The frame buffer's address is taken once per frame, before its first
 // field: a player that draws into pages and switches between them never shows
@@ -115,6 +137,7 @@ always @(posedge clk_vid) begin
 	reg  [9:0] ny;
 	reg        nf;
 	reg [10:0] py, ay;
+	reg signed [11:0] ays;
 	reg [38:0] sy;
 
 	if(ce_pix && !hc && active && (vc + 1'd1 < out_h || vc == out_h)) begin
@@ -123,13 +146,14 @@ always @(posedge clk_vid) begin
 		ny = (vc == out_h) ? 10'd0 : vc + 1'd1;
 		nf = (vc == out_h) ? ~field : field;
 		if(scale) begin
-			py = pic_line(ny, ilc & nf);
-			ay = py - act_y0;
+			py  = pic_line(ny, ilc & nf);
+			ays = $signed({1'b0, py}) - pic_y0;
+			ay  = ays[10:0];
 			// an interlaced picture is scaled field by field, so each
 			// output field only shows lines of the same field
 			sy = (ilc & fld) ? (ay >> 1) * vstep : ay * vstep;
 			if(ilc & fld) sy[27:16] = {sy[26:16], ay[0]};
-			if(py >= act_y0 && ay < act_h && sy[27:16] < h) begin
+			if(ays >= 0 && ays < pic_hh && sy[27:16] < h) begin
 				req_line <= sy[27:16];
 				req_bank <= ny[0];
 				req_t    <= ~req_t;
@@ -223,20 +247,25 @@ reg        shown, shown2;
 reg        line_on;
 always @(posedge clk_vid) begin
 	reg [10:0] py, ay;
+	reg signed [11:0] ays;
 	reg [38:0] sy;
 
-	py = pic_line(vc, ilc & field);
-	ay = py - act_y0;
-	sy = ay * vstep;
-	line_on <= py >= act_y0 && ay < act_h && sy[27:16] < h;
+	py  = pic_line(vc, ilc & field);
+	ays = $signed({1'b0, py}) - pic_y0;
+	ay  = ays[10:0];
+	sy  = (ilc & fld) ? (ay >> 1) * vstep : ay * vstep;
+	if(ilc & fld) sy[27:16] = {sy[26:16], ay[0]};
+	line_on <= ays >= 0 && ays < pic_hh && sy[27:16] < h;
 end
 
 always @(posedge clk_vid) begin
 	reg [10:0] sx;
 	reg [37:0] px;
+	reg signed [11:0] hx;
 
+	hx = $signed({2'b00, hc}) - pic_x0;
 	if(scale) begin
-		px = hc * hstep;
+		px = hx[10:0] * hstep;
 		sx = px[26:16];
 	end
 	else begin
@@ -245,7 +274,7 @@ always @(posedge clk_vid) begin
 	if(yuv) q <= buffer[{vc[0], 1'b0, sx[10:2]}];
 	else    q <= buffer[{vc[0], sx[10:1]}];
 	hi    <= sx[1:0];
-	shown <= scale ? (active && hc < WIDTH && vc < out_h && line_on)
+	shown <= scale ? (active && hc < WIDTH && hx >= 0 && hx < pic_w && px[27:16] < w && vc < out_h && line_on)
 	               : (active && hc >= left && sx < cols && vc >= top && vc - top < lines);
 end
 

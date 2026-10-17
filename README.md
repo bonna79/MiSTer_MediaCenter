@@ -198,6 +198,20 @@ Nella sezione `[menu]` **non** mettere `vga_scaler=1`, `video_mode`, `direct_vid
 
 Provata da rgm su un televisore Sony Trinitron con cavo SCART RGB: DVD e DivX centrati e interi, interlacciati a 576i; nello stesso momento HDMI a 720p corretto.
 
+### Regola CRT (geometria)
+
+Se il CRT ha la geometria sballata, l'immagine si può stringere, allargare e spostare senza toccare i trimmer del televisore. Apri lo script **mediacenter** e scegli l'ultima voce, **Regola CRT (dimensioni e posizione)**. Compare un'immagine di prova con un bordo rosso: regola **Larghezza**, **Posizione orizzontale**, **Altezza** e **Posizione verticale** finché il bordo tocca i lati dello schermo.
+
+| Tasto | Cosa fa |
+| --- | --- |
+| ▲ ▼ | Sceglie la voce |
+| ◄ ► | Cambia il valore di un passo (L / R di quattro passi) |
+| A | Salva in `mediacenter.ini` ed esce |
+| B | Esce senza salvare |
+| Y | Riporta tutto a zero |
+
+Le regolazioni valgono per il video del lettore sull'uscita a 15 kHz; l'HDMI non cambia. Il core del menu ridisegna l'immagine nel nuovo riquadro senza cambiare il sincronismo, quindi il CRT non perde mai l'aggancio e i colori restano quelli originali. L'idea viene da [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) di rmonic79 (Umberto Parisi, Beceri Videoludici), adattata al modo in cui MMC disegna l'immagine.
+
 ## Prove su un MiSTer vero
 
 Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, uscita HDMI a 1280x720, fino al 16 ottobre 2026; CRT Sony Trinitron via SCART RGB.
@@ -284,6 +298,7 @@ MC_AV_OFFSET=0.05
 | Impostazione | Effetto |
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Sposta l'audio più tardi (valore positivo) o più presto (negativo), in secondi. Serve con i televisori che ritardano l'immagine |
+| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
 
 Le stesse impostazioni si possono dare anche come variabili d'ambiente, come quelle per i test qui sotto.
