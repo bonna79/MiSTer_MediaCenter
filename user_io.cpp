@@ -1637,7 +1637,8 @@ void user_io_init(const char *path, const char *xml)
 			else if (is_menu())
 			{
 				// MiSTer MediaCenter's menu core is in place of the stock one
-				// (loaded at boot): load it once.
+				// (loaded at boot and by the other Mains): load it once per visit, the
+				// file guards against a loop with a core that is not ours.
 				if (!menu_is_mediacenter() && !access(MEDIACENTER_MENU_RBF, R_OK) && access("/tmp/mediacenter_menu", F_OK))
 				{
 					FILE *f = fopen("/tmp/mediacenter_menu", "w");

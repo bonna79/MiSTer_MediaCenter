@@ -445,6 +445,10 @@ int fpga_load_rbf(const char *name, const char *cfg, const char *xml)
 	// MiSTer MediaCenter's menu core: the stock one plus a 15 kHz output that
 	// shows the player's pictures (480i/576i for DVDs) on a CRT.
 	if (!strcasecmp(name, "menu.rbf") && !access(MEDIACENTER_MENU_RBF, R_OK)) strcpy(path, MEDIACENTER_MENU_RBF);
+	// Another core: the Main of that core (the official one, or Physical
+	// Disc's) brings back the stock menu core when it returns to the menu,
+	// so ours must be loaded again then (user_io.cpp loads it once per menu).
+	else if (strcasecmp(name, "menu.rbf")) unlink("/tmp/mediacenter_menu");
 
 	int rbf = open(path, O_RDONLY);
 	if (rbf < 0)
