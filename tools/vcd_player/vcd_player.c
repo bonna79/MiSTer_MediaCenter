@@ -782,12 +782,15 @@ static const char *exit_question = "Uscire dal Video CD?";
 
 // Lines of the controls, from the bottom: margin, legend row(s), progress
 // bar, status line. Positions are in lines of the frame buffer.
-static void osd_positions(int *legend_y, int *bar_y, int *status_y)
+// With two legend rows (large glyphs) the audio and subtitle names get a
+// line of their own above the status line, so they are never cut short.
+static void osd_positions(int *legend_y, int *bar_y, int *status_y, int *info_y)
 {
 	*legend_y = fb_h - SY(10) - LEGEND_H;
 	int top = *legend_y - (legend_rows > 1 ? LEGEND_H + SY(4) : 0);
 	*bar_y = top - SY(10);
 	*status_y = *bar_y - SY(6) - SY(8);
+	*info_y = legend_rows > 1 ? *status_y - SY(12) : *status_y;
 }
 
 static void osd_layout(void)
@@ -803,9 +806,9 @@ static void osd_layout(void)
 		sy2 = fb_h >= 540 ? 5 : 4;
 		legend_rows = 2;
 	}
-	int legend_y, bar_y, status_y;
-	osd_positions(&legend_y, &bar_y, &status_y);
-	ovl_y = status_y - SY(4);
+	int legend_y, bar_y, status_y, info_y;
+	osd_positions(&legend_y, &bar_y, &status_y, &info_y);
+	ovl_y = info_y - SY(4);
 	if (ovl_y < 0) ovl_y = 0;
 	ovl_h = fb_h - ovl_y;
 	ovl_a = (uint8_t *)calloc((size_t)fb_w * ovl_h, 1);
@@ -836,11 +839,12 @@ static void ovl_smooth(void)
 
 static void osd_draw(const osd_info_t *info)
 {
-	int legend_y, bar_y, status_y;
-	osd_positions(&legend_y, &bar_y, &status_y);
+	int legend_y, bar_y, status_y, info_y;
+	osd_positions(&legend_y, &bar_y, &status_y, &info_y);
 	legend_y -= ovl_y;
 	bar_y -= ovl_y;
 	status_y -= ovl_y;
+	info_y -= ovl_y;
 	int mx = SX(24);
 	char buf[64], t1[16], t2[16];
 
@@ -879,12 +883,13 @@ static void osd_draw(const osd_info_t *info)
 	if (info->state != ST_STOP)
 	{
 		const char *al = info->audio_label ? info->audio_label : audio[info->audio_mode % 3];
-		// with large glyphs a long track name may not fit before the time
-		char cut[64];
+		char cut[96];
 		snprintf(cut, sizeof(cut), "%s", al);
-		int room = (time_x - SX(16) - (x + SX(16))) / SX(GLYPH_W);
+		int lx = legend_rows > 1 ? mx : x + SX(16);
+		int ly = legend_rows > 1 ? info_y : status_y;
+		int room = ((legend_rows > 1 ? fb_w - mx : time_x - SX(16)) - lx) / SX(GLYPH_W);
 		if (room < (int)strlen(cut) && room >= 0) cut[room] = 0;
-		if (room > 0) ovl_text(x + SX(16), status_y, cut);
+		if (room > 0) ovl_text(lx, ly, cut);
 	}
 
 	// Progress bar.

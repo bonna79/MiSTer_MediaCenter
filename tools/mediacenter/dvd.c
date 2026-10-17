@@ -787,6 +787,12 @@ static void dvd_overlay_locked(void)
 			}
 		}
 		int out_rows = r->h;
+		// while the controls are on screen, a subtitle under them is moved
+		// up above them, so the language just chosen can be seen at once
+		int dy = 0;
+		if (ovl_shown && ovl_a && !dvd.hl_on && src_h == fb_h && r->y + r->h + 1 > ovl_y && r->h < ovl_y)
+			dy = ovl_y - (r->y + r->h + 1);
+		if (dy < -r->y) dy = -r->y;
 		if (overlay_soften)
 		{
 			// from the bottom up: line y becomes the mean of lines y - 1 and y
@@ -800,7 +806,7 @@ static void dvd_overlay_locked(void)
 		}
 		for (int y = 0; y < out_rows; y++)
 		{
-			int sy = r->y + y;
+			int sy = r->y + y + dy;
 			if (sy < 0 || sy >= src_h) continue;
 			uint8_t *dst = frame_rgb + (size_t)sy * src_w * 4;
 			const uint16_t *o = buf + (size_t)y * r->w * 4;

@@ -119,12 +119,17 @@ mc_div hdiv(.clk(clk_vid), .start(div_go), .num({w, 16'd0}), .den(pic_w[10:0]), 
 mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(pic_hh[10:0]), .q(vq), .done(vdone));
 
 // The frame buffer's address (the page the player shows) is taken once per
-// field, or on an interlaced output once per frame, before its first field:
-// each picture is then shown as a whole frame, its first field first. Taken
-// at any field, a picture that came on the second one would be shown with its
-// fields out of order: the picture jumps up and down by a line.
+// field. When the picture's own two fields are kept ("fields", an interlaced
+// DVD sent field by field) it is taken once per frame instead, before its
+// first field: each picture is then shown as a whole frame, its first field
+// first. Taken at any field, such a picture that came on the second one would
+// be shown with its fields out of order: the picture jumps up and down by a
+// line. A picture whose fields the player blended (the default) is a whole
+// picture in each field and is taken at every field, like any progressive
+// video: no picture waits for the next frame, so the motion stays as smooth
+// as on HDMI.
 //
-// The player switches pages at its own pace (25 pictures a second for a PAL
+// With the fields kept, the player switches pages at its own pace (25 pictures a second for a PAL
 // DVD, timed by the sound and the HDMI refresh), which drifts slowly against
 // the CRT's 25 frames. When the switches come close to the moment a frame
 // takes its page, their small irregularities make some pictures last two
@@ -142,7 +147,7 @@ reg        pend_v = 0, dly = 0;
 reg  [1:0] danger = 0;
 reg  [9:0] fpos = 0, flen = 0, pcnt = 0;
 
-wire       frame_go = div_go && ilc && field;  // the page is taken here
+wire       frame_go = div_go && ilc && fld && field;  // the page is taken here (fields kept)
 wire       line_go  = ce_pix && hc == 0;
 wire [9:0] half     = flen >> 1;
 
@@ -196,7 +201,7 @@ always @(posedge clk_vid) begin
 		ready  <= fb_base;
 		pend_v <= 0;
 	end
-	else if(div_go && !ilc) base <= seen;
+	else if(div_go && !(ilc && fld)) base <= seen;
 	else if(frame_go) base <= (pend_v && !pcnt) ? pend : ready;
 end
 
