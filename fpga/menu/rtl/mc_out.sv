@@ -35,6 +35,7 @@ module mc_out
 	input             scaled,   // fill the output instead of 1:1
 	input             wide,     // 16:9 picture: letterbox
 	input             ilace,    // interlaced output: two fields per frame
+	input             fields,   // the picture is interlaced: keep its fields apart
 	input             field,    // field being shown (1: odd lines)
 	input       [9:0] hc,
 	input       [9:0] vc,
@@ -50,7 +51,7 @@ reg  [5:0] fmt;
 reg [11:0] w, h;
 reg  [9:0] out_h, cols, lines, left, top;
 reg  [1:0] show_s = 0;
-reg        scale, ilc, wd;
+reg        scale, ilc, wd, fld;
 wire       yuv = fmt[5] && fmt[2:0] == 3'b100;
 
 // lines of the whole output picture (both fields when interlaced)
@@ -67,6 +68,7 @@ always @(posedge clk_vid) begin
 	scale  <= scaled;
 	ilc    <= ilace;
 	wd     <= wide;
+	fld    <= fields;
 	cols   <= w[9:0];
 	lines  <= h[9:0];
 	left   <= (WIDTH[9:0] - cols) >> 1;
@@ -86,14 +88,18 @@ wire        hdone, vdone;
 mc_div hdiv(.clk(clk_vid), .start(div_go), .num({w, 16'd0}), .den(11'd640), .q(hq), .done(hdone));
 mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(act_h), .q(vq), .done(vdone));
 
-// The frame buffer's address is taken once per field: a player that draws
-// into pages and switches between them never shows two pictures at once.
+// The frame buffer's address is taken once per frame, before its first
+// field: a player that draws into pages and switches between them never shows
+// two pictures at once, and on an interlaced output each picture is shown as a
+// whole frame, its first field first. Taken at any field, a picture that came
+// on the second one would be shown with its fields out of order: the picture
+// jumps up and down by a line.
 reg [31:0] base;
 
 always @(posedge clk_vid) begin
 	if(hdone) hstep <= hq;
 	if(vdone) vstep <= vq;
-	if(div_go || !active) base <= fb_base;
+	if((div_go && (!ilc || field)) || !active) base <= fb_base;
 end
 
 // The line about to be shown, as a line of the whole picture.
@@ -119,7 +125,10 @@ always @(posedge clk_vid) begin
 		if(scale) begin
 			py = pic_line(ny, ilc & nf);
 			ay = py - act_y0;
-			sy = ay * vstep;
+			// an interlaced picture is scaled field by field, so each
+			// output field only shows lines of the same field
+			sy = (ilc & fld) ? (ay >> 1) * vstep : ay * vstep;
+			if(ilc & fld) sy[27:16] = {sy[26:16], ay[0]};
 			if(py >= act_y0 && ay < act_h && sy[27:16] < h) begin
 				req_line <= sy[27:16];
 				req_bank <= ny[0];

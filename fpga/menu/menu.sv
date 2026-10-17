@@ -355,6 +355,9 @@ wire FB  = status[5];
 wire [2:0] led = status[8:6];
 // MiSTer MediaCenter: the picture is 16:9 (letterbox it on the 4:3 screen)
 wire WIDE = status[9];
+// MiSTer MediaCenter: the picture is interlaced (DVD video): its two fields
+// go to the two fields of the 15 kHz output
+wire FIELDS = status[10];
 
 // Video standard and scan, chosen at the start of each frame. A frame buffer
 // larger than the output (MiSTer MediaCenter playing a video) is scaled to it:
@@ -493,6 +496,7 @@ mc_out mc_out
 	.scaled(SCALED),
 	.wide(WIDE),
 	.ilace(ILACE),
+	.fields(FIELDS),
 	.field(field),
 	.hc(hc),
 	.vc(vc),

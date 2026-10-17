@@ -872,6 +872,12 @@ static void fb_clear(void)
 	else if (fb_mem) fb_blank(fb_mem, fb_len);
 }
 
+// The picture shown is interlaced and drawn line for line: its two fields
+// are left as they are. The Main is told with the page ("page <n> 1"): the
+// menu core then sends each field to its own field of the 576i/480i CRT
+// output, as a DVD player does, and the HDMI scaler blends them.
+static int pic_fields = 0;
+
 // Draws the picture into the next page and shows it.
 static void fb_present_paged(void)
 {
@@ -886,7 +892,7 @@ static void fb_present_paged(void)
 	fb_present();
 	if (fb_cmd_fd < 0) fb_cmd_fd = open("/dev/MiSTer_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
 	char cmd[32];
-	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 page %d\n", fb_page);
+	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 page %d %d\n", fb_page, pic_fields);
 	if (fb_cmd_fd < 0 || write(fb_cmd_fd, cmd, n) != n)
 	{
 		// Main does not take it: back to a single page
@@ -1126,6 +1132,7 @@ static void draw_video_frame(AVFrame *f)
 		}
 		if (sw >= 320 && fw > sw) fw = sw;
 		if (sh >= 240 && fh > sh) fh = sh;
+		pic_fields = (f->flags & AV_FRAME_FLAG_INTERLACED) && fh == h && !getenv("MC_BLEND");
 		// A picture drawn at its own size goes to the framebuffer as YUV and
 		// the FPGA converts the colours: the ARM only copies it. Decided on
 		// the first picture of a file (interlaced video stays in RGB, for
@@ -1152,6 +1159,7 @@ static void draw_video_frame(AVFrame *f)
 			return;
 		}
 	}
+	else pic_fields = 0;
 	if (!fb_mem) return;
 	fb_layout(f->width, h);
 	if (!frame_rgb || !line_buf || !x_map) return;
@@ -1185,7 +1193,7 @@ static void draw_video_frame(AVFrame *f)
 		sws_scale(mc.sws, (const uint8_t *const *)f->data, linesize, 0, h, dst, dst_stride);
 		for (int y = 0; y < h; y++) memcpy(frame_rgb + (size_t)y * stride, tmp + (size_t)y * tstride, stride);
 	}
-	if (f->flags & AV_FRAME_FLAG_INTERLACED) deinterlace_rgb();
+	if ((f->flags & AV_FRAME_FLAG_INTERLACED) && !pic_fields) deinterlace_rgb();
 	if (frame_overlay) frame_overlay();
 	have_frame = 1;
 	double t_conv = now_seconds();

@@ -84,6 +84,11 @@ static struct
 	uint32_t len;
 } fb_paged;
 
+// The paged picture is interlaced video ("fb_cmd3 page <n> 1"): the menu
+// core keeps its two fields apart on the 15 kHz output, and the HDMI scaler
+// gets a vertical filter that blends them, instead of showing combs.
+static int fb_fields = 0;
+
 static int fb_enabled = 0;
 static int fb_width = 0;
 static int fb_height = 0;
@@ -592,6 +597,29 @@ static void send_video_filters(const VideoFilter *horiz, const VideoFilter *vert
 	DisableIO();
 }
 
+// Vertical filter for interlaced pictures on HDMI: the lines are smoothed
+// 1-2-1, which removes the combs of the two fields, then interpolated.
+// Horizontally the picture stays as without a filter (nearest pixel).
+static void fb_fields_filters(VideoFilter *horiz, VideoFilter *vert)
+{
+	memset(horiz, 0, sizeof(*horiz));
+	memset(vert, 0, sizeof(*vert));
+	for (int i = 0; i < N_PHASES; i++)
+	{
+		double f = (double)i / N_PHASES;
+		short t0 = (short)(64 * (1 - f) + 0.5);
+		short t1 = (short)(128 * (1 - f) + 64 * f + 0.5);
+		short t2 = (short)(64 * (1 - f) + 128 * f + 0.5);
+		vert->phases[i].t[0] = t0;
+		vert->phases[i].t[1] = t1;
+		vert->phases[i].t[2] = t2;
+		vert->phases[i].t[3] = 256 - t0 - t1 - t2;
+		horiz->phases[i].t[(i < N_PHASES / 2) ? 1 : 2] = 256;
+	}
+	memset(horiz->digest.md5, 0xA5, sizeof(horiz->digest.md5));
+	memset(vert->digest.md5, 0x5A, sizeof(vert->digest.md5));
+}
+
 static void set_vfilter(int force)
 {
 	PROFILE_FUNCTION();
@@ -611,6 +639,14 @@ static void set_vfilter(int force)
 
 	spi8(scaler_flt[0].mode);
 	DisableIO();
+
+	if (fb_fields && fb_paged.on)
+	{
+		static VideoFilter horiz, vert;
+		fb_fields_filters(&horiz, &vert);
+		send_video_filters(&horiz, &vert, flt_flags & 0xF);
+		return;
+	}
 
 	int vert_flt;
 	if (current_video_info.interlaced) vert_flt = scaler_flt[VFILTER_ILACE].mode ? VFILTER_ILACE : VFILTER_HORZ;
@@ -4301,6 +4337,17 @@ int video_chvt(int num)
 	return cur_vt ? cur_vt : 1;
 }
 
+static void fb_set_fields(int on)
+{
+	if (on == fb_fields) return;
+	fb_fields = on;
+	if (is_menu()) user_io_status_set("[10]", on);
+	// the frame buffer's filter flag turns the scaler's filters on
+	if (on) fb_paged.fmt |= 0x4000;
+	else fb_paged.fmt &= ~0x4000;
+	set_vfilter(1);
+}
+
 static void fb_set_page(int n)
 {
 	if (!fb_paged.on || n < 0 || n >= fb_paged.pages) return;
@@ -4328,7 +4375,10 @@ void video_cmd(char *cmd)
 		{
 			const char *last = cmd, *p;
 			while ((p = strstr(last + 1, "page "))) last = p;
-			fb_set_page(atoi(strstr(last, "page ") + 5));
+			int page = 0, fields = 0;
+			int n = sscanf(last, "page %d %d", &page, &fields);
+			if (n == 2) fb_set_fields(fields == 1);
+			fb_set_page(page);
 			return;
 		}
 
@@ -4369,6 +4419,7 @@ void video_cmd(char *cmd)
 		// fb_cmd3 default: back to the normal frame buffer.
 		if (!strcmp(cmd, "fb_cmd3 default"))
 		{
+			fb_set_fields(0);
 			fb_paged.on = 0;
 			if (is_menu()) user_io_status_set("[9]", 0);
 			video_fb_enable(1, 0);
@@ -4504,6 +4555,7 @@ void video_cmd(char *cmd)
 			fb_paged.on = paged && len * FB_PAGES <= FB_SIZE * 4 - 4096;
 			fb_paged.pages = fb_paged.on ? FB_PAGES : 1;
 			fb_paged.fmt = FB_EN | sc_fmt;
+			fb_set_fields(0);
 			fb_paged.width = width;
 			fb_paged.height = height;
 			fb_paged.left = xoff + hmin;
