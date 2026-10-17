@@ -872,8 +872,9 @@ static void fb_clear(void)
 	else if (fb_mem) fb_blank(fb_mem, fb_len);
 }
 
-// The picture shown is interlaced and drawn line for line: its two fields
-// are left as they are. The Main is told with the page ("page <n> 1"): the
+// The picture shown is interlaced and drawn line for line, and MC_FIELDS=1
+// asks to keep its two fields as they are (otherwise they are blended, which
+// on a CRT avoids the flicker of fine details). The Main is told with the page ("page <n> 1"): the
 // menu core then sends each field to its own field of the 576i/480i CRT
 // output, as a DVD player does, and the HDMI scaler blends them.
 static int pic_fields = 0;
@@ -887,12 +888,25 @@ static void fb_present_paged(void)
 		fb_present();
 		return;
 	}
-	fb_page = (fb_page + 1) % fb_pages;
+	// The CRT output keeps showing a page for up to a frame and a half after
+	// the next one is switched to (interlaced: whole frames, and half a frame
+	// of wait to stay clear of the frame start): a page is drawn again only
+	// after that, or the CRT shows half of the new picture (a horizontal tear)
+	// when pictures come close together.
+	static double slot_free[8], last_flip, interval = 0.04;
+	int next = (fb_page + 1) % fb_pages;
+	double wait = slot_free[next] - now_seconds();
+	if (wait > 0 && wait < 0.1) usleep((useconds_t)(wait * 1e6));
+	fb_page = next;
 	fb_mem = fb_map + (size_t)fb_page * fb_len;
 	fb_present();
 	if (fb_cmd_fd < 0) fb_cmd_fd = open("/dev/MiSTer_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
 	char cmd[32];
 	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 page %d %d\n", fb_page, pic_fields);
+	double t = now_seconds();
+	if (t - last_flip < 0.2) interval = 0.9 * interval + 0.1 * (t - last_flip);
+	last_flip = t;
+	slot_free[(fb_page + fb_pages - 1) % fb_pages] = t + (interval >= 0.03 ? 0.065 : 0.03);
 	if (fb_cmd_fd < 0 || write(fb_cmd_fd, cmd, n) != n)
 	{
 		// Main does not take it: back to a single page
@@ -1132,7 +1146,7 @@ static void draw_video_frame(AVFrame *f)
 		}
 		if (sw >= 320 && fw > sw) fw = sw;
 		if (sh >= 240 && fh > sh) fh = sh;
-		pic_fields = (f->flags & AV_FRAME_FLAG_INTERLACED) && fh == h && !getenv("MC_BLEND");
+		pic_fields = (f->flags & AV_FRAME_FLAG_INTERLACED) && fh == h && getenv("MC_FIELDS") && atoi(getenv("MC_FIELDS"));
 		// A picture drawn at its own size goes to the framebuffer as YUV and
 		// the FPGA converts the colours: the ARM only copies it. Decided on
 		// the first picture of a file (interlaced video stays in RGB, for

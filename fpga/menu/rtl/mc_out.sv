@@ -123,8 +123,13 @@ mc_div vdiv(.clk(clk_vid), .start(div_go), .num({h, 16'd0}), .den(pic_hh[10:0]),
 // frames and the next one none: the motion stutters. So the new page waits
 // half a frame before it can be taken whenever the switches keep arriving
 // near that moment: they then land in the middle of the frame, away from it.
+//
+// The Main writes the address in two halves: a page counts only once the
+// address has stayed the same for a while, or the moment between the two
+// writes would count as a page of its own, pointing to the wrong memory.
 reg [31:0] base;
 reg [31:0] fb_s1, fb_s2, seen, pend, ready;
+reg [11:0] stable = 0;
 reg        pend_v = 0, dly = 0;
 reg  [1:0] danger = 0;
 reg  [9:0] fpos = 0, flen = 0, pcnt = 0;
@@ -142,6 +147,8 @@ always @(posedge clk_vid) begin
 
 	fb_s1 <= fb_base;
 	fb_s2 <= fb_s1;
+	if(fb_s1 != fb_s2) stable <= 0;
+	else if(~&stable) stable <= stable + 1'd1;
 
 	if(frame_go) begin
 		flen <= fpos;
@@ -149,7 +156,7 @@ always @(posedge clk_vid) begin
 	end
 	else if(line_go && fpos != 10'h3FF) fpos <= fpos + 1'd1;
 
-	if(fb_s1 == fb_s2 && fb_s2 != seen) begin
+	if(&stable && fb_s2 != seen) begin
 		// a new page: where it came in the frame, after the wait
 		seen <= fb_s2;
 		q = fpos + (dly ? half : 10'd0);
@@ -181,7 +188,7 @@ always @(posedge clk_vid) begin
 		ready  <= fb_base;
 		pend_v <= 0;
 	end
-	else if(div_go && !ilc) base <= fb_base;
+	else if(div_go && !ilc) base <= seen;
 	else if(frame_go) base <= (pend_v && !pcnt) ? pend : ready;
 end
 

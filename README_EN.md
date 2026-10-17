@@ -301,6 +301,7 @@ MC_AV_OFFSET=0.05
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Moves the sound later (positive value) or earlier (negative), in seconds. Useful with TVs that delay the picture |
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
+| `MC_FIELDS=1` | Interlaced DVDs: sends the two original fields to the CRT instead of blending them. More detail in motion, but fine details flicker a little |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
 
 The same settings can also be given as environment variables, like the test variables below.

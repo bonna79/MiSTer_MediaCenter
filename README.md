@@ -299,6 +299,7 @@ MC_AV_OFFSET=0.05
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Sposta l'audio più tardi (valore positivo) o più presto (negativo), in secondi. Serve con i televisori che ritardano l'immagine |
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
+| `MC_FIELDS=1` | DVD interlacciati: manda al CRT i due semiquadri originali invece di fonderli. Più dettaglio nel movimento, ma i dettagli fini tremolano un po' |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
 
 Le stesse impostazioni si possono dare anche come variabili d'ambiente, come quelle per i test qui sotto.
