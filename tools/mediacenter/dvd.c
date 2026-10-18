@@ -106,6 +106,26 @@ static pthread_mutex_t dvd_lock = PTHREAD_MUTEX_INITIALIZER;
 #define DVD_LOCK() pthread_mutex_lock(&dvd_lock)
 #define DVD_UNLOCK() pthread_mutex_unlock(&dvd_lock)
 
+// Diagnosis written to the log (MC_DIAG=0 turns it off). Nothing here
+// changes playback: in the disc menus it tells when each subpicture (the
+// menu text and buttons) arrives, when it is due, shown and dropped; during
+// playback every second with a stutter gets a line with its causes.
+static int diag_on = -1;
+static int diag(void)
+{
+	if (diag_on < 0)
+	{
+		const char *e = getenv("MC_DIAG");
+		diag_on = !(e && !strcmp(e, "0"));
+	}
+	return diag_on;
+}
+static int diag_menu(void)
+{
+	return diag() && dvd.nav && !dvdnav_is_domain_vts(dvd.nav);
+}
+static volatile double diag_read_max, diag_dec_max; // slowest disc read / picture decode, seconds
+
 static void ycrcb_to_rgb(uint32_t v, int *r, int *g, int *b)
 {
 	int y = (v >> 16) & 0xff, cr = (v >> 8) & 0xff, cb = v & 0xff;
@@ -166,8 +186,10 @@ static void dvd_open_spu_decoder(void)
 }
 
 // Called with dvd_lock held.
-static void dvd_clear_subs(void)
+static void dvd_clear_subs(const char *why)
 {
+	if (dvd.num_subs && diag_menu())
+		printf("mediacenter: diag menu %.2f s: %d sottoimmagini cancellate (%s)\n", mc.clock, dvd.num_subs, why);
 	for (int i = 0; i < dvd.num_subs; i++) avsubtitle_free(&dvd.subs[i].sub);
 	dvd.num_subs = 0;
 	dvd.overlay_dirty = 1;
@@ -315,6 +337,9 @@ static void dvd_spu_packet(const uint8_t *data, int size, int64_t pts)
 	dvd.overlay_dirty = 1;
 	s->end = (sub.end_display_time > sub.start_display_time && sub.end_display_time < 0x7fffffff)
 		? base + sub.end_display_time / 1000.0 : INFINITY;
+	if (diag_menu())
+		printf("mediacenter: diag menu %.2f s: sottoimmagine arrivata (flusso %d), appare a %.2f, sparisce a %.2f, %u rettangoli, ultima immagine letta %.2f\n",
+			mc.clock, dvd.spu_phys, s->start, s->end, s->sub.num_rects, mc.last_vpts);
 	DVD_UNLOCK();
 }
 
@@ -330,7 +355,14 @@ static void dvd_parse(AVCodecParserContext *par, AVCodecContext *ctx, const uint
 		if (out_size)
 		{
 			if (kind == 2) dvd_spu_packet(out, out_size, par->pts);
-			else dvd_send(ctx, out, out_size, par->pts, kind == 0);
+			else if (kind == 0)
+			{
+				double t0 = now_seconds();
+				dvd_send(ctx, out, out_size, par->pts, 1);
+				double d = now_seconds() - t0;
+				if (d > diag_dec_max) diag_dec_max = d;
+			}
+			else dvd_send(ctx, out, out_size, par->pts, 0);
 		}
 		if (!data) break;
 		data += used;
@@ -367,7 +399,7 @@ static void dvd_flush(void)
 	mc.pend_len = 0;
 	mc.audio_end = mc.clock;
 	mc.last_vpts = NAN;
-	dvd_clear_subs();
+	dvd_clear_subs("salto");
 	DVD_UNLOCK();
 	audio_flush();
 }
@@ -446,7 +478,7 @@ static void dvd_update_spu(void)
 		if (phys < 0 && dvd.vm_spu_phys >= 0) { phys = dvd.vm_spu_phys; forced = 1; }
 	}
 	phys = phys < 0 ? -1 : (phys & 0x1f);
-	if (phys != dvd.spu_phys) dvd_clear_subs();
+	if (phys != dvd.spu_phys) dvd_clear_subs("altro flusso");
 	dvd.spu_phys = phys;
 	dvd.spu_forced_only = forced;
 	dvd.overlay_dirty = 1;
@@ -573,7 +605,11 @@ static int dvd_step(void)
 {
 	int event = 0, len = 0;
 	uint8_t *buf = dvd.block;
-	if (dvdnav_get_next_block(dvd.nav, buf, &event, &len) != DVDNAV_STATUS_OK)
+	double read_t0 = now_seconds();
+	dvdnav_status_t read_ok = dvdnav_get_next_block(dvd.nav, buf, &event, &len);
+	double read_d = now_seconds() - read_t0;
+	if (read_d > diag_read_max) diag_read_max = read_d;
+	if (read_ok != DVDNAV_STATUS_OK)
 	{
 		fprintf(stderr, "mediacenter: DVD read error: %s\n", dvdnav_err_to_string(dvd.nav));
 		dvd.stopped = 1;
@@ -598,6 +634,10 @@ static int dvd_step(void)
 		DVD_LOCK();
 		int64_t now = (int64_t)(mc.clock * 90000);
 		DVD_UNLOCK();
+		if (diag_menu() && (!dvd.timeline_set || dvd.hop))
+			printf("mediacenter: diag menu %.2f s: salto, il video riparte da %.2f\n", now / 90000.0, (now + 9000) / 90000.0);
+		else if (diag_menu() && llabs(s + dvd.offset - dvd.vobu_end) > 3000)
+			printf("mediacenter: diag menu %.2f s: cella con tempi propri, scarto %.2f s\n", now / 90000.0, (s + dvd.offset - dvd.vobu_end) / 90000.0);
 		if (!dvd.timeline_set || dvd.hop)
 		{
 			// a jump: what follows plays from now
@@ -622,6 +662,7 @@ static int dvd_step(void)
 		dvdnav_still_event_t *ev = (dvdnav_still_event_t *)buf;
 		if (!dvd.still)
 		{
+			if (diag_menu()) printf("mediacenter: diag menu %.2f s: immagine ferma %d s\n", mc.clock, ev->length);
 			dvd_drain_video();
 			DVD_LOCK();
 			dvd.still = ev->length ? ev->length : 1;
@@ -632,6 +673,7 @@ static int dvd_step(void)
 	}
 
 	case DVDNAV_WAIT:
+		if (diag_menu() && !dvd.wait) printf("mediacenter: diag menu %.2f s: attesa fine cella\n", mc.clock);
 		DVD_LOCK();
 		dvd.wait = 1;
 		DVD_UNLOCK();
@@ -683,6 +725,12 @@ static int dvd_step(void)
 	}
 
 	case DVDNAV_CELL_CHANGE:
+		if (diag_menu())
+		{
+			int32_t tt = 0, pg = 0;
+			dvdnav_current_title_info(dvd.nav, &tt, &pg);
+			printf("mediacenter: diag menu %.2f s: nuova cella (titolo %d, parte %d)\n", mc.clock, tt, pg);
+		}
 		dvd_title_info();
 		DVD_LOCK();
 		dvd_update_spu();
@@ -740,6 +788,8 @@ static void dvd_expire_subs(void)
 		if (dvd.subs[i].start <= mc.clock) keep = i;
 	if (!dvd.still && keep)
 	{
+		if (diag_menu())
+			printf("mediacenter: diag menu %.2f s: %d sottoimmagini sostituite da una nuova\n", mc.clock, keep);
 		for (int i = 0; i < keep; i++) avsubtitle_free(&dvd.subs[i].sub);
 		memmove(dvd.subs, dvd.subs + keep, sizeof(dvd.subs[0]) * (dvd.num_subs - keep));
 		dvd.num_subs -= keep;
@@ -926,7 +976,7 @@ static void dvd_close(void)
 {
 	dvd_stop_thread();
 	DVD_LOCK();
-	dvd_clear_subs();
+	dvd_clear_subs("chiusura");
 	DVD_UNLOCK();
 	av_frame_free(&dvd.last);
 	if (dvd.vpar) av_parser_close(dvd.vpar);
@@ -1111,6 +1161,11 @@ static int dvd_play(const char *device)
 
 	int result = END_DONE;
 	double last = now_seconds(), osd_built = 0, title_time = 0;
+	// diagnosis: one line for each second with a stutter
+	double dg_t0 = last, dg_start = last, dg_gap = 0, dg_draw = 0, dg_shown_at = NAN;
+	double dg_wait0 = av_waited, dg_late0 = audio_late_drop, dg_sub = NAN;
+	int dg_drop0 = frames_dropped, dg_empty = 0, dg_menu = 0;
+	if (diag()) printf("mediacenter: diag attiva (MC_DIAG=0 la spegne)\n");
 	while (!quit_requested)
 	{
 		double t = now_seconds();
@@ -1301,6 +1356,18 @@ static int dvd_play(const char *device)
 			}
 			show = due_frame();
 			dvd_expire_subs();
+			if (diag_menu())
+			{
+				const dvd_sub_t *cs = dvd_current_sub();
+				double st = cs ? cs->start : NAN;
+				if (!(st == dg_sub || (isnan(st) && isnan(dg_sub))))
+				{
+					if (cs) printf("mediacenter: diag menu %.2f s: sottoimmagine sullo schermo (doveva apparire a %.2f)\n", mc.clock, st);
+					else printf("mediacenter: diag menu %.2f s: nessuna sottoimmagine sullo schermo (%d in attesa)\n", mc.clock, dvd.num_subs);
+					dg_sub = st;
+				}
+			}
+			if (!mc.vq_count && !dvd.still && !dvd.wait) dg_empty++;
 
 			int drained = !mc.vq_count && mc.pend_len == 0 && mc.audio_end <= mc.clock;
 			if (dvd.wait && drained)
@@ -1414,8 +1481,37 @@ static int dvd_play(const char *device)
 			p.dirty = 1;
 		}
 
-		if (show) dvd_show(show);
+		if (show)
+		{
+			double d0 = now_seconds();
+			if (p.state == ST_PLAY && !isnan(dg_shown_at) && d0 - dg_shown_at > dg_gap) dg_gap = d0 - dg_shown_at;
+			dg_shown_at = p.state == ST_PLAY ? d0 : NAN;
+			dvd_show(show);
+			double dd = now_seconds() - d0;
+			if (dd > dg_draw) dg_draw = dd;
+		}
 		else if (dvd.last && dvd.overlay_dirty) dvd_show(dvd.last);
+		if (p.state != ST_PLAY || dvd.still) dg_shown_at = NAN;
+		if (menu) dg_menu = 1;
+		if (diag() && t - dg_start >= 1.0)
+		{
+			int drops = frames_dropped - dg_drop0;
+			double waited = av_waited - dg_wait0, late = audio_late_drop - dg_late0;
+			char pos[16];
+			format_time(title_time, pos, sizeof(pos));
+			if (drops || dg_gap > 0.1 || waited > 0.05 || late > 0.05)
+				printf("mediacenter: diag %.1f s (%s %s): scartate %d, pausa max %.0f ms, immagini attese per l'audio %.2f s, audio buttato %.2f s, "
+					"lettura disco max %.0f ms, decodifica max %.0f ms, disegno max %.0f ms, coda vuota %d cicli, in coda %d\n",
+					t - dg_t0, dg_menu ? "menu" : "film", pos, drops, dg_gap * 1000, waited, late,
+					diag_read_max * 1000, diag_dec_max * 1000, dg_draw * 1000, dg_empty, mc.vq_count);
+			dg_start = t;
+			dg_drop0 = frames_dropped;
+			dg_wait0 = av_waited;
+			dg_late0 = audio_late_drop;
+			dg_gap = dg_draw = 0;
+			dg_empty = dg_menu = 0;
+			diag_read_max = diag_dec_max = 0;
+		}
 		else if (p.dirty) fb_present();
 		p.dirty = 0;
 
