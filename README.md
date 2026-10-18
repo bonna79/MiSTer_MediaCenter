@@ -216,12 +216,14 @@ Nella stessa schermata ci sono due voci per l'uscita a 15 kHz, gestite dal core 
 
 | Voce | Valori |
 | --- | --- |
-| **Modo uscita 15 kHz** | **Auto** (576i per i DVD PAL, 480i per gli NTSC; elenchi in 480i o 576i secondo `menu_pal`), oppure fisso **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
-| **Filtro anti-sfarfallio** | **Auto** (acceso negli elenchi e nelle schermate del lettore, spento sul video), **Spento**, **Acceso** |
+| **Modo 15 kHz** | **Auto** (576i per i DVD PAL, 480i per gli NTSC; elenchi in 480i o 576i secondo `menu_pal`), oppure fisso **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
+| **Filtro tremolio** | **Auto** (acceso negli elenchi interlacciati, spento sul video e a 288p/240p), **Spento**, **Acceso** |
 
 Il filtro fonde ogni riga con quella sotto: le scritte bianche sottili non sfarfallano più sull'uscita interlacciata. Sul video resta spento in Auto perché i comandi e i sottotitoli sono già ammorbiditi dal lettore, e il film resta nitido.
 
-Sotto le voci compare **Uscita misurata**: la risoluzione che il Main misura davvero sull'uscita del core (per esempio `640x576i interlacciato, 15.63 kHz, 50.00 Hz`). La stessa riga, con il modo atteso, finisce anche in `/tmp/mediacenter.log`.
+Sotto le voci compare **Misurata**: la risoluzione che il Main misura davvero sull'uscita del core (per esempio `640x576i 15.63 kHz 50.0 Hz`). La stessa riga, con il modo atteso, finisce anche in `/tmp/mediacenter.log`.
+
+Gli elenchi e la schermata Regola CRT usano un'immagine larga 640 punti con le righe del modo scelto: 480 in Auto (576 con `menu_pal=1`), oppure 576, 288, 480 o 240. Il CRT la mostra punto per punto e le scritte restano intere; in HDMI viene ingrandita. Con `MC_MENU_HD=1` in `mediacenter.ini` gli elenchi tornano a 1280x720 come nella versione 2.1.
 
 ## Prove su un MiSTer vero
 

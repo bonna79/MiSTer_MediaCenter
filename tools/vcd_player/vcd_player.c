@@ -38,6 +38,8 @@
 #include <scsi/sg.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <linux/kd.h>
+#include <termios.h>
 #include <ucontext.h>
 
 #define PL_MPEG_IMPLEMENTATION
@@ -50,6 +52,8 @@
 #define MAX_TRACKS 99
 
 static volatile sig_atomic_t quit_requested = 0;
+
+static int console_fd = -1; // see console_take
 
 // Last step reached, reported if the player crashes (see on_crash).
 static const char *volatile stage = "start";
@@ -69,12 +73,49 @@ static void on_crash(int sig, siginfo_t *info, void *ctx)
 	int n = snprintf(msg, sizeof(msg), "vcd_player: crashed (signal %d) during: %s pc=%08lx lr=%08lx addr=%p\n",
 		sig, stage, pc, lr, info ? info->si_addr : NULL);
 	if (n > 0 && write(2, msg, n) < 0) n = 0;
+	if (console_fd >= 0) ioctl(console_fd, KDSETMODE, KD_TEXT);
 	_exit(128 + sig);
+}
+
+// The Linux console of the screen (tty2 while a script runs) shares the
+// frame buffer with the player: it drew the controller keys it received as
+// text over the picture, and redrew its own text over it when it blanked
+// or when the screen mode changed. The player puts it in graphics mode
+// (the console stops drawing) without echo for as long as it runs.
+static struct termios console_tio;
+static int console_tio_ok;
+
+static void console_release(void)
+{
+	if (console_fd < 0) return;
+	tcflush(console_fd, TCIFLUSH); // the keys pressed meanwhile are not for the shell
+	if (console_tio_ok) tcsetattr(console_fd, TCSANOW, &console_tio);
+	ioctl(console_fd, KDSETMODE, KD_TEXT);
+	close(console_fd);
+	console_fd = -1;
+}
+
+static void console_take(void)
+{
+	if (console_fd >= 0 || getenv("MC_TEST")) return;
+	console_fd = open("/dev/tty0", O_RDWR | O_NOCTTY | O_CLOEXEC);
+	if (console_fd < 0) return;
+	console_tio_ok = !tcgetattr(console_fd, &console_tio);
+	if (console_tio_ok)
+	{
+		struct termios t = console_tio;
+		t.c_lflag &= ~(ECHO | ECHONL | ICANON);
+		tcsetattr(console_fd, TCSANOW, &t);
+	}
+	if (ioctl(console_fd, KDSETMODE, KD_GRAPHICS)) fprintf(stderr, "vcd_player: console graphics mode not set (%s)\n", strerror(errno));
+	atexit(console_release);
 }
 
 static void on_signal(int sig)
 {
-	(void)sig;
+	char msg[48];
+	int n = snprintf(msg, sizeof(msg), "vcd_player: signal %d, closing\n", sig);
+	if (n > 0 && write(2, msg, n) < 0) n = 0;
 	quit_requested = 1;
 }
 
@@ -1007,7 +1048,12 @@ static int input_key(double now)
 			}
 			return 0;
 		}
-		if (ev.type == EV_KEY && ev.value == 1) return ev.code;
+		if (ev.type == EV_KEY && ev.value == 1)
+		{
+			// in the log, to tell what arrived when something happens by itself
+			fprintf(stderr, "vcd_player: tasto %d a %.1f s\n", ev.code, now);
+			return ev.code;
+		}
 	}
 }
 
@@ -2066,6 +2112,7 @@ int main(int argc, char *argv[])
 	sigaction(SIGILL, &sa, NULL);
 	sigaction(SIGFPE, &sa, NULL);
 	setvbuf(stdout, NULL, _IOLBF, 0);
+	console_take();
 	STAGE("open drive");
 
 	cd_fd = open_drive(argc > 1 ? argv[1] : NULL);

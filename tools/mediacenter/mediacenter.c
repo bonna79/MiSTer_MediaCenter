@@ -18,6 +18,7 @@
 #undef main
 
 #include <dirent.h>
+#include <strings.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
@@ -833,6 +834,7 @@ static double native_aspect;
 static int native_ok = 1;        // cleared when Main ignores the command
 static int fb_fake = 0;          // test mode: memory framebuffer
 static int def_w, def_h;         // the normal framebuffer
+static int fb_menu, menu_asking; // the lists' own frame buffer is in use (menu_fb)
 
 // With a MiSTer_MediaCenter Main, a DVD-size or light-mode frame buffer has
 // three pages: each picture is drawn into a page the scaler is not showing
@@ -1015,6 +1017,7 @@ static void fb_native_fmt(int w, int h, double aspect, int yuv)
 	native_w = w;
 	native_h = h;
 	native_aspect = aspect;
+	fb_menu = menu_asking;
 	fb_par = w ? aspect * h / w : 1.0;
 	screen_rebuild();
 	crt_fb_changed();
@@ -1717,45 +1720,141 @@ static void scan_sources(void)
 	add_source("Regola CRT (dimensioni e posizione)", "crt:");
 }
 
+// ---------------------------------------------------------------------------
+// The lists and the screens of the player
+//
+// The menu core shows a frame buffer 640 pixels wide on the 15 kHz CRT one
+// pixel for one, and its lines one for one when they are as many as those
+// of the output mode. The lists are drawn in such a frame buffer (menu_fb):
+// every stroke of the letters stays on the CRT. In the 1280x720 one every
+// other column was lost, and one line in five at 576i, three in five at
+// 288p, and the letters came out broken. HDMI enlarges it like a video.
+// ---------------------------------------------------------------------------
+
+static void menu_fb(void);
+
+// Text with glyph pixels sx wide and sy tall; bold widens every stroke by
+// one pixel. Returns the x after the text.
+static int fb_text_xy(int x, int y, int sx, int sy, int bold, const char *str, uint32_t color)
+{
+	for (; *str; str++, x += GLYPH_W * sx)
+	{
+		const unsigned char *g = vcd_font[(unsigned char)*str & 0x7F];
+		for (int c = 0; c < 8; c++)
+			for (int r = 0; r < 8; r++)
+				if ((g[c] >> r) & 1) fb_fill_rect(x + c * sx, y + r * sy, sx + bold, sy, color);
+	}
+	return x;
+}
+
+static int text_w(const char *str, int sx)
+{
+	return (int)strlen(str) * GLYPH_W * sx;
+}
+
+static void text_centre(int y, int sx, int sy, int bold, const char *str, uint32_t color)
+{
+	fb_text_xy((fb_w - text_w(str, sx)) / 2, y, sx, sy, bold, str, color);
+}
+
+// Glyph pixel of the list text: 2x2 at 640x480 and 640x576; 1x1 at 288 and
+// 240 lines, whose lines are twice as tall on the CRT.
+static int menu_sx(void) { int v = fb_w / 320; return v < 1 ? 1 : v; }
+static int menu_sy(void) { int v = fb_h / 240; return v < 1 ? 1 : v; }
+
+// A screen is drawn into a copy and then copied to the frame buffer: the
+// CRT never shows it cleared or half drawn.
+static uint8_t *menu_copy, *menu_screen;
+static size_t menu_copy_len;
+
+static void menu_begin(void)
+{
+	menu_fb();
+	if (!fb_mem) return;
+	if (menu_copy_len < fb_len)
+	{
+		free(menu_copy);
+		menu_copy = (uint8_t *)malloc(fb_len);
+		menu_copy_len = menu_copy ? fb_len : 0;
+	}
+	if (menu_copy)
+	{
+		menu_screen = fb_mem;
+		fb_mem = menu_copy;
+	}
+	fb_fill_rect(0, 0, fb_w, fb_h, fb_rgb(0, 0, 0));
+}
+
+static void menu_end(void)
+{
+	if (!menu_screen) return;
+	memcpy(menu_screen, fb_mem, fb_len);
+	fb_mem = menu_screen;
+	menu_screen = NULL;
+}
+
+// Where the list rows go; rows is also the page of the Left/Right keys.
+static void browser_layout(int *top, int *row_h, int *rows)
+{
+	int sy = menu_sy();
+	*top = 48 * sy;
+	*row_h = 12 * sy;
+	*rows = (fb_h - 20 * sy - *top) / *row_h;
+	if (*rows < 1) *rows = 1;
+}
+
 static void draw_browser(const char *title, const char *const *labels, const int *dirs, int count, int sel, const char *message)
 {
-	fb_clear();
-	int s = fb_w >= 1280 ? 2 : 1;
-	int line_h = 12 * s;
-	int mx = 24 * s;
-	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(150, 150, 150), accent = fb_rgb(60, 110, 200);
+	menu_begin();
+	int sx = menu_sx(), sy = menu_sy(), gw = GLYPH_W * sx;
+	int mx = 12 * sx;
+	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(160, 160, 160), accent = fb_rgb(40, 90, 190);
 
-	fb_text(mx, 16 * s, s + 1, "MiSTer MediaCenter", white);
-	char line[256];
-	fit_text(line, sizeof(line), title, (fb_w - 2 * mx) / (GLYPH_W * s));
-	fb_text(mx, 40 * s, s, line, grey);
+	// the name: centred, twice as wide and three times as tall as the list
+	const char *name = "MiSTer MediaCenter";
+	int tsx = text_w(name, 2 * sx) <= fb_w - 2 * mx ? 2 * sx : sx;
+	text_centre(6 * sy, tsx, 3 * sy, 1, name, white);
 
-	int top = 60 * s;
-	int bottom = fb_h - 30 * s;
-	int rows = (bottom - top) / line_h;
-	if (rows < 1) rows = 1;
+	// where we are, and the place in a long list
+	int top, row_h, rows;
+	browser_layout(&top, &row_h, &rows);
+	char line[256], pos[32] = "";
+	if (count > rows) snprintf(pos, sizeof(pos), "%d/%d", sel + 1, count);
+	fit_text(line, sizeof(line), title, (fb_w - 2 * mx - text_w(pos, sx)) / gw - (pos[0] ? 1 : 0));
+	fb_text_xy(mx, 34 * sy, sx, sy, 0, line, grey);
+	if (pos[0]) fb_text_xy(fb_w - mx - text_w(pos, sx), 34 * sy, sx, sy, 0, pos, grey);
+
 	int first = sel - rows / 2;
 	if (first > count - rows) first = count - rows;
 	if (first < 0) first = 0;
-
-	if (!count) fb_text(mx, top, s, message ? message : "Nessun file video o audio qui", grey);
+	if (!count) fb_text_xy(mx, top + 2 * sy, sx, sy, 1, message ? message : "Nessun file video o audio qui", grey);
 	for (int i = first; i < count && i < first + rows; i++)
 	{
-		int y = top + (i - first) * line_h;
-		if (i == sel) fb_fill_rect(mx - 4 * s, y - 2 * s, fb_w - 2 * mx + 8 * s, line_h, accent);
-		char name[260];
-		snprintf(name, sizeof(name), "%s%s", labels[i], dirs && dirs[i] ? "/" : "");
-		fit_text(line, sizeof(line), name, (fb_w - 2 * mx) / (GLYPH_W * s) - 1);
-		fb_text(mx, y, s, line, white);
+		int y = top + (i - first) * row_h;
+		if (i == sel) fb_fill_rect(mx / 2, y, fb_w - mx, row_h, accent);
+		char item[260];
+		snprintf(item, sizeof(item), "%s%s", labels[i], dirs && dirs[i] ? "/" : "");
+		fit_text(line, sizeof(line), item, (fb_w - 2 * mx) / gw);
+		fb_text_xy(mx, y + 2 * sy, sx, sy, 1, line, white);
 	}
 
-	const char *help = "A Apri   B Indietro   \x10 \x11 Pagina   X Esci";
-	fb_text(mx, fb_h - 18 * s, s, help, grey);
-	if (count > rows)
-	{
-		snprintf(line, sizeof(line), "%d/%d", sel + 1, count);
-		fb_text(fb_w - mx - (int)strlen(line) * GLYPH_W * s, fb_h - 18 * s, s, line, grey);
-	}
+	// the keys: centred, as large as the list and bold
+	const char *help = "A Apri  B Indietro  \x10\x11 Pagina  X Esci";
+	if (text_w(help, sx) > fb_w) help = "A Apri  B Indietro  X Esci";
+	text_centre(fb_h - 14 * sy, sx, sy, 1, help, fb_rgb(230, 230, 230));
+	menu_end();
+}
+
+// A message in a box over the screen just drawn.
+static void menu_notice(const char *text)
+{
+	int sx = menu_sx(), sy = menu_sy();
+	int w = text_w(text, sx) + 4 * GLYPH_W * sx / 2, h = 16 * sy;
+	if (w > fb_w) w = fb_w;
+	int x = (fb_w - w) / 2, y = (fb_h - h) / 2;
+	fb_fill_rect(x, y, w, h, fb_rgb(255, 200, 80));
+	fb_fill_rect(x + sx, y + sy, w - 2 * sx, h - 2 * sy, fb_rgb(0, 0, 0));
+	text_centre(y + 4 * sy, sx, sy, 1, text, fb_rgb(255, 200, 80));
 }
 
 // Moves the selection with the D-pad. Returns the key when it is not a
@@ -2378,9 +2477,9 @@ static int browse(const char *root)
 			dirs[i] = items[i].dir;
 		}
 
-		int s = fb_w >= 1280 ? 2 : 1;
-		int page = (fb_h - 90 * s) / (12 * s);
 		draw_browser(cwd, labels, dirs, num_items, sel, NULL);
+		int top, row_h, page;
+		browser_layout(&top, &row_h, &page);
 		int code = wait_key();
 		if (!code || quit_requested) return 1;
 		code = menu_nav(code, &sel, num_items, page > 1 ? page : 1);
@@ -2457,11 +2556,11 @@ static int browse(const char *root)
 #define CRT_FILTER 5
 static const struct { const char *key, *label; int min, max; } crt_items[CRT_ITEMS] = {
 	{ "MC_CRT_HSIZE", "Larghezza", -16, 15 },
-	{ "MC_CRT_HPOS", "Posizione orizzontale", -32, 31 },
+	{ "MC_CRT_HPOS", "Pos. orizzontale", -32, 31 },
 	{ "MC_CRT_VSIZE", "Altezza", -16, 15 },
-	{ "MC_CRT_VPOS", "Posizione verticale", -16, 15 },
-	{ "MC_CRT_MODE", "Modo uscita 15 kHz", 0, 4 },
-	{ "MC_CRT_FILTER", "Filtro anti-sfarfallio", 0, 2 },
+	{ "MC_CRT_VPOS", "Pos. verticale", -16, 15 },
+	{ "MC_CRT_MODE", "Modo 15 kHz", 0, 4 },
+	{ "MC_CRT_FILTER", "Filtro tremolio", 0, 2 },
 };
 static const char *const crt_mode_names[5] = { "Auto", "576i PAL", "288p PAL", "480i NTSC", "240p NTSC" };
 static const char *const crt_filter_names[3] = { "Auto", "Spento", "Acceso" };
@@ -2482,7 +2581,8 @@ static int crt_write(const char *cmd)
 static int crt_filter_on(void)
 {
 	if (crt_val[CRT_FILTER]) return crt_val[CRT_FILTER] == 2;
-	return !native_w;
+	// the lists: on when interlaced; the video: off
+	return !native_w || (fb_menu && fb_h >= 400);
 }
 
 // The mode the menu core chooses for the current frame buffer, with the same
@@ -2609,46 +2709,107 @@ static int crt_save(void)
 }
 
 // A test picture for the adjustment: border, grid, centre cross and values.
+// The lists' frame buffer: 640 pixels and the lines of the 15 kHz mode
+// chosen in Regola CRT. Auto: 576 lines (576i) with menu_pal=1 in
+// MiSTer.ini, otherwise 480 (480i), as the menu core chooses for the lists.
+static int ini_menu_pal(void)
+{
+	static int v = -1;
+	if (v >= 0) return v;
+	v = 0;
+	FILE *f = fopen("/media/fat/MiSTer.ini", "r");
+	if (!f) return v;
+	char l[256];
+	while (fgets(l, sizeof(l), f))
+	{
+		char *p = l;
+		while (*p == ' ' || *p == '\t') p++;
+		if (strncasecmp(p, "menu_pal", 8)) continue;
+		p += 8;
+		while (*p == ' ' || *p == '\t') p++;
+		if (*p++ != '=') continue;
+		v = atoi(p) != 0;
+	}
+	fclose(f);
+	return v;
+}
+
+static void menu_fb(void)
+{
+	if (getenv("MC_MENU_HD") && atoi(getenv("MC_MENU_HD"))) return; // the lists at 1280x720, as up to version 2.1
+	static const int lines[5] = { 0, 576, 288, 480, 240 };
+	int h = lines[crt_val[CRT_MODE]];
+	if (!h) h = ini_menu_pal() ? 576 : 480;
+	if (fb_menu && native_w == 640 && native_h == h) return;
+	menu_asking = 1;
+	fb_native(640, h, 4.0 / 3.0);
+	menu_asking = 0;
+}
+
+// The measured mode in short, for the screen.
+static const char *crt_measured_short(char *buf, size_t len)
+{
+	buf[0] = 0;
+	FILE *f = fopen("/tmp/mediacenter_crt", "r");
+	if (!f) return buf;
+	unsigned w = 0, h = 0;
+	int il = 0;
+	double hz = 0, vz = 0;
+	if (fscanf(f, "%u %u %d %lf %lf", &w, &h, &il, &hz, &vz) == 5 && h)
+		snprintf(buf, len, "%ux%u%s %.2f kHz %.1f Hz", w, h, il ? "i" : "p", hz, vz);
+	fclose(f);
+	return buf;
+}
+
 static void crt_draw(int sel, const char *message)
 {
-	fb_clear();
-	int s = fb_w >= 1280 ? 2 : 1;
-	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(150, 150, 150), accent = fb_rgb(60, 110, 200);
+	menu_begin();
+	int sx = menu_sx(), sy = menu_sy(), gw = GLYPH_W * sx;
+	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(160, 160, 160), accent = fb_rgb(40, 90, 190);
 	uint32_t red = fb_rgb(220, 40, 40), green = fb_rgb(40, 200, 40);
+
+	// the test pattern: grid, centre cross, red border on the frame edge
 	for (int i = 1; i < 8; i++)
 	{
-		fb_fill_rect(fb_w * i / 8, 0, s, fb_h, grey);
-		fb_fill_rect(0, fb_h * i / 8, fb_w, s, grey);
+		fb_fill_rect(fb_w * i / 8, 0, sx, fb_h, grey);
+		fb_fill_rect(0, fb_h * i / 8, fb_w, sy, grey);
 	}
-	fb_fill_rect(fb_w / 2 - s, 0, 2 * s, fb_h, green);
-	fb_fill_rect(0, fb_h / 2 - s, fb_w, 2 * s, green);
-	int t = 4 * s;
-	fb_fill_rect(0, 0, fb_w, t, red);
-	fb_fill_rect(0, fb_h - t, fb_w, t, red);
-	fb_fill_rect(0, 0, t, fb_h, red);
-	fb_fill_rect(fb_w - t, 0, t, fb_h, red);
+	fb_fill_rect(fb_w / 2 - sx, 0, 2 * sx, fb_h, green);
+	fb_fill_rect(0, fb_h / 2 - sy, fb_w, 2 * sy, green);
+	fb_fill_rect(0, 0, fb_w, 2 * sy, red);
+	fb_fill_rect(0, fb_h - 2 * sy, fb_w, 2 * sy, red);
+	fb_fill_rect(0, 0, 2 * sx, fb_h, red);
+	fb_fill_rect(fb_w - 2 * sx, 0, 2 * sx, fb_h, red);
 
-	int bw = 62 * GLYPH_W * s, bh = 136 * s;
-	int bx = (fb_w - bw) / 2, by = fb_h / 2 - bh / 2;
+	int row_h = 11 * sy;
+	int bw = 38 * gw, bh = 25 * row_h / 2 + 8 * sy;
+	if (bw > fb_w - 8 * sx) bw = fb_w - 8 * sx;
+	int bx = (fb_w - bw) / 2, by = (fb_h - bh) / 2;
 	fb_fill_rect(bx, by, bw, bh, fb_rgb(0, 0, 0));
-	int x = bx + 8 * s, y = by + 6 * s;
-	fb_text(x, y, s, "Regola CRT: il bordo rosso tocchi i lati", white);
-	y += 16 * s;
-	for (int i = 0; i < CRT_ITEMS; i++, y += 12 * s)
+	int y = by + 4 * sy;
+	text_centre(y, sx, sy, 1, "Regola CRT", white);
+	y += row_h;
+	text_centre(y, sx, sy, 0, "Il bordo rosso deve toccare i lati", grey);
+	y += row_h * 3 / 2;
+	for (int i = 0; i < CRT_ITEMS; i++, y += row_h)
 	{
 		char line[64];
-		if (i == CRT_MODE) snprintf(line, sizeof(line), "%-24s %s", crt_items[i].label, crt_mode_names[crt_val[i]]);
-		else if (i == CRT_FILTER) snprintf(line, sizeof(line), "%-24s %s", crt_items[i].label, crt_filter_names[crt_val[i]]);
-		else snprintf(line, sizeof(line), "%-24s %+4d", crt_items[i].label, crt_val[i]);
-		if (i == sel) fb_fill_rect(bx + 4 * s, y - 2 * s, bw - 8 * s, 12 * s, accent);
-		fb_text(x, y, s, line, white);
+		if (i == CRT_MODE) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_mode_names[crt_val[i]]);
+		else if (i == CRT_FILTER) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_filter_names[crt_val[i]]);
+		else snprintf(line, sizeof(line), "%-17s %+d", crt_items[i].label, crt_val[i]);
+		if (i == sel) fb_fill_rect(bx + sx, y - 2 * sy, bw - 2 * sx, row_h, accent);
+		fb_text_xy(bx + gw, y, sx, sy, 1, line, white);
 	}
-	y += 4 * s;
-	char m[96], line[128];
-	snprintf(line, sizeof(line), "Uscita misurata: %s", crt_measured(m, sizeof(m))[0] ? m : "non ancora nota");
-	fb_text(x, y, s, line, grey);
-	y += 14 * s;
-	fb_text(x, y, s, message ? message : "Su/Giu Scegli  \x10\x11 Cambia  A Salva  B Annulla  Y Azzera", grey);
+	y += row_h / 2;
+	char m[64], line[96];
+	snprintf(line, sizeof(line), "Misurata: %s", crt_measured_short(m, sizeof(m))[0] ? m : "non ancora");
+	text_centre(y, sx, sy, 0, line, grey);
+	y += row_h * 3 / 2;
+	if (message) text_centre(y, sx, sy, 1, message, fb_rgb(255, 200, 80));
+	else text_centre(y, sx, sy, 1, "Su/Giu Scegli  \x10\x11 Cambia", fb_rgb(230, 230, 230));
+	y += row_h;
+	text_centre(y, sx, sy, 1, "A Salva  B Annulla  Y Azzera", fb_rgb(230, 230, 230));
+	menu_end();
 }
 
 // Waits for a key up to secs seconds; 0 also when the time runs out.
@@ -2699,7 +2860,7 @@ static void crt_adjust_screen(void)
 		case KEY_ENTER: case KEY_PLAY:
 			if (crt_save())
 			{
-				message = "Impossibile salvare mediacenter.ini";
+				message = "Impossibile salvare il file ini";
 				crt_draw(sel, message);
 				continue;
 			}
@@ -2749,7 +2910,7 @@ static int run_browser(void)
 			if (play_disc_in_drive(NULL))
 			{
 				draw_browser("Scegli la sorgente", labels, NULL, num_sources, sel, NULL);
-				fb_text(24, fb_h / 2, fb_w >= 1280 ? 2 : 1, "Nessun disco leggibile nel lettore", fb_rgb(255, 200, 80));
+				menu_notice("Nessun disco leggibile");
 				sleep(2);
 			}
 			quit_requested = 0;
@@ -3045,6 +3206,24 @@ int main(int argc, char *argv[])
 	// Decoding speed test: decodes the whole file without output.
 	if (arg && !strcmp(arg, "--bench") && argc > 2) return bench(argv[2]);
 
+	// The console back in text mode (mediacenter.sh, after a crash).
+	if (arg && !strcmp(arg, "--console-text"))
+	{
+		int fd = open("/dev/tty0", O_RDWR | O_NOCTTY | O_CLOEXEC);
+		if (fd >= 0) { ioctl(fd, KDSETMODE, KD_TEXT); close(fd); }
+		return 0;
+	}
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_sigaction = on_crash;
+	sa.sa_flags = SA_SIGINFO;
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGBUS, &sa, NULL);
+	sigaction(SIGILL, &sa, NULL);
+	sigaction(SIGFPE, &sa, NULL);
+	console_take();
+
 	// A drive: Auto Disc Detection launched us for the inserted disc.
 	if (arg && !strncmp(arg, "/dev/", 5))
 	{
@@ -3103,6 +3282,7 @@ int main(int argc, char *argv[])
 	if (arg) rc = play_file(arg, 0) == END_DONE ? 0 : 0;
 	else rc = run_browser();
 
+	fb_native(0, 0, 0); // the normal frame buffer back for the Main
 	fb_clear();
 	fb_close();
 	if (input_fd >= 0) close(input_fd);

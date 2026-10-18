@@ -218,12 +218,14 @@ The same screen has two entries for the 15 kHz output, handled by the menu's FPG
 
 | Entry | Values |
 | --- | --- |
-| **Modo uscita 15 kHz** (15 kHz mode) | **Auto** (576i for PAL DVDs, 480i for NTSC ones; lists in 480i or 576i following `menu_pal`), or fixed **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
-| **Filtro anti-sfarfallio** (flicker filter) | **Auto** (on for the player's lists and screens, off for video), **Spento** (off), **Acceso** (on) |
+| **Modo 15 kHz** (15 kHz mode) | **Auto** (576i for PAL DVDs, 480i for NTSC ones; lists in 480i or 576i following `menu_pal`), or fixed **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
+| **Filtro tremolio** (flicker filter) | **Auto** (on for interlaced lists, off for video and at 288p/240p), **Spento** (off), **Acceso** (on) |
 
 The filter blends every line with the one below it: thin white text no longer flickers on the interlaced output. In Auto it stays off for video because the player already smooths the controls and subtitles, and the film stays sharp.
 
-Below the entries, **Uscita misurata** (measured output) shows the mode the Main actually measures on the core's output (for example `640x576i interlacciato, 15.63 kHz, 50.00 Hz`). The same line, with the expected mode, also goes to `/tmp/mediacenter.log`.
+Below the entries, **Misurata** (measured) shows the mode the Main actually measures on the core's output (for example `640x576i 15.63 kHz 50.0 Hz`). The same line, with the expected mode, also goes to `/tmp/mediacenter.log`.
+
+The lists and the CRT Adjust screen use a picture 640 pixels wide with the lines of the chosen mode: 480 in Auto (576 with `menu_pal=1`), or 576, 288, 480 or 240. The CRT shows it pixel for pixel and the text stays whole; HDMI enlarges it. With `MC_MENU_HD=1` in `mediacenter.ini` the lists go back to 1280x720 as in version 2.1.
 
 ## Tested on a real MiSTer
 

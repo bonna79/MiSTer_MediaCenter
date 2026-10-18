@@ -1103,7 +1103,10 @@ static int dvd_play(const char *device)
 		last = t;
 		if (elapsed > 0.5) elapsed = 0.5;
 
-		int menu = dvd_in_menu();
+		// A menu of the disc: the arrows and A belong to its buttons, also
+		// in a menu whose button information is not in the packet just read
+		// (otherwise they changed the sound and the subtitles under it).
+		int menu = dvd_in_menu() || (!dvdnav_is_domain_vts(dvd.nav) && !dvdnav_is_domain_fp(dvd.nav));
 		pci_t *pci = dvdnav_get_current_nav_pci(dvd.nav);
 
 		for (int code; (code = input_key(t));)
@@ -1129,6 +1132,7 @@ static int dvd_play(const char *device)
 				case KEY_PLAY:
 				case KEY_PLAYCD:
 					if (dvdnav_button_activate(dvd.nav, pci) == DVDNAV_STATUS_OK) dvd_jumped();
+					else fprintf(stderr, "mediacenter: DVD menu, pulsante non attivato: %s\n", dvdnav_err_to_string(dvd.nav));
 					break;
 				case KEY_SPACE:
 					if (dvdnav_menu_call(dvd.nav, DVD_MENU_Escape) == DVDNAV_STATUS_OK) dvd_jumped();
@@ -1137,6 +1141,10 @@ static int dvd_play(const char *device)
 				}
 				if (done)
 				{
+					int32_t button = 0;
+					dvdnav_get_current_highlight(dvd.nav, &button);
+					fprintf(stderr, "mediacenter: DVD menu, tasto %d: pulsante %d di %d%s\n", code, (int)button,
+						pci ? (int)pci->hli.hl_gi.btn_ns : -1, pci && pci->hli.hl_gi.hli_ss ? "" : " (pulsanti non attivi)");
 					dvd_update_highlight();
 					continue;
 				}

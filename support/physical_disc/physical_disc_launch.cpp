@@ -369,7 +369,12 @@ void physical_disc_launch_resume_menu_discovery(void)
 	menu_discovery_suspended = 0;
 	menu_detecting = 0;
 	menu_poll_at = 0;
-	printf("DISC: Auto Disc Discovery resumed after script exit\n");
+	// The disc left in the drive was played (or passed over) by the script:
+	// back in the menu it is not launched again, or stopping and leaving
+	// MediaCenter would start it again in a loop. A disc taken out and put
+	// back (or a new one) is launched.
+	menu_ignore_boot_disc = 1;
+	printf("DISC: Auto Disc Discovery resumed after script exit, the disc in the drive waits to be taken out\n");
 }
 
 int physical_disc_launch_menu_tick(void)
@@ -403,6 +408,7 @@ int physical_disc_launch_menu_tick(void)
 	{
 		physical_disc_close();
 		unlink(PHYSICAL_DISC_HANDLED_FILE);
+		menu_ignore_boot_disc = 0; // no drive: a drive plugged in later holds a new disc
 		menu_detecting = 0;
 		return 0;
 	}
@@ -450,11 +456,13 @@ int physical_disc_launch_menu_tick(void)
 
 	if (menu_ignore_boot_disc)
 	{
-		if (!disc_present)
+		// only an open tray or an empty drive: a disc merely spinning down
+		// or up again is still the same disc
+		if (!disc_present && physical_disc_tray_status() == PHYSICAL_DISC_TRAY_EMPTY)
 		{
 			menu_ignore_boot_disc = 0;
 			unlink(PHYSICAL_DISC_HANDLED_FILE);
-			printf("DISC: startup disc removed, Auto Disc Discovery armed\n");
+			printf("DISC: disc taken out, Auto Disc Discovery armed\n");
 		}
 		physical_disc_close();
 		menu_detecting = 0;

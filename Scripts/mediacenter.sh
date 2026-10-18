@@ -22,5 +22,7 @@ fi
 printf '\033[?25l'
 "$BIN" "$@" >/tmp/mediacenter.log 2>&1
 status=$?
+# the console back in text mode, also if the player did not end normally
+"$BIN" --console-text >/dev/null 2>&1
 printf '\033[?25h'
 exit $status
