@@ -135,6 +135,10 @@ static int diag_menu(void)
 	return diag() && dvd.nav && !dvd.nav_vts;
 }
 static volatile double diag_read_max, diag_dec_max; // slowest disc read / picture decode, seconds
+// Pictures followed for 30 s after a jump or a change of part of the disc:
+// where each one ends (diag only).
+static volatile int dgv_pkt, dgv_out, dgv_full, dgv_err, dgv_far, dgv_watch;
+static volatile double dgv_last = NAN;
 
 static void ycrcb_to_rgb(uint32_t v, int *r, int *g, int *b)
 {
@@ -281,7 +285,10 @@ static void dvd_video_frame(AVFrame *f)
 	AVRational fr = mc.vdec->framerate;
 	double step = (fr.num > 0 && fr.den > 0) ? 1.0 / av_q2d(fr) : 0.04;
 	DVD_LOCK();
+	dgv_out++;
+	if (mc.vq_count >= MC_VQ_MAX) dgv_full++;
 	queue_video_at(f, pts, step);
+	dgv_last = mc.last_vpts;
 	if (dvd.seeking) { dvd.seeking = 0; dvd.ff_hold = dvd.scanning; }
 	DVD_UNLOCK();
 }
@@ -304,11 +311,13 @@ static void dvd_send(AVCodecContext *ctx, const uint8_t *data, int size, int64_t
 	pkt->size = size;
 	pkt->pts = pts;
 	pkt->dts = AV_NOPTS_VALUE;
-	if (avcodec_send_packet(ctx, data ? pkt : NULL) == AVERROR(EAGAIN))
+	int sr = avcodec_send_packet(ctx, data ? pkt : NULL);
+	if (sr == AVERROR(EAGAIN))
 	{
 		dvd_receive(ctx, video);
-		avcodec_send_packet(ctx, data ? pkt : NULL);
+		sr = avcodec_send_packet(ctx, data ? pkt : NULL);
 	}
+	if (sr < 0 && sr != AVERROR(EAGAIN) && data && video) dgv_err++;
 	dvd_receive(ctx, video);
 	pkt->data = NULL;
 	pkt->size = 0;
@@ -561,7 +570,8 @@ static void dvd_demux(const uint8_t *buf, int len)
 
 		if (id >= 0xe0 && id <= 0xef)
 		{
-			if (!mc.vdec || !dvd.vpar) continue;
+			if (!mc.vdec || !dvd.vpar) { if (diag()) dgv_err++; continue; }
+			dgv_pkt++;
 			if (pts != AV_NOPTS_VALUE) dvd.vfed_pos = dvd_pos(pts);
 			const uint8_t *se = dvd.nav_vts ? NULL : find_code(p, remain, 0xb7);
 			if (!se)
@@ -793,17 +803,26 @@ static int dvd_step(void)
 	case DVDNAV_VTS_CHANGE:
 	{
 		int aspect = dvdnav_get_video_aspect(dvd.nav);
+		if (diag())
+		{
+			dvdnav_vts_change_event_t *ev = (dvdnav_vts_change_event_t *)buf;
+			int d = ev->new_domain;
+			printf("mediacenter: diag %.2f s: cambio parte del disco: %s, VTS %d (prima VTS %d), video %s\n", mc.clock,
+				d == 1 ? "primo avvio" : d == 2 ? "titolo (film)" : d == 4 ? "menu principale" : d == 8 ? "menu del titolo" : "?",
+				ev->new_vtsN, ev->old_vtsN, aspect == 3 ? "16:9" : "4:3");
+			dgv_watch = 1;
+		}
 		fb_aspect = aspect == 3 ? 16.0 / 9.0 : 4.0 / 3.0;
 		dvd.title = -1;
 		break;
 	}
 
 	case DVDNAV_CELL_CHANGE:
-		if (diag_menu())
+		if (diag_menu() || (diag() && dgv_watch))
 		{
 			int32_t tt = 0, pg = 0;
 			dvdnav_current_title_info(dvd.nav, &tt, &pg);
-			printf("mediacenter: diag menu %.2f s: nuova cella (titolo %d, parte %d)\n", mc.clock, tt, pg);
+			printf("mediacenter: diag %s%.2f s: nuova cella (titolo %d, parte %d)\n", diag_menu() ? "menu " : "", mc.clock, tt, pg);
 		}
 		dvd_title_info();
 		DVD_LOCK();
@@ -1266,6 +1285,7 @@ static int dvd_in_menu(void)
 // After a jump made with the controls: drop what is queued at once.
 static void dvd_jumped(void)
 {
+	dgv_watch = 1;
 	DVD_LOCK();
 	dvd.req_flush = 1;
 	dvd.still = dvd.wait = dvd.stopped = dvd.halt = 0;
@@ -1318,6 +1338,8 @@ static int dvd_play(const char *device)
 	double dg_t0 = last, dg_start = last, dg_gap = 0, dg_draw = 0, dg_shown_at = NAN;
 	double dg_wait0 = av_waited, dg_late0 = audio_late_drop, dg_sub = NAN;
 	int dg_drop0 = frames_dropped, dg_empty = 0, dg_menu = 0;
+	double dgv_until = 0, dgv_next = 0;
+	int dgv_shown0 = 0, dgv_drop0 = 0;
 	if (diag()) printf("mediacenter: diag attiva (MC_DIAG=0 la spegne)\n");
 	while (!quit_requested)
 	{
@@ -1503,6 +1525,7 @@ static int dvd_play(const char *device)
 			// a picture timed far ahead would hold back all the others
 			while (mc.vq_count && mc.vq[0].pts > mc.clock + 3.0)
 			{
+				dgv_far++;
 				av_frame_free(&mc.vq[0].frame);
 				memmove(mc.vq, mc.vq + 1, (mc.vq_count - 1) * sizeof(mc.vq[0]));
 				mc.vq_count--;
@@ -1663,6 +1686,34 @@ static int dvd_play(const char *device)
 		else if (dvd.last && dvd.overlay_dirty) dvd_show(dvd.last);
 		if (p.state != ST_PLAY || dvd.still) dg_shown_at = NAN;
 		if (menu) dg_menu = 1;
+		if (diag() && dgv_watch == 1)
+		{
+			dgv_watch = 2;
+			dgv_until = t + 30;
+			dgv_shown0 = frames_shown;
+			dgv_drop0 = frames_dropped;
+			dgv_pkt = dgv_out = dgv_full = dgv_err = dgv_far = 0;
+			dgv_next = t + 1.0;
+		}
+		if (dgv_watch == 2 && t >= dgv_next)
+		{
+			DVD_LOCK();
+			double first = mc.vq_count ? mc.vq[0].pts : NAN;
+			int inq = mc.vq_count;
+			double aend = mc.audio_end, clk = mc.clock;
+			DVD_UNLOCK();
+			printf("mediacenter: diag %.1f s controllo immagini (%s, titolo %d): pacchetti video %d, uscite dal decodificatore %d, mostrate %d, "
+				"scartate in ritardo %d, scartate troppo avanti %d, coda piena %d, errori %d, in coda %d (prima a %.2f), ultima decodificata %.2f, "
+				"orologio %.2f, audio fino a %.2f, fermo %d, attesa %d\n",
+				t - dg_t0, dvd.nav_vts ? "film" : dvd.nav_fp ? "primo avvio" : "menu", dvd.nav_title, dgv_pkt, dgv_out,
+				frames_shown - dgv_shown0, frames_dropped - dgv_drop0, dgv_far, dgv_full, dgv_err, inq, first, dgv_last,
+				clk, aend, dvd.still, dvd.wait);
+			dgv_shown0 = frames_shown;
+			dgv_drop0 = frames_dropped;
+			dgv_pkt = dgv_out = dgv_full = dgv_err = dgv_far = 0;
+			dgv_next = t + 1.0;
+			if (t >= dgv_until) dgv_watch = 0;
+		}
 		if (diag() && t - dg_start >= 1.0)
 		{
 			int drops = frames_dropped - dg_drop0;
