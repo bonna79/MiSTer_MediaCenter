@@ -1522,8 +1522,12 @@ static int dvd_play(const char *device)
 			mc.clock += elapsed;
 			feed_audio_output();
 			av_sync(elapsed);
-			// a picture timed far ahead would hold back all the others
-			while (mc.vq_count && mc.vq[0].pts > mc.clock + 3.0)
+			// a picture timed far ahead would hold back all the others.
+			// Not when the sound read is just as far ahead: after a part
+			// with sound but no pictures the reader runs up to 4 s ahead,
+			// and the pictures that follow are on time with that sound.
+			while (mc.vq_count && mc.vq[0].pts > mc.clock + 3.0 &&
+				!(mc.vq[0].pts < mc.audio_end + 1.0))
 			{
 				dgv_far++;
 				av_frame_free(&mc.vq[0].frame);
