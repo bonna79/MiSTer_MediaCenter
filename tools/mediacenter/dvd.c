@@ -73,6 +73,8 @@ typedef struct
 	int timeline_set;
 	int hop;           // the next VOBU starts at the current position
 
+	int vfed;          // video sent to the decoder since it was last emptied
+	double vfed_pos;   // time of the last video packet with one, NAN for none
 	int still;         // 0 none, 1..254 seconds, 255 until a button is pressed
 	double still_until;
 	int wait;          // DVDNAV_WAIT: let the queued output play out
@@ -407,6 +409,8 @@ static void dvd_flush(void)
 	mc.pend_len = 0;
 	mc.audio_end = mc.clock;
 	mc.last_vpts = NAN;
+	dvd.vfed = 0;
+	dvd.vfed_pos = NAN;
 	dvd_clear_subs("salto");
 	DVD_UNLOCK();
 	audio_flush();
@@ -497,6 +501,35 @@ static int64_t pes_pts(const uint8_t *p)
 	return ((int64_t)(p[0] & 0x0e) << 29) | (p[1] << 22) | ((p[2] & 0xfe) << 14) | (p[3] << 7) | (p[4] >> 1);
 }
 
+// The first start code 00 00 01 <code> in p, or NULL.
+static const uint8_t *find_code(const uint8_t *p, int n, uint8_t code)
+{
+	for (int i = 0; i + 3 < n; i++)
+		if (!p[i] && !p[i + 1] && p[i + 2] == 1 && p[i + 3] == code) return p + i;
+	return NULL;
+}
+
+// In a menu the last picture before a pause in the video (the picture held
+// while only the music plays) stays inside the parser and the decoder: they
+// give a picture out only when the next one begins. It is pushed out at the
+// end code of the video sequence, as a DVD player does, or when only sound
+// has come for half a second (dvd_menu_video_stuck).
+static void dvd_menu_video_out(const char *why)
+{
+	dvd_drain_video();
+	dvd.vfed = 0;
+	if (diag()) printf("mediacenter: diag menu %.2f s: ultimo fotogramma fatto uscire (%s), ultima immagine %.2f\n", mc.clock, why, mc.last_vpts);
+}
+
+static void dvd_menu_video_stuck(void)
+{
+	if (!dvd.vfed || dvd.nav_vts || isnan(dvd.vfed_pos)) return;
+	DVD_LOCK();
+	int stuck = !mc.vq_count && mc.audio_end > dvd.vfed_pos + 0.5 && (isnan(mc.last_vpts) || mc.last_vpts < dvd.vfed_pos - 0.001);
+	DVD_UNLOCK();
+	if (stuck) dvd_menu_video_out("solo audio da mezzo secondo");
+}
+
 static void dvd_demux(const uint8_t *buf, int len)
 {
 	int i = 0;
@@ -528,7 +561,26 @@ static void dvd_demux(const uint8_t *buf, int len)
 
 		if (id >= 0xe0 && id <= 0xef)
 		{
-			if (mc.vdec && dvd.vpar) dvd_parse(dvd.vpar, mc.vdec, p, remain, pts, 0);
+			if (!mc.vdec || !dvd.vpar) continue;
+			if (pts != AV_NOPTS_VALUE) dvd.vfed_pos = dvd_pos(pts);
+			const uint8_t *se = dvd.nav_vts ? NULL : find_code(p, remain, 0xb7);
+			if (!se)
+			{
+				dvd_parse(dvd.vpar, mc.vdec, p, remain, pts, 0);
+				dvd.vfed = 1;
+				continue;
+			}
+			// up to the sequence end code, then out; the rest begins anew.
+			// The time belongs to the first picture starting in the packet.
+			int n1 = (int)(se + 4 - p);
+			int pic_before = find_code(p, n1, 0x00) != NULL;
+			dvd_parse(dvd.vpar, mc.vdec, p, n1, pic_before ? pts : AV_NOPTS_VALUE, 0);
+			dvd_menu_video_out("fine sequenza video");
+			if (remain > n1)
+			{
+				dvd_parse(dvd.vpar, mc.vdec, p + n1, remain - n1, pic_before ? AV_NOPTS_VALUE : pts, 0);
+				dvd.vfed = 1;
+			}
 			continue;
 		}
 
@@ -1116,6 +1168,7 @@ static int dvd_open(const char *device)
 	mc.vstream = 0;
 	mc.astream = 1;
 	mc.last_vpts = NAN;
+	dvd.vfed_pos = NAN;
 	dvd.user_audio = -1;
 	dvd.user_spu = -2;
 	dvd.vm_audio_phys = 0;
@@ -1190,6 +1243,9 @@ static void *dvd_reader(void *arg)
 		// a stream too heavy for the CPU: skip pictures nothing refers to
 		int behind = mc.vq_count == 0 && !isnan(mc.last_vpts) && mc.last_vpts < mc.clock - 0.3;
 		DVD_UNLOCK();
+		// also while nothing more is read (the sound buffer full, the end
+		// of a cell): that is when a menu waits with its picture held
+		dvd_menu_video_stuck();
 		if (!more)
 		{
 			usleep(4000);
