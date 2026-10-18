@@ -2918,6 +2918,48 @@ static void crt_adjust_screen(void)
 	}
 }
 
+#include "splash.h"
+
+// The MMC picture for 3 s when the player starts from the Scripts menu (a
+// disc started by the Main goes straight to the film). It is drawn in the
+// lists' frame buffer, shown as 4:3 on the CRT and over HDMI. Any key skips
+// it; MC_SPLASH=0 in mediacenter.ini turns it off.
+static void show_splash(void)
+{
+	const char *e = getenv("MC_SPLASH");
+	if (e && !atoi(e)) return;
+	uint8_t *pic = (uint8_t *)malloc(SPLASH_W * SPLASH_H);
+	if (!pic) return;
+	size_t n = 0;
+	for (size_t i = 0; i + 1 < sizeof(splash_rle) && n < SPLASH_W * SPLASH_H; i += 2)
+		for (int k = 0; k < splash_rle[i] && n < SPLASH_W * SPLASH_H; k++) pic[n++] = splash_rle[i + 1];
+	uint32_t pal[256];
+	for (int i = 0; i < 256; i++) pal[i] = fb_rgb(splash_pal[3 * i], splash_pal[3 * i + 1], splash_pal[3 * i + 2]);
+
+	menu_begin();
+	if (fb_mem)
+	{
+		// the lists' frame buffer is shown as 4:3: the picture fills it;
+		// another one (MC_MENU_HD) keeps square pixels, black at the sides
+		int dw = fb_w, dh = fb_h;
+		if (!fb_menu)
+		{
+			dw = fb_h * 4 / 3;
+			if (dw > fb_w) { dw = fb_w; dh = fb_w * 3 / 4; }
+		}
+		int x0 = (fb_w - dw) / 2, y0 = (fb_h - dh) / 2;
+		for (int y = 0; y < dh; y++)
+		{
+			const uint8_t *src = pic + (size_t)(y * SPLASH_H / dh) * SPLASH_W;
+			uint32_t *row = (uint32_t *)(fb_mem + (size_t)(y0 + y) * fb_stride) + x0;
+			for (int x = 0; x < dw; x++) row[x] = pal[src[x * SPLASH_W / dw]];
+		}
+	}
+	menu_end();
+	free(pic);
+	wait_key_for(3.0);
+}
+
 static int run_browser(void)
 {
 	int sel = 0;
@@ -3312,7 +3354,9 @@ int main(int argc, char *argv[])
 			return 0;
 		}
 		// "browser": the source list and its screens
-		int r = arg && !strcmp(arg, "browser") ? run_browser() : play_file(arg, 0);
+		int r;
+		if (arg && !strcmp(arg, "browser")) { show_splash(); r = run_browser(); }
+		else r = play_file(arg, 0);
 		printf("test: ended with %d\n", r);
 		return 0;
 	}
@@ -3329,7 +3373,11 @@ int main(int argc, char *argv[])
 
 	int rc = 0;
 	if (arg) rc = play_file(arg, 0) == END_DONE ? 0 : 0;
-	else rc = run_browser();
+	else
+	{
+		show_splash(); // started from the Scripts menu: no disc to play
+		rc = run_browser();
+	}
 
 	fb_native(0, 0, 0); // the normal frame buffer back for the Main
 	fb_clear();
