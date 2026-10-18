@@ -93,6 +93,14 @@ typedef struct
 
 	AVFrame *last;     // the picture on screen, redrawn when the overlay changes
 	int overlay_dirty;
+	unsigned ovl_gen;  // changes with the subpictures, the button or the colours
+
+	// What the player loop needs from libdvdnav, copied by the reader after
+	// each step: libdvdnav holds its lock while it reads the disc (100 ms
+	// and more at times), and the player loop asking it directly waited
+	// that long with the picture on screen.
+	volatile int nav_vts, nav_fp, nav_title, nav_part;
+	volatile int labels_req; // the player loop wants audio_label made again
 	int title, chapters;
 	double duration;
 	char audio_label[64];
@@ -122,7 +130,7 @@ static int diag(void)
 }
 static int diag_menu(void)
 {
-	return diag() && dvd.nav && !dvdnav_is_domain_vts(dvd.nav);
+	return diag() && dvd.nav && !dvd.nav_vts;
 }
 static volatile double diag_read_max, diag_dec_max; // slowest disc read / picture decode, seconds
 
@@ -192,7 +200,7 @@ static void dvd_clear_subs(const char *why)
 		printf("mediacenter: diag menu %.2f s: %d sottoimmagini cancellate (%s)\n", mc.clock, dvd.num_subs, why);
 	for (int i = 0; i < dvd.num_subs; i++) avsubtitle_free(&dvd.subs[i].sub);
 	dvd.num_subs = 0;
-	dvd.overlay_dirty = 1;
+	{ dvd.overlay_dirty = 1; dvd.ovl_gen++; }
 }
 
 static void dvd_set_audio_codec(int id)
@@ -334,7 +342,7 @@ static void dvd_spu_packet(const uint8_t *data, int size, int64_t pts)
 	dvd_sub_t *s = &dvd.subs[dvd.num_subs++];
 	s->sub = sub;
 	s->start = base + sub.start_display_time / 1000.0;
-	dvd.overlay_dirty = 1;
+	{ dvd.overlay_dirty = 1; dvd.ovl_gen++; }
 	s->end = (sub.end_display_time > sub.start_display_time && sub.end_display_time < 0x7fffffff)
 		? base + sub.end_display_time / 1000.0 : INFINITY;
 	if (diag_menu())
@@ -481,7 +489,7 @@ static void dvd_update_spu(void)
 	if (phys != dvd.spu_phys) dvd_clear_subs("altro flusso");
 	dvd.spu_phys = phys;
 	dvd.spu_forced_only = forced;
-	dvd.overlay_dirty = 1;
+	{ dvd.overlay_dirty = 1; dvd.ovl_gen++; }
 }
 
 static int64_t pes_pts(const uint8_t *p)
@@ -565,12 +573,12 @@ static void dvd_update_highlight(void)
 		{
 			on = 1;
 			DVD_LOCK();
-			if (memcmp(&hl, &dvd.hl, sizeof(hl))) dvd.overlay_dirty = 1;
+			if (memcmp(&hl, &dvd.hl, sizeof(hl))) { dvd.overlay_dirty = 1; dvd.ovl_gen++; }
 			dvd.hl = hl;
 			DVD_UNLOCK();
 		}
 	}
-	if (on != dvd.hl_on) dvd.overlay_dirty = 1;
+	if (on != dvd.hl_on) { dvd.overlay_dirty = 1; dvd.ovl_gen++; }
 	dvd.hl_on = on;
 }
 
@@ -600,6 +608,18 @@ static void dvd_title_info(void)
 	free(times);
 }
 
+// Copies what the player loop needs from libdvdnav (reader thread, or before
+// it starts).
+static void dvd_nav_state(void)
+{
+	int32_t title = 0, part = 0;
+	dvd.nav_vts = dvdnav_is_domain_vts(dvd.nav) == 1;
+	dvd.nav_fp = dvdnav_is_domain_fp(dvd.nav) == 1;
+	if (dvdnav_current_title_info(dvd.nav, &title, &part) != DVDNAV_STATUS_OK) title = part = 0;
+	dvd.nav_title = title;
+	dvd.nav_part = part;
+}
+
 // Handles one navigation step. Returns 0 when the disc stopped.
 static int dvd_step(void)
 {
@@ -609,6 +629,7 @@ static int dvd_step(void)
 	dvdnav_status_t read_ok = dvdnav_get_next_block(dvd.nav, buf, &event, &len);
 	double read_d = now_seconds() - read_t0;
 	if (read_d > diag_read_max) diag_read_max = read_d;
+	if (read_ok == DVDNAV_STATUS_OK && event != DVDNAV_BLOCK_OK) dvd_nav_state();
 	if (read_ok != DVDNAV_STATUS_OK)
 	{
 		fprintf(stderr, "mediacenter: DVD read error: %s\n", dvdnav_err_to_string(dvd.nav));
@@ -689,6 +710,7 @@ static int dvd_step(void)
 			dvd.clut_rgb[i] = (uint32_t)(r << 16 | g << 8 | b);
 		}
 		dvd.clut_valid = 1;
+		dvd.ovl_gen++;
 		DVD_UNLOCK();
 		dvd_open_spu_decoder();
 		break;
@@ -796,18 +818,30 @@ static void dvd_expire_subs(void)
 	}
 }
 
-// Draws the subpicture (subtitles, menu graphics) and the selected button.
-// On a progressive picture (or one whose fields are kept) each line of the
-// subpicture is blended with the one above, as the deinterlacing does for an
-// interlaced picture: the white letters then have no edge one line tall,
-// which on an interlaced CRT output is in one field only and flickers.
-static void dvd_overlay_locked(void)
+// The subpicture is made ready for blending once: when it arrives, when the
+// selected button or the colours change, or when the softening changes. A
+// menu subpicture covers the whole picture and making it took about 50 ms,
+// too long to do again for every picture of a menu with motion.
+typedef struct
 {
-	const dvd_sub_t *cur = dvd_current_sub();
-	if (!cur) return;
+	int x, y, w, rows;  // rows: the height, one more when softened
+	uint8_t *px;        // r, g, b, alpha for each pixel
+	int16_t *x0, *x1;   // first and last pixel not transparent in each row
+} ovl_rect_t;
+
+#define OVL_MAX_RECTS 8
+static ovl_rect_t ovl_r[OVL_MAX_RECTS];
+static int ovl_n;
+static unsigned ovl_gen = ~0u;
+static const void *ovl_rect0;
+static int ovl_soft = -1;
+
+static void ovl_build(const dvd_sub_t *cur)
+{
 	static uint16_t *buf;  // premultiplied r, g, b and alpha of a rectangle
 	static size_t buf_n;
-	for (unsigned n = 0; n < cur->sub.num_rects; n++)
+	ovl_n = 0;
+	for (unsigned n = 0; n < cur->sub.num_rects && ovl_n < OVL_MAX_RECTS; n++)
 	{
 		AVSubtitleRect *r = cur->sub.rects[n];
 		if (r->type != SUBTITLE_BITMAP || !r->data[0] || r->w <= 0 || r->h <= 0) continue;
@@ -851,12 +885,6 @@ static void dvd_overlay_locked(void)
 			}
 		}
 		int out_rows = r->h;
-		// while the controls are on screen, a subtitle under them is moved
-		// up above them, so the language just chosen can be seen at once
-		int dy = 0;
-		if (ovl_shown && ovl_a && !dvd.hl_on && src_h == fb_h && r->y + r->h + 1 > ovl_y && r->h < ovl_y)
-			dy = ovl_y - (r->y + r->h + 1);
-		if (dy < -r->y) dy = -r->y;
 		if (overlay_soften)
 		{
 			// from the bottom up: line y becomes the mean of lines y - 1 and y
@@ -868,18 +896,76 @@ static void dvd_overlay_locked(void)
 			}
 			out_rows = rows;
 		}
+
+		ovl_rect_t *q = &ovl_r[ovl_n];
+		size_t px_n = (size_t)r->w * out_rows * 4;
+		uint8_t *px = (uint8_t *)realloc(q->px, px_n);
+		int16_t *x0 = (int16_t *)realloc(q->x0, out_rows * sizeof(int16_t));
+		int16_t *x1 = (int16_t *)realloc(q->x1, out_rows * sizeof(int16_t));
+		if (px) q->px = px;
+		if (x0) q->x0 = x0;
+		if (x1) q->x1 = x1;
+		if (!px || !x0 || !x1) return;
+		q->x = r->x; q->y = r->y; q->w = r->w; q->rows = out_rows;
 		for (int y = 0; y < out_rows; y++)
 		{
-			int sy = r->y + y + dy;
+			const uint16_t *o = buf + (size_t)y * r->w * 4;
+			uint8_t *d = px + (size_t)y * r->w * 4;
+			int first = r->w, last = -1;
+			for (int x = 0; x < r->w; x++, o += 4, d += 4)
+			{
+				int a = o[3];
+				if (!a) { d[3] = 0; continue; }
+				d[0] = (uint8_t)(o[0] / a); d[1] = (uint8_t)(o[1] / a); d[2] = (uint8_t)(o[2] / a); d[3] = (uint8_t)a;
+				if (x < first) first = x;
+				last = x;
+			}
+			x0[y] = (int16_t)first;
+			x1[y] = (int16_t)last;
+		}
+		ovl_n++;
+	}
+}
+
+// Draws the subpicture (subtitles, menu graphics) and the selected button.
+// On a progressive picture (or one whose fields are kept) each line of the
+// subpicture is blended with the one above, as the deinterlacing does for an
+// interlaced picture: the white letters then have no edge one line tall,
+// which on an interlaced CRT output is in one field only and flickers.
+static void dvd_overlay_locked(void)
+{
+	const dvd_sub_t *cur = dvd_current_sub();
+	if (!cur || !cur->sub.num_rects) return;
+	if (ovl_gen != dvd.ovl_gen || ovl_rect0 != cur->sub.rects[0] || ovl_soft != overlay_soften)
+	{
+		ovl_build(cur);
+		ovl_gen = dvd.ovl_gen;
+		ovl_rect0 = cur->sub.rects[0];
+		ovl_soft = overlay_soften;
+	}
+	for (int n = 0; n < ovl_n; n++)
+	{
+		const ovl_rect_t *q = &ovl_r[n];
+		// while the controls are on screen, a subtitle under them is moved
+		// up above them, so the language just chosen can be seen at once
+		int h = q->rows - (overlay_soften ? 1 : 0);
+		int dy = 0;
+		if (ovl_shown && ovl_a && !dvd.hl_on && src_h == fb_h && q->y + h + 1 > ovl_y && h < ovl_y)
+			dy = ovl_y - (q->y + h + 1);
+		if (dy < -q->y) dy = -q->y;
+		for (int y = 0; y < q->rows; y++)
+		{
+			if (q->x1[y] < q->x0[y]) continue;
+			int sy = q->y + y + dy;
 			if (sy < 0 || sy >= src_h) continue;
 			uint8_t *dst = frame_rgb + (size_t)sy * src_w * 4;
-			const uint16_t *o = buf + (size_t)y * r->w * 4;
-			for (int x = 0; x < r->w; x++, o += 4)
+			const uint8_t *d = q->px + ((size_t)y * q->w + q->x0[y]) * 4;
+			for (int x = q->x0[y]; x <= q->x1[y]; x++, d += 4)
 			{
-				int sx = r->x + x;
-				int a = o[3];
+				int sx = q->x + x;
+				int a = d[3];
 				if (!a || sx < 0 || sx >= src_w) continue;
-				blend(dst + sx * 4, o[0] / a, o[1] / a, o[2] / a, a);
+				blend(dst + sx * 4, d[0], d[1], d[2], a);
 			}
 		}
 	}
@@ -961,7 +1047,11 @@ static void dvd_make_labels(void)
 		if (l < 0) snprintf(s, sizeof(s), "  Sott. no");
 		else snprintf(s, sizeof(s), "  Sott. %d/%d%s", l + 1, ns, lang_name(dvdnav_spu_stream_to_lang(dvd.nav, l), lang));
 	}
-	snprintf(dvd.audio_label, sizeof(dvd.audio_label), "%s%s", a, s);
+	char label[sizeof(dvd.audio_label)];
+	snprintf(label, sizeof(label), "%s%s", a, s);
+	DVD_LOCK();
+	memcpy(dvd.audio_label, label, sizeof(label));
+	DVD_UNLOCK();
 }
 
 static void dvd_stop_thread(void)
@@ -1058,6 +1148,11 @@ static void *dvd_reader(void *arg)
 	(void)arg;
 	while (dvd.thread_run)
 	{
+		if (dvd.labels_req)
+		{
+			dvd.labels_req = 0;
+			dvd_make_labels();
+		}
 		DVD_LOCK();
 		int flush = dvd.req_flush, seek = dvd.req_seek, audio = dvd.req_audio;
 		double seek_to = dvd.seek_to;
@@ -1150,6 +1245,8 @@ static int dvd_play(const char *device)
 	native_fb = !getenv("MC_ARMSCALE");
 
 	frames_shown = frames_dropped = 0;
+	dvd_nav_state();
+	dvd.labels_req = 1;
 	dvd.thread_run = 1;
 	if (pthread_create(&dvd.thread, NULL, dvd_reader, NULL))
 	{
@@ -1176,7 +1273,7 @@ static int dvd_play(const char *device)
 		// A menu of the disc: the arrows and A belong to its buttons, also
 		// in a menu whose button information is not in the packet just read
 		// (otherwise they changed the sound and the subtitles under it).
-		int menu = dvd_in_menu() || (!dvdnav_is_domain_vts(dvd.nav) && !dvdnav_is_domain_fp(dvd.nav));
+		int menu = dvd_in_menu() || (!dvd.nav_vts && !dvd.nav_fp);
 		pci_t *pci = dvdnav_get_current_nav_pci(dvd.nav);
 
 		for (int code; (code = input_key(t));)
@@ -1274,7 +1371,7 @@ static int dvd_play(const char *device)
 			case KEY_REWIND:
 			{
 				int want = (code == KEY_PAGEDOWN || code == KEY_FASTFORWARD) ? ST_FF : ST_REW;
-				if (p.state == ST_STOP || !dvdnav_is_domain_vts(dvd.nav)) break;
+				if (p.state == ST_STOP || !dvd.nav_vts) break;
 				if (p.state == want)
 				{
 					dvd_scan_end();
@@ -1356,6 +1453,19 @@ static int dvd_play(const char *device)
 			}
 			show = due_frame();
 			dvd_expire_subs();
+			{
+				// a subpicture due now, or ended, is drawn at once, also
+				// without a new picture: a menu may show one picture and
+				// then only sound, and its text waited for the next loop
+				static const void *on_screen;
+				const dvd_sub_t *cs = dvd_current_sub();
+				const void *id = cs && cs->sub.num_rects ? (const void *)cs->sub.rects[0] : NULL;
+				if (id != on_screen)
+				{
+					dvd.overlay_dirty = 1;
+					on_screen = id;
+				}
+			}
 			if (diag_menu())
 			{
 				const dvd_sub_t *cs = dvd_current_sub();
@@ -1448,15 +1558,19 @@ static int dvd_play(const char *device)
 			info.confirm_exit = p.confirm_exit;
 			info.time = (p.state == ST_FF || p.state == ST_REW) ? p.ff_time : title_time;
 			info.duration = dvd.duration;
-			int32_t title = 0, part = 0;
-			if (dvdnav_current_title_info(dvd.nav, &title, &part) == DVDNAV_STATUS_OK && title > 0)
+			if (dvd.nav_title > 0)
 			{
 				info.chapters = dvd.chapters;
-				info.chapter = part;
+				info.chapter = dvd.nav_part;
 			}
 			info.audio_mode = audio_mode;
-			dvd_make_labels();
-			info.audio_label = dvd.audio_label[0] ? dvd.audio_label : NULL;
+			// made by the reader, which may ask libdvdnav without a wait
+			static char label[sizeof(dvd.audio_label)];
+			dvd.labels_req = 1;
+			DVD_LOCK();
+			memcpy(label, dvd.audio_label, sizeof(label));
+			DVD_UNLOCK();
+			info.audio_label = label[0] ? label : NULL;
 			if (menu)
 			{
 				info.state_label = "MENU DVD";
