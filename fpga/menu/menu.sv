@@ -385,7 +385,7 @@ wire std_pal = (LFB_HEIGHT == 576 || LFB_HEIGHT == 288) ? 1'b1 :
                (LFB_HEIGHT == 480 || LFB_HEIGHT == 240) ? 1'b0 : status[4];
 wire next_pal = force_mode ? (CRT_MODE <= 3'd2) : fb_ok ? std_pal : status[4];
 wire [11:0] next_lines = next_pal ? (forced_scandoubler ? 12'd576 : 12'd288) : (forced_scandoubler ? 12'd480 : 12'd240);
-wire next_scaled = fb_ok && (force_mode || LFB_WIDTH > 640 || LFB_HEIGHT > next_lines);
+wire next_scaled = fb_ok && (force_mode || LFB_WIDTH > 720 || LFB_HEIGHT > next_lines);
 wire next_ilace = force_mode ? (CRT_MODE == 3'd1 || CRT_MODE == 3'd3)
                              : next_scaled && !forced_scandoubler && LFB_HEIGHT >= 400;
 
@@ -403,9 +403,15 @@ lfsr #(lfsr_n) random(rnd);
 
 // Lines of the field: interlaced fields alternate 263/262 (NTSC) or 313/312
 // (PAL) lines, 525/625 in all.
+//
+// A line has 864 (PAL) or 858 (NTSC) pixels at 13.5 MHz, 720 of them shown,
+// as ITU-R BT.601 / BT.656: 64 us and 15.625 kHz, or 63.56 us and 15.734 kHz.
+// The 720 pixels (53.3 us) are centered on the standard's active line, as a
+// DVD player's. With the scandoubler (27 MHz) these are 576p and 480p.
 wire [9:0] last_line = PAL ? (forced_scandoubler ? 10'd623 : (ILACE & ~field) ? 10'd312 : 10'd311)
                            : (forced_scandoubler ? 10'd523 : (ILACE & ~field) ? 10'd262 : 10'd261);
-wire [9:0] last_pix  = PAL ? 10'd799 : 10'd793;
+wire [9:0] last_pix  = PAL ? 10'd863 : 10'd857;
+wire [9:0] hs_start  = PAL ? 10'd732 : 10'd736; // horizontal sync: 64 pixels, 4.74 us
 
 always @(posedge CLK_VIDEO) begin
 	if(forced_scandoubler) ce_pix <= 1;
@@ -444,11 +450,11 @@ reg VSync;
 
 // The second field's vertical sync starts half a line earlier, so its lines
 // fall between the first field's.
-wire [9:0] vs_hc = (ILACE & field) ? (PAL ? 10'd272 : 10'd275) : 10'd672;
+wire [9:0] vs_hc = (ILACE & field) ? (PAL ? 10'd300 : 10'd307) : hs_start;
 
 reg ce_pix;
 always @(posedge CLK_VIDEO) begin
-	if (hc == 640) HBlank <= 1;
+	if (hc == 720) HBlank <= 1;
 		else if (hc == 0) HBlank <= 0;
 
 	if (hc == vs_hc) begin
@@ -462,7 +468,7 @@ always @(posedge CLK_VIDEO) begin
 		end
 	end
 
-	if (hc == 672) begin
+	if (hc == hs_start) begin
 		HSync <= 1;
 
 		// set and cleared at the end of a line: lines 0 to 287 (239) shown
@@ -476,7 +482,7 @@ always @(posedge CLK_VIDEO) begin
 		end
 	end
 	
-	if (hc == 736) HSync <= 0;
+	if (hc == hs_start + 10'd64) HSync <= 0;
 end
 
 reg  [7:0] cos_out;

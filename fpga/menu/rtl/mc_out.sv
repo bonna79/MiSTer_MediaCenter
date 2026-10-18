@@ -1,11 +1,17 @@
 // Linux frame buffer on the menu core's own (15 kHz) video output.
 //
-// A frame buffer that fits the 640 pixels wide output is shown 1:1 and
-// centered, like the stock console output. A larger one (MiSTer MediaCenter
-// playing a DVD or a video file) is scaled to fill the output: the source
-// pixel and line of every output pixel are picked by nearest neighbour, so an
+// The output has 720 pixels a line at 13.5 MHz, as a DVD player's (ITU-R
+// BT.601). A frame buffer that fits it is shown 1:1 and centered, like the
+// stock console output. A larger one (MiSTer MediaCenter playing a DVD or a
+// video file) is scaled to fill the output. Across, each output pixel is
+// blended from the two source pixels around it (a DVD's 720 pixels map 1:1;
+// a narrower or wider picture is spread or narrowed evenly, without doubled or
+// lost columns). Down, the source line is picked by nearest neighbour, so an
 // interlaced output (480i/576i) gets the frame buffer's own lines in each
 // field. With "wide" a 16:9 picture is letterboxed on the 4:3 screen.
+//
+// MiSTer MediaCenter's lists (32 bits per pixel, 640 wide) keep their pixels
+// 1:1 across, centered: the text stays sharp.
 //
 // CRT Adjust (after rmonic79's MiSTer CRT Adjust): a scaled picture can be
 // made narrower or wider, shorter or taller and moved on the screen to fit a
@@ -59,11 +65,12 @@ module mc_out
 	output reg        active = 0
 );
 
-localparam WIDTH = 640;
+localparam WIDTH = 720;
 localparam BURST = 32;
 
 reg  [5:0] fmt;
 reg [11:0] w, h;
+reg        lst;
 reg        flt;
 reg  [9:0] out_h, cols, lines, left, top;
 reg  [1:0] show_s = 0;
@@ -79,10 +86,12 @@ wire [10:0] act_y0 = wd ? (pic_h >> 3) : 11'd0;
 // The picture's rectangle after CRT Adjust: width and left edge in output
 // pixels, height and top in lines of the whole picture (both fields). The top
 // stays even on an interlaced output, so the fields keep their order.
-reg signed [11:0] pic_w = 640, pic_x0 = 0, pic_hh = 0, pic_y0 = 0;
+// The lists are 640 wide 1:1 (CRT Adjust still widens or narrows them); the
+// other pictures fill the 720 pixels.
+reg signed [11:0] pic_w = 720, pic_x0 = 0, pic_hh = 0, pic_y0 = 0;
 always @(posedge clk_vid) begin
-	pic_w  <= 12'sd640 + $signed({{4{adj_hsize[4]}}, adj_hsize, 3'b000});
-	pic_x0 <= ((12'sd640 - pic_w) >>> 1) + $signed({{5{adj_hpos[5]}}, adj_hpos, 1'b0});
+	pic_w  <= (lst ? 12'sd640 : 12'sd720) + $signed({{4{adj_hsize[4]}}, adj_hsize, 3'b000});
+	pic_x0 <= ((12'sd720 - pic_w) >>> 1) + $signed({{5{adj_hpos[5]}}, adj_hpos, 1'b0});
 	pic_hh <= $signed({1'b0, act_h}) + (ilc ? $signed({{4{adj_vsize[4]}}, adj_vsize, 3'b000})
 	                                        : $signed({{5{adj_vsize[4]}}, adj_vsize, 2'b00}));
 	pic_y0 <= $signed({1'b0, act_y0}) + ((($signed({1'b0, act_h}) - pic_hh) >>> 2) <<< 1) +
@@ -99,6 +108,7 @@ always @(posedge clk_vid) begin
 	wd     <= wide;
 	fld    <= fields;
 	flt    <= vfilter;
+	lst    <= fmt[2:0] == 3'b110 && !fmt[5] && w == 12'd640;
 	cols   <= w[9:0];
 	lines  <= h[9:0];
 	left   <= (WIDTH[9:0] - cols) >> 1;
@@ -332,15 +342,22 @@ always @(posedge clk_sys) begin
 	end
 end
 
-// line buffers: the source line, and the next one for the flicker filter
-reg [63:0] buffer[2048];
-reg [63:0] buffer2[2048];
-always @(posedge clk_sys) if(bwe && !bsub) buffer[baddr]  <= bdata;
-always @(posedge clk_sys) if(bwe &&  bsub) buffer2[baddr] <= bdata;
+// Line buffers: the source line, and the next one for the flicker filter.
+// Each is split into its even and odd words, so the word of a pixel and the
+// word after it (the pixel to its right may be there) are read together.
+reg [63:0] buf_e[1024], buf_o[1024];    // source line
+reg [63:0] buf2_e[1024], buf2_o[1024];  // next line
+always @(posedge clk_sys) if(bwe && !bsub && !baddr[0]) buf_e[{baddr[10], baddr[9:1]}]  <= bdata;
+always @(posedge clk_sys) if(bwe && !bsub &&  baddr[0]) buf_o[{baddr[10], baddr[9:1]}]  <= bdata;
+always @(posedge clk_sys) if(bwe &&  bsub && !baddr[0]) buf2_e[{baddr[10], baddr[9:1]}] <= bdata;
+always @(posedge clk_sys) if(bwe &&  bsub &&  baddr[0]) buf2_o[{baddr[10], baddr[9:1]}] <= bdata;
 
-reg [63:0] q, q0, q1;
-reg  [1:0] hi, hi0;
-reg        shown, shown0, shown2;
+reg [63:0] e0, o0, e1, o1;   // words read (line, next line)
+reg [63:0] qa, qb;           // the words of the pixel and of the one to its right
+reg  [1:0] pa0, pb0, pa, pb; // the pixels' places in their words
+reg        oa0, ob0;         // the words are the odd ones
+reg  [7:0] fr0, fr;          // weight of the pixel to the right, /256
+reg        shown0, shown, shown2, shown3;
 
 // the current line's source line is inside the picture (letterbox bars)
 reg        line_on;
@@ -358,9 +375,10 @@ always @(posedge clk_vid) begin
 end
 
 always @(posedge clk_vid) begin
-	reg [10:0] sx;
+	reg [10:0] sx, sxb;
 	reg [37:0] px;
 	reg signed [11:0] hx;
+	reg  [9:0] ka, kb;
 
 	hx = $signed({2'b00, hc}) - pic_x0;
 	if(scale) begin
@@ -368,24 +386,72 @@ always @(posedge clk_vid) begin
 		sx = px[26:16];
 	end
 	else begin
+		px = 0;
 		sx = hc - left;
 	end
-	if(yuv) begin
-		q0 <= buffer[{vc[0], 1'b0, sx[10:2]}];
-		q1 <= buffer2[{vc[0], 1'b0, sx[10:2]}];
-	end
-	else begin
-		q0 <= buffer[{vc[0], sx[10:1]}];
-		q1 <= buffer2[{vc[0], sx[10:1]}];
-	end
-	hi0    <= sx[1:0];
+	// the pixel to the right, the last one at the right edge
+	sxb = ({1'b0, sx} + 1'd1 < w) ? sx + 1'd1 : sx;
+	ka  = yuv ? {1'b0, sx[10:2]}  : sx[10:1];
+	kb  = yuv ? {1'b0, sxb[10:2]} : sxb[10:1];
+	// kb is ka or ka + 1: one of them is even, the other odd
+	e0 <= buf_e[{vc[0], ka[0] ? kb[9:1] : ka[9:1]}];
+	o0 <= buf_o[{vc[0], ka[9:1]}];
+	e1 <= buf2_e[{vc[0], ka[0] ? kb[9:1] : ka[9:1]}];
+	o1 <= buf2_o[{vc[0], ka[9:1]}];
+	oa0 <= ka[0];
+	ob0 <= kb[0];
+	pa0 <= sx[1:0];
+	pb0 <= sxb[1:0];
+	fr0 <= scale ? px[15:8] : 8'd0;
 	shown0 <= scale ? (active && hc < WIDTH && hx >= 0 && hx < pic_w && px[27:16] < w && vc < out_h && line_on)
 	               : (active && hc >= left && sx < cols && vc >= top && vc - top < lines);
 
 	// the two lines averaged byte by byte (RGB or YUV alike)
-	q     <= flt ? (q0 & q1) + (((q0 ^ q1) & {8{8'hFE}}) >> 1) : q0;
-	hi    <= hi0;
+	qa    <= flt ? avg(oa0 ? o0 : e0, oa0 ? o1 : e1) : (oa0 ? o0 : e0);
+	qb    <= flt ? avg(ob0 ? o0 : e0, ob0 ? o1 : e1) : (ob0 ? o0 : e0);
+	pa    <= pa0;
+	pb    <= pb0;
+	fr    <= fr0;
 	shown <= shown0;
+end
+
+function [63:0] avg(input [63:0] x, input [63:0] y);
+	avg = (x & y) + (((x ^ y) & {8{8'hFE}}) >> 1);
+endfunction
+
+// The three bytes of a pixel: R, G, B (in the frame buffer's order) or Y, U, V.
+function [23:0] pix(input [63:0] q, input [1:0] p, input yc);
+	reg [31:0] d;
+	begin
+		if(yc) begin
+			d   = p[1] ? q[63:32] : q[31:0];
+			pix = {d[31:24], d[15:8], p[0] ? d[23:16] : d[7:0]};
+		end
+		else begin
+			d   = p[0] ? q[63:32] : q[31:0];
+			pix = d[23:0];
+		end
+	end
+endfunction
+
+// a + (b - a) * f / 256, rounded
+function [7:0] mix(input [7:0] a, input [7:0] b, input [7:0] f);
+	reg signed [17:0] t;
+	begin
+		t   = $signed({1'b0, a, 8'h80}) + ($signed({1'b0, b}) - $signed({1'b0, a})) * $signed({1'b0, f});
+		mix = t[15:8];
+	end
+endfunction
+
+// The pixel, blended with the one to its right.
+reg [23:0] px3;
+always @(posedge clk_vid) begin
+	reg [23:0] a, b;
+
+	a = pix(qa, pa, yuv);
+	b = pix(qb, pb, yuv);
+	px3    <= {mix(a[23:16], b[23:16], fr), mix(a[15:8], b[15:8], fr), mix(a[7:0], b[7:0], fr)};
+	shown3 <= shown;
 end
 
 // RGB, or the products of the YUV to RGB conversion (BT.601 limited range,
@@ -403,27 +469,20 @@ function [7:0] clip(input signed [21:0] v);
 endfunction
 
 always @(posedge clk_vid) begin
-	reg [31:0] p;
 	reg  [7:0] y, u, v;
 
-	if(yuv) begin
-		p = hi[1] ? q[63:32] : q[31:0];
-		y = hi[0] ? p[23:16] : p[7:0];
-		u = p[15:8];
-		v = p[31:24];
-	end
-	else begin
-		p = hi[0] ? q[63:32] : q[31:0];
-		y = 0; u = 0; v = 0;
-	end
+	// YUV: px3 is {V, U, Y}
+	y = px3[7:0];
+	u = px3[15:8];
+	v = px3[23:16];
 	cy  <= ($signed({3'b000, y}) - 11'sd16)  * 11'sd298;
 	cr  <= ($signed({3'b000, v}) - 11'sd128) * 11'sd409;
 	cgu <= ($signed({3'b000, u}) - 11'sd128) * 11'sd100;
 	cgv <= ($signed({3'b000, v}) - 11'sd128) * 11'sd208;
 	cb  <= ($signed({3'b000, u}) - 11'sd128) * 11'sd516;
-	rgb2   <= fmt[4] ? p[23:0] : {p[7:0], p[15:8], p[23:16]};
+	rgb2   <= fmt[4] ? px3 : {px3[7:0], px3[15:8], px3[23:16]};
 	yuv2   <= yuv;
-	shown2 <= shown;
+	shown2 <= shown3;
 
 	if(!shown2)    rgb <= 0;
 	else if(yuv2)  rgb <= {clip(cy + cr), clip(cy - cgu - cgv), clip(cy + cb)};
