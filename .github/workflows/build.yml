@@ -99,6 +99,8 @@ jobs:
           cp bin/mediacenter pkg/linux/
           cp Scripts/mediacenter.sh pkg/Scripts/
           cp LICENSE pkg/linux/mediacenter-LICENSE
+          # the MiSTer.ini lines to copy (not a MiSTer.ini: it would replace the user's)
+          cp docs/MMC_MiSTer_ini.txt pkg/
           (cd pkg && zip -r ../MiSTer_MediaCenter.zip .)
           echo "VERSION=$(cat VERSION)" >> "$GITHUB_ENV"
 

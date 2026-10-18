@@ -1,0 +1,27 @@
+; MiSTer MediaCenter - righe da copiare in /media/fat/MiSTer.ini
+; MiSTer MediaCenter - lines to copy into /media/fat/MiSTer.ini
+;
+; Non rinominare questo file in MiSTer.ini: copia solo le righe qui sotto
+; nel tuo MiSTer.ini (se le sezioni ci sono gia', correggi solo main=).
+; Do not rename this file to MiSTer.ini: copy only the lines below into
+; your MiSTer.ini (if the sections are already there, fix only main=).
+
+; Nella sezione [MiSTer] / in the [MiSTer] section, for the 15 kHz CRT:
+; vga_scaler=0
+; forced_scandoubler=0
+; composite_sync=1      (SCART RGB)
+
+; Menu del MiSTer: MiSTer MediaCenter riconosce i dischi e apre
+; DVD, Video CD, Super Video CD e file video.
+; MiSTer menu: MiSTer MediaCenter recognizes discs and opens
+; DVDs, Video CDs, Super Video CDs and video files.
+[menu]
+main=MiSTer_MediaCenter
+PHYSICAL_DISC_BOOT=1
+
+; Core dei giochi su disco (_Physical Disc Cores): il Main di
+; MiSTer Physical Disc (Anime0t4ku, da installare a parte) legge il disco.
+; Game disc cores (_Physical Disc Cores): the MiSTer Physical Disc Main
+; (Anime0t4ku, installed separately) reads the disc.
+[A0CD-*]
+main=MiSTer_Physical-CD

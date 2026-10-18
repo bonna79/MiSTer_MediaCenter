@@ -30,10 +30,21 @@ The package is made of these parts:
 | `mediacenter.sh` | `/media/fat/Scripts/` | The script shown in **Scripts**: it opens the player to pick files from SD, USB or network |
 | `menu_mediacenter.rbf` | `/media/fat/linux/` | MMC's menu core: the normal MiSTer menu plus the colour conversion and the 15 kHz output for the CRT |
 | `libdvdcss.so.2` | `/media/fat/dvdcss/` | The library for reading protected DVDs |
+| `MMC_MiSTer_ini.txt` | `/media/fat/` | The lines to copy into `MiSTer.ini` (it is not a `MiSTer.ini`: copy only the lines) |
 
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
 The player's on-screen texts are in Italian.
+
+## What's new in version 2.6
+
+- **Videos wider than the screen much smoother:** a 1440x810 H.264 MKV lost 63.8% of its pictures, now 1.4%. The player narrows the picture while copying it, without converting the colours: the FPGA does the conversion, as for 720p videos.
+- **Back from a PSX game (or another console) with the Physical Disc Main:** if the menu was left to the Physical Disc Main, the **mediacenter** script notices and puts the MMC Main back in its place. How it works in [After a game with the Physical Disc Main](#after-a-game-with-the-physical-disc-main).
+- **DVD adverts and trailers without picture:** on some DVDs (for example Shrek 2), after choosing the language you heard the trailers' sound and saw their subtitles, but the picture stayed on the menu. After a part of the disc with sound only, the player dropped every picture as "too far ahead". Now it shows them in time with the sound. The same fix makes menu animations restart properly from the second loop on.
+- **Picture diagnosis:** for 30 seconds after every jump or change of part of the disc, the log writes every second how many pictures arrive, how many are shown and how many are dropped, and why.
+- The package also holds `MMC_MiSTer_ini.txt`, with the lines to copy into `MiSTer.ini`.
+
+Tested on a real MiSTer on 18 October 2026: 1440x810 MKV smooth (3763 pictures, 44 not shown); Shrek 2 PAL on a CRT with the adverts visible (1775 pictures, 2 dropped); Star Wars Episode III with menus, chapters and audio changes as in 2.5; a PSX game and then the mediacenter script with the MMC core back on the CRT.
 
 ## What's new in version 2.5
 
@@ -157,7 +168,7 @@ Restart the MiSTer. From then on:
 
 1. MiSTer MediaCenter runs in the menu: insert a DVD or a Video CD and the player starts; insert a game and MMC starts the right core;
 2. as soon as the game core starts, the MiSTer switches by itself to the Physical Disc Main, which reads the disc;
-3. when you leave the game and go back to the menu, the MiSTer switches back to MiSTer MediaCenter by itself.
+3. when you leave the game and go back to the menu, the MiSTer switches back to MiSTer MediaCenter by itself (if sometimes it does not, see [After a game with the Physical Disc Main](#after-a-game-with-the-physical-disc-main)).
 
 Note:
 
@@ -170,6 +181,19 @@ Note:
 The other settings are explained in [Installation](#3-edit-mediafatmisterini).
 
 If you insert a DVD while a game is running, go back to the MiSTer menu: MMC recognizes it there and starts it.
+
+### After a game with the Physical Disc Main
+
+Sometimes, when you leave a game (for example a PSX game with OSD → **Reset/Exit**), the menu stays with the Physical Disc Main instead of going back to MiSTer MediaCenter. The Physical Disc Main loads the normal MiSTer menu, without MMC's CRT part. You can tell because the HDMI TV shows the menu, while the CRT shows the notice "If you see this, then you need to modify MiSTer.ini".
+
+Since version 2.6 the **mediacenter** script notices this by itself:
+
+1. start **mediacenter** from **Scripts** as usual;
+2. if another Main is running the menu, the script shows "Riavvio il Main di MiSTer MediaCenter" (restarting the MiSTer MediaCenter Main) for a few seconds, closes that Main and starts `MiSTer_MediaCenter`;
+3. the MMC Main reloads its menu core and the CRT is back to normal;
+4. **start mediacenter from Scripts again**: this second time the player starts normally, on both HDMI and the CRT.
+
+Only this second start is needed: no MiSTer restart and no change to `MiSTer.ini`. The script does this only when the `[menu]` section of `MiSTer.ini` has `main=MiSTer_MediaCenter`. The file `/tmp/mediacenter_main.log` keeps the line `script: menu run by ...` with the Main it found.
 
 ## What it plays
 
@@ -207,7 +231,7 @@ MMC is made for standard-definition video. These are the recommended maximum res
 | --- | --- |
 | DVD (MPEG-2 720x576) | less than 1% |
 | 8-bit H.264 1280x720 | 1.4–2.5% (was 10% before the FPGA converted the colours) |
-| 8-bit H.264 1440x810 | about 65% (measured with version 1.0) |
+| 8-bit H.264 1440x810 | about 1.4% (was about 65% up to 2.5) |
 | 10-bit H.264 (Hi10p) 1280x720 | about 78% (measured with version 1.0) |
 
 With a 720p H.264 video the ARM needs about 30 ms to decode a picture, out of 41.7 ms available at 24 pictures per second. That is why the colour conversion, which took another 16 ms, moved to the FPGA: the ARM now copies the picture in 5.5 ms.
@@ -279,7 +303,7 @@ Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI o
 | Super Video CD (`.bin` + `.cue` image from the SD card) | Menu and all three test entries work |
 | Data DVD-R with DivX and MKV files | The file list opens by itself, full-screen video |
 | 720p H.264 MP4 (anime, 23.976 pictures per second) | Smooth, 1.4–2.5% of pictures not shown, sound in sync, correct colours with the FPGA conversion |
-| 1440x810 H.264 MP4 | Shown whole, narrowed to the screen width, but stutters |
+| 1440x810 H.264 MKV, version 2.6 | Whole and smooth, sound and picture perfect: 3763 pictures, 44 not shown (1.4%; 63.8% with 2.5) |
 | DVD on a CRT (15 kHz VGA, SCART RGB), version 2.1 | Picture centred and whole, 576i; DVD menu and film correct |
 | 576x432 DivX over HDMI 720p and on a CRT, version 2.1 | Whole on both outputs (before 2.1 it was cut on the right over HDMI) |
 | Latest official Main (16 October 2026) as `/media/fat/MiSTer`, version 2.1 | Everything works, no problems |
@@ -289,6 +313,8 @@ Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI o
 | DVD started from the mediacenter script, version 2.5 | As smooth as with the disc inserted |
 | Back to the menu after a game, on CRT, version 2.5 | The CRT shows the MMC menu at once |
 | CRT Adjust, version 2.5 | Width, positions, height, mode and filter work; measures 480i 60 Hz in lists and 576i 50 Hz with PAL DVDs |
+| Protected PAL DVD with adverts after the language choice (Shrek 2), version 2.6 | Adverts with picture, sound and subtitles; then menu and film. 1775 pictures, 2 dropped |
+| PSX game with the Physical Disc Main, then the mediacenter script, version 2.6 | The script puts the MMC Main back; on the second start the CRT shows the player |
 | Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
 
 Still to test: Super Video CD read from a burned disc.
@@ -297,7 +323,7 @@ Still to test: Super Video CD read from a burned disc.
 
 ### 1. Download the files
 
-From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds the Main, the player, the menu core and the library for protected DVDs. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
+From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds everything MMC needs: the Main, the player, the script, the menu core, the library for protected DVDs and `MMC_MiSTer_ini.txt` with the lines for `MiSTer.ini`. The Physical Disc Main, for games, is downloaded from its own project. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
 
 The latest version is on the [Actions](../../actions) page. Open the latest successful run (green tick) of **Build MiSTer MediaCenter** and download `MiSTer_MediaCenter` and `mediacenter_arm`. The menu core is in the **Build MediaCenter menu core** run, file `mediacenter_rbf`.
 
