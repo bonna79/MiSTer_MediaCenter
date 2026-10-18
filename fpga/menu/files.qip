@@ -4,3 +4,4 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/mc_out.sv
 set_global_assignment -name VERILOG_FILE rtl/lfsr.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cos.sv
 set_global_assignment -name SYSTEMVERILOG_FILE menu.sv
+set_global_assignment -name SDC_FILE menu.sdc
