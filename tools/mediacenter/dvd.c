@@ -41,6 +41,7 @@ typedef struct
 	int want_audio_id; // substream id to play (dvd_audio_id)
 	int audio_id;     // substream id being decoded (0x80.., 0x88.., 0xA0.., 0xC0..)
 	int audio_codec;  // AVCodecID of adec
+	int audio_resync; // a new audio track: frames left to wait for one with its own time
 	AVChannelLayout swr_layout;
 	int swr_rate, swr_fmt;
 
@@ -222,6 +223,19 @@ static void dvd_audio_frame(AVFrame *f)
 		printf("mediacenter: DVD sound %d Hz, %d channels\n", f->sample_rate, f->ch_layout.nb_channels);
 	}
 	double pts = f->best_effort_timestamp == AV_NOPTS_VALUE ? NAN : dvd_pos(f->best_effort_timestamp);
+	// After a change of audio track the new sound starts at a frame with its
+	// own time. A frame without one went to the time of the picture on the
+	// screen, about a second before its real place (the disc is read that
+	// far ahead), and the frames after it followed: the sound stayed late,
+	// was dropped, and the pictures slowed down to wait for it. It happened
+	// with the 2-channel tracks (commentaries), whose packets hold several
+	// frames and so begin with frames without a time. A track that never
+	// gives a time plays anyway after a few frames.
+	if (dvd.audio_resync)
+	{
+		if (isnan(pts) && --dvd.audio_resync > 0) return;
+		dvd.audio_resync = 0;
+	}
 	DVD_LOCK();
 	// keep continuity across small timestamp jitter
 	if (!isnan(pts) && mc.pend_len && fabs(pts - mc.audio_end) < 0.08) pts = NAN;
@@ -1014,6 +1028,7 @@ static void *dvd_reader(void *arg)
 		if (audio)
 		{
 			dvd.want_audio_id = dvd_audio_id();
+			dvd.audio_resync = 16;
 			if (mc.adec) avcodec_flush_buffers(mc.adec);
 			if (dvd.apar) { av_parser_close(dvd.apar); dvd.apar = av_parser_init(dvd.audio_codec); }
 			DVD_LOCK();
