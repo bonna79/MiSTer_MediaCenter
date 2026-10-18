@@ -1059,6 +1059,21 @@ static void pack_yuyv(uint8_t *dst, const uint8_t *y, const uint8_t *u, const ui
 	}
 }
 
+// pack_yuyv for a picture wider than the framebuffer: output pixel x takes
+// source pixel map[x] (the same nearest-pixel choice as the RGB path), and
+// each output pair takes the colour of its first pixel's source pair.
+static void pack_yuyv_map(uint8_t *dst, const uint8_t *y, const uint8_t *u, const uint8_t *v, const int *map, int w)
+{
+	for (int x = 0; x + 1 < w; x += 2)
+	{
+		int s = map[x];
+		dst[2 * x] = y[s];
+		dst[2 * x + 1] = u[s / 2];
+		dst[2 * x + 2] = y[map[x + 1]];
+		dst[2 * x + 3] = v[s / 2];
+	}
+}
+
 #if defined(__arm__)
 #pragma GCC pop_options
 #endif
@@ -1080,6 +1095,19 @@ static void yuv_draw(void)
 	AVFrame *f = yuv_last;
 	int w = fb_w < (f ? f->width : 0) ? fb_w : (f ? f->width : 0);
 	w &= ~1;
+	// A picture wider than the framebuffer (only when it is wider than the
+	// screen) is narrowed here, while it is copied.
+	static int *map, map_src, map_w;
+	int narrow = f && f->width > fb_w;
+	if (narrow && (map_src != f->width || map_w != w))
+	{
+		free(map);
+		map = (int *)malloc((size_t)w * sizeof(int));
+		map_src = map ? f->width : 0;
+		map_w = map ? w : 0;
+		if (!map) return;
+		for (int x = 0; x < w; x++) map[x] = x * f->width / w;
+	}
 	for (int y = 0; y < fb_h; y++)
 	{
 		uint8_t *out = fb_mem + (size_t)y * fb_stride;
@@ -1092,8 +1120,12 @@ static void yuv_draw(void)
 		else
 		{
 			fb_blank(row_buf + w * 2, (size_t)(fb_w - w) * 2);
-			pack_yuyv(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
-				f->data[2] + (size_t)cy * f->linesize[2], w);
+			if (narrow)
+				pack_yuyv_map(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+					f->data[2] + (size_t)cy * f->linesize[2], map, w);
+			else
+				pack_yuyv(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+					f->data[2] + (size_t)cy * f->linesize[2], w);
 		}
 		if (band)
 		{
@@ -1158,10 +1190,13 @@ static void draw_video_frame(AVFrame *f)
 		// the FPGA converts the colours: the ARM only copies it. Decided on
 		// the first picture of a file (interlaced video stays in RGB, for
 		// the deinterlacing).
+		// A picture wider than the screen is narrowed while it is copied, still
+		// in YUV (before, it went to RGB on the ARM: about 90 ms a picture).
+		int narrow = mx == 1 && fw < f->width;
 		if (yuv_stream < 0)
 			yuv_stream = yuv_ok && !getenv("MC_NOYUV") && !frame_overlay && f->format == AV_PIX_FMT_YUV420P &&
-				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && fw == f->width && fh == h && !(fw & 1);
-		int yuv = yuv_stream && yuv_ok && fw == f->width && fh == h && f->format == AV_PIX_FMT_YUV420P;
+				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && (fw == f->width || narrow) && fh == h && !(fw & 1);
+		int yuv = yuv_stream && yuv_ok && (fw == f->width || narrow) && fh == h && f->format == AV_PIX_FMT_YUV420P;
 		fb_native_fmt(fw, fh, fb_aspect, yuv);
 		if (yuv && !fb_yuv) fb_native_fmt(fw, fh, fb_aspect, 0); // refused
 		if (fb_yuv && fb_mem)
