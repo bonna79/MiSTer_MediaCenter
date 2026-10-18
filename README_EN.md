@@ -13,7 +13,7 @@ MiSTer MediaCenter (MMC) turns the MiSTer FPGA (DE10-Nano) into a media player f
 It is made for **standard-definition** formats, at DVD resolution or lower, and for two kinds of screen:
 
 - **LCD TVs**, through HDMI, at the TV's resolution;
-- **above all CRT TVs**, through the analog VGA output at **15 kHz**: the video reaches the CRT as its original signal, 480i/576i for DVDs and 240p/288p for the menu, with no conversion.
+- **above all CRT TVs**, through the analog VGA output at **15 kHz**: the video reaches the CRT as its original signal, 576i for PAL DVDs and 480i for NTSC ones, with no conversion, and the picture is fitted to the TV with CRT Adjust.
 
 Both outputs work at the same time: the same video goes to the LCD TV over HDMI and to the CRT over VGA.
 
@@ -35,6 +35,30 @@ The old `vcd_player` from the first versions is no longer needed: the Video CD p
 
 The player's on-screen texts are in Italian.
 
+## What's new in version 2.5
+
+Version 2.5 is mostly about CRT TVs and DVDs.
+
+- **CRT Adjust:** a new screen, the last entry of the **mediacenter** script, fits the picture to your CRT without opening the TV. It sets **Width**, **Horizontal position**, **Height**, **Vertical position**, **15 kHz mode** and **Flicker filter**, and shows the resolution **measured** on the output. Details in [CRT Adjust](#crt-adjust-geometry). This feature was made possible by the work of Umberto Parisi of [Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici) (see [Thanks](#thanks)).
+- **True interlaced DVDs on the CRT:** the menu core changes picture only at the start of a field. PAL DVDs at 576i 50 Hz and NTSC ones at 480i 60 Hz play smoothly, with no jumping lines and no torn pictures.
+- **Lists drawn for the CRT:** the file list and CRT Adjust are drawn 640 pixels wide with the lines of the CRT mode, with bold titles and entries. Text stays whole and readable at 15 kHz too.
+- **Flicker filter** in the FPGA core: thin white text no longer flickers on the interlaced output.
+- **Controls and subtitles readable on the CRT:** larger characters, controls on two rows with a line for audio and subtitles, and subtitles move above the controls while these are shown.
+- **Diagnosis lines in the log** (`mediacenter: diag ...`): for every stutter they say how many pictures were dropped and why (disc read, decoding, drawing, sound). They help understand problems from your tests. `MC_DIAG=0` in `mediacenter.ini` turns them off.
+
+Fixes:
+
+- **CRT after a game:** back in the menu after a core, the MiSTer loaded the stock menu and the CRT showed only noise or the "modify MiSTer.ini" warning until power off. The MMC Main now always reloads its own menu core.
+- **DVDs on the CRT with jumping lines and torn pictures** every 10-15 seconds: fixed in the core, which takes the new page address only once it is stable, and in the player.
+- **Audio track change** from 5.1 to the 2-channel commentary: the picture stopped for about 5 seconds. The video now never waits and the new sound starts at the film's position.
+- **DVD started from the mediacenter script** slower (18% of pictures dropped): the player now uses both ARM cores however it is started.
+- **Small stutters during the film** (100-200 ms): the player asked libdvdnav for the DVD state while it was reading the disc, and had to wait. The state is now copied by the disc reader.
+- **DVD menus:** chapter selection no longer stutters, because highlighted buttons are prepared once instead of for every picture. Menu text appears at once and complete, instead of on the second loop of the music: the player pushes the menu's last picture out of the decoder as soon as the disc signals the end of the video sequence, like set-top players.
+- **Joypad keys written over the DVD menu:** the Linux console now stays hidden while the player is open.
+- **Disc starting again by itself** after stop and exit: the Main ignores the disc in the drive until it is removed.
+
+Tested on a real MiSTer on 17 and 18 October 2026, on Sony Trinitron CRTs over SCART RGB (also on a second CRT): protected PAL DVD with menus, chapter selection and three audio tracks with the commentary; 3709 film pictures with only 3 dropped; DivX and MP4.
+
 ## What's new in version 2.1
 
 - **Working 15 kHz output for CRTs:** the player's video now reaches the CRT TV from the analog VGA output (tested with a SCART RGB cable on a Trinitron). With 2.0 the CRT only showed the menu background, because the Main never told the menu core there was a picture to show.
@@ -49,22 +73,38 @@ Fixes:
 
 Tested on a real MiSTer (16 October 2026): DVD and DivX over HDMI at 720p and on a CRT at 15 kHz interlaced, both with the previous official Main and with the latest official Main installed as `/media/fat/MiSTer`, the one used by the other cores.
 
-## How it works
+## How it works (technical part)
 
-The work is split between the two halves of the MiSTer:
+The MiSTer has two halves: a dual-core 800 MHz Cortex-A9 **ARM** processor running Linux, and an **FPGA** that generates the video outputs. MMC splits the work like this: the ARM reads and decodes, the FPGA shows. The FPGA does not decode video.
 
-| Part | What it does |
-| --- | --- |
-| **ARM** (Cortex-A9 processor at 800 MHz, Linux) | The Main recognizes the disc. The `mediacenter` player reads the disc or file, decodes video and audio with FFmpeg (DVDs with libdvdnav and libdvdcss), handles DVD menus, subtitles and audio/video sync, and writes each picture to the frame buffer, an area of memory shared with the FPGA |
-| **FPGA** (`menu_mediacenter.rbf` core and scaler) | Reads the pictures from the frame buffer. Converts the colours from YUV to RGB, work that saves the ARM about 16 ms per picture. For HDMI the scaler enlarges the picture to the TV's resolution with the right shape. For the CRT the core generates the 15 kHz signal by itself: 240p/288p for the menu, 480i/576i interlaced for DVDs and video, narrowing the picture to 640 pixels and adding black bars to 16:9 films |
+### ARM side
 
-The path of a picture:
+**The Main (`MiSTer_MediaCenter`)** is the MiSTer Main with disc detection added:
 
-1. the ARM decodes the picture and writes it to one of the three frame buffer pages, while the scaler shows the previous one (so the picture never tears);
-2. the player tells the Main which page to show (`fb_cmd3 page`), and the Main passes it to the FPGA;
-3. the FPGA sends the same picture to HDMI and VGA at the same time.
+- when you insert a disc it examines it once: DVD-Video, Video CD, Super Video CD and data DVDs with video files are opened with the player, games are started with the console's core;
+- it receives the player's `fb_cmd3` commands (frame buffer format and size, page to show, CRT Adjust, 15 kHz mode) and passes them to the FPGA;
+- it measures the signal actually coming out of the core and writes it to `/tmp/mediacenter_crt`;
+- if it finds the stock menu loaded, for example when coming back from a game, it reloads the MMC core.
 
-The sound goes from the ARM to the MiSTer's audio output, and the video follows the sound to stay in sync.
+**The player (`mediacenter`)** is a single program for discs and files, using both ARM cores:
+
+- one thread reads the disc: DVDs through libdvdnav and libdvdcss (menus, buttons, chapters, still pictures), Video CDs and Super Video CDs straight from the sectors;
+- FFmpeg decodes the video (MPEG-1, MPEG-2, MPEG-4, H.264…) in a thread of its own, and the sound (AC3, DTS, MPEG, AAC…);
+- the sound goes to the MiSTer's audio output, and the video follows the audio clock to stay in sync;
+- with interlaced DVDs the player blends the two fields of each picture (`MC_FIELDS=1` keeps them apart);
+- subtitles, DVD menu buttons and on-screen controls are drawn over the picture;
+- every picture is copied to the frame buffer, an area of DDR memory shared with the FPGA, in YUV 4:2:2 format, without converting the colours.
+
+The frame buffer has three pages: the ARM writes the next picture into one page while the FPGA shows another, then tells the Main which one to show (`fb_cmd3 page`). With a 720p H.264 video the ARM takes about 30 ms to decode a picture and 5.5 ms to copy it, out of the 41.7 ms available at 24 pictures per second.
+
+### FPGA side (`menu_mediacenter.rbf` core)
+
+It is the MiSTer menu core with two additions, which read the same frame buffer from DDR memory:
+
+- **HDMI:** the MiSTer scaler carries the picture in YUV up to the output, converts it to RGB at the end and enlarges it to the TV's resolution (`video_mode`) with the right shape. Converting the colours in the FPGA saves the ARM about 16 ms per picture.
+- **15 kHz CRT (`mc_out` module):** generates the CRT signal by itself, independent of HDMI: 576i or 480i for video, following a PAL or NTSC DVD, or 288p or 240p when forced in CRT Adjust. It converts the colours, narrows the picture to 640 pixels, adds black bars to 16:9 films and applies CRT Adjust by redrawing the picture in the new rectangle without touching the sync, so the CRT never loses lock. It changes page only at the start of a field and only once the address is stable, so the picture never tears. The flicker filter averages each line with the one below.
+
+The two outputs work together: the same picture goes to HDMI and VGA at the same time. There is a single sound stream, which reaches HDMI, the analog output and the optical output together.
 
 The FPGA does not decode video: an H.264 decoder does not fit and there is no free one suited to the MiSTer. That is why the practical limit is 720p H.264.
 
@@ -184,7 +224,7 @@ To watch an HD video, convert it to DVD resolution, for example with HandBrake: 
 ## Video output: HDMI and 15 kHz CRT
 
 - **HDMI (LCD TV):** the FPGA scaler enlarges the video to the resolution set with `video_mode` in `MiSTer.ini`, with the right shape (4:3, 16:9, 2.35:1 with black bars).
-- **15 kHz VGA (CRT TV):** the `menu_mediacenter.rbf` core sends the video to the CRT as its original signal. The menu comes out at 240p/288p; a DVD comes out interlaced at 480i (NTSC) or 576i (PAL), as from a DVD player; a 16:9 film is shown with black bars above and below (letterbox).
+- **15 kHz VGA (CRT TV):** the `menu_mediacenter.rbf` core sends the video to the CRT as its original signal. The player's lists come out at 480i (576i with `menu_pal=1` in `MiSTer.ini`); a DVD comes out interlaced at 576i (PAL) or 480i (NTSC), as from a DVD player, and in Auto mode the CRT changes frequency by itself; a 16:9 film is shown with black bars above and below (letterbox).
 
 MMC does not need to force anything: HDMI and CRT work with the MiSTer's normal settings. The general `[MiSTer]` part of `MiSTer.ini` just needs the scaler not to be sent to the VGA:
 
@@ -212,7 +252,7 @@ If the CRT's geometry is off, the picture can be narrowed, widened and moved wit
 | B | Exits without saving |
 | Y | Resets everything to zero |
 
-The adjustments apply to the player's video on the 15 kHz output; HDMI does not change. The menu core redraws the picture in the new rectangle without changing the sync, so the CRT never loses lock and the colours stay the original ones. The idea comes from rmonic79's [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) (Umberto Parisi, Beceri Videoludici), adapted to the way MMC draws the picture.
+The adjustments apply to the player's video on the 15 kHz output; HDMI does not change. The menu core redraws the picture in the new rectangle without changing the sync, so the CRT never loses lock and the colours stay the original ones. This feature was made possible by the work of Umberto Parisi (rmonic79) of Beceri Videoludici: it comes from his [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust), adapted to the way MMC draws the picture. Follow their YouTube channel, [I Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici).
 
 The same screen has two entries for the 15 kHz output, handled by the menu's FPGA core:
 
@@ -229,7 +269,7 @@ The lists and the CRT Adjust screen use a picture 640 pixels wide with the lines
 
 ## Tested on a real MiSTer
 
-Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 16 October 2026; Sony Trinitron CRT over SCART RGB.
+Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 18 October 2026; Sony Trinitron CRT over SCART RGB.
 
 | Test | Result |
 | --- | --- |
@@ -243,6 +283,12 @@ Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI o
 | DVD on a CRT (15 kHz VGA, SCART RGB), version 2.1 | Picture centred and whole, 576i; DVD menu and film correct |
 | 576x432 DivX over HDMI 720p and on a CRT, version 2.1 | Whole on both outputs (before 2.1 it was cut on the right over HDMI) |
 | Latest official Main (16 October 2026) as `/media/fat/MiSTer`, version 2.1 | Everything works, no problems |
+| Protected PAL DVD on CRT at 576i 50 Hz, version 2.5 | Smooth: 3709 pictures, 3 dropped; chapter skips with no problems |
+| DVD menus on CRT, version 2.5 | Menus and chapter selection smooth, text complete at once |
+| Audio track change on CRT, version 2.5 | From 5.1 to the 2-channel commentary and back with no stutter |
+| DVD started from the mediacenter script, version 2.5 | As smooth as with the disc inserted |
+| Back to the menu after a game, on CRT, version 2.5 | The CRT shows the MMC menu at once |
+| CRT Adjust, version 2.5 | Width, positions, height, mode and filter work; measures 480i 60 Hz in lists and 576i 50 Hz with PAL DVDs |
 | Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
 
 Still to test: Super Video CD read from a burned disc.
@@ -316,6 +362,8 @@ MC_AV_OFFSET=0.05
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
 | `MC_FIELDS=1` | Interlaced DVDs: sends the two original fields to the CRT instead of blending them. More detail in motion, but fine details flicker a little |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
+| `MC_MENU_HD=1` | Lists at 1280x720 as in version 2.1, instead of drawn for the CRT |
+| `MC_DIAG=0` | Turns off the `mediacenter: diag` diagnosis lines in the log |
 
 The same settings can also be given as environment variables, like the test variables below.
 
@@ -343,11 +391,13 @@ Dumping games to CHD files and writing them back to CD-R, keeping the Q subchann
 
 ## Reporting a problem
 
+Your feedback is very valuable: try MMC with your discs and TVs and write to me, even when everything works. If there are problems, send me the logs.
+
 Open a report on the [Issues](../../issues) page and attach:
 
 1. what you did and what happened: disc or file, title, region (PAL or NTSC);
 2. **photos or a video of the screen**, which help a lot;
-3. the `/tmp/mediacenter.log` file, copied before switching the MiSTer off, because `/tmp` is cleared at every restart;
+3. the `/tmp/mediacenter.log`, `/tmp/mediacenter_main.log` and `/tmp/mediacenter_crt` files, copied before switching the MiSTer off, because `/tmp` is cleared at every restart;
 4. the video output (HDMI or 15 kHz VGA) and the `MiSTer.ini` lines you changed.
 
 ## For developers
@@ -381,6 +431,12 @@ curl -fsSL https://download.videolan.org/pub/videolan/libdvdnav/6.1.1/libdvdnav-
 tools/mediacenter/build_dvdnav.sh libdvdread-6.1.3 libdvdnav-6.1.1 dvdnav-arm
 make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
 ```
+
+## Thanks
+
+- **Umberto Parisi** (rmonic79) of **Beceri Videoludici**: CRT Adjust was made possible by his work on [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust). Thanks to him, and I recommend following their YouTube channel: [I Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici).
+- **Max Riptide**, for the many tests and suggestions.
+- **Simone Roncaglio**, for the ideas suggested to improve MMC.
 
 ## Origin and license
 

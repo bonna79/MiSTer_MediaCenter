@@ -13,7 +13,7 @@ MiSTer MediaCenter (MMC) trasforma il MiSTer FPGA (DE10-Nano) in un lettore mult
 È pensato per i formati a **risoluzione standard**, quella di un DVD o più bassa, e per due tipi di schermo:
 
 - **televisori LCD**, con il collegamento HDMI, alla risoluzione del televisore;
-- **soprattutto televisori CRT**, con l'uscita analogica VGA a **15 kHz**: il video arriva al CRT con il suo segnale originale, 480i/576i per i DVD e 240p/288p per il menu, senza conversioni.
+- **soprattutto televisori CRT**, con l'uscita analogica VGA a **15 kHz**: il video arriva al CRT con il suo segnale originale, 576i per i DVD PAL e 480i per gli NTSC, senza conversioni, e l'immagine si adatta al televisore con Regola CRT.
 
 Le due uscite funzionano insieme: lo stesso video va al televisore LCD in HDMI e al CRT in VGA.
 
@@ -33,6 +33,30 @@ Il pacchetto è formato da queste parti:
 
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
 
+## Novità della versione 2.5
+
+La 2.5 è dedicata soprattutto ai televisori CRT e ai DVD.
+
+- **Regola CRT:** una nuova schermata, l'ultima voce dello script **mediacenter**, adatta l'immagine al tuo CRT senza aprire il televisore. Regola **Larghezza**, **Posizione orizzontale**, **Altezza**, **Posizione verticale**, **Modo 15 kHz** e **Filtro tremolio**, e mostra la risoluzione **Misurata** sull'uscita. Dettagli in [Regola CRT](#regola-crt-geometria). Questa funzione è stata possibile grazie al lavoro di Umberto Parisi dei [Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici) (vedi [Ringraziamenti](#ringraziamenti)).
+- **DVD interlacciati veri sul CRT:** il core del menu cambia immagine solo all'inizio di un semiquadro. I DVD PAL a 576i 50 Hz e gli NTSC a 480i 60 Hz scorrono fluidi, senza righe che saltano e senza immagini spezzate.
+- **Elenchi disegnati per il CRT:** l'elenco dei file e Regola CRT sono disegnati a 640 punti con le righe del modo del CRT, con titoli e voci in grassetto. Le scritte restano intere e leggibili anche a 15 kHz.
+- **Filtro tremolio** nel core FPGA: le scritte bianche sottili non sfarfallano più sull'uscita interlacciata.
+- **Comandi e sottotitoli leggibili sul CRT:** caratteri più grandi, comandi su due righe con una riga per audio e sottotitoli, e i sottotitoli si spostano sopra i comandi quando sono visibili.
+- **Righe di diagnosi nel log** (`mediacenter: diag ...`): per ogni scatto dicono quante immagini sono saltate e perché (lettura del disco, decodifica, disegno, audio). Servono a capire i problemi dalle vostre prove. `MC_DIAG=0` in `mediacenter.ini` le spegne.
+
+Correzioni:
+
+- **CRT dopo un gioco:** tornando al menu dopo un core, il MiSTer caricava il menu di serie e il CRT mostrava solo fruscio o l'avviso "modify MiSTer.ini" fino allo spegnimento. Ora il Main di MMC ricarica sempre il suo core del menu.
+- **DVD sul CRT con righe che saltavano e immagini spezzate** ogni 10-15 secondi: corretto nel core, che usa l'indirizzo della nuova pagina solo quando è stabile, e nel lettore.
+- **Cambio della traccia audio** dal 5.1 al commento a 2 canali: l'immagine si fermava per circa 5 secondi. Ora il video non aspetta mai e il nuovo audio parte dal punto del film.
+- **DVD avviato dallo script mediacenter** più lento (18% di immagini saltate): ora il lettore usa tutti e due i core dell'ARM, comunque venga avviato.
+- **Piccoli scatti durante il film** (100-200 ms): il lettore chiedeva lo stato del DVD a libdvdnav mentre questa leggeva il disco, e restava fermo ad aspettare. Ora lo stato lo copia chi legge il disco.
+- **Menu dei DVD:** la scelta dei capitoli non scatta più, perché i pulsanti evidenziati vengono preparati una volta sola invece che a ogni immagine. Le scritte del menu appaiono subito e complete, invece che al secondo giro della musica: il lettore fa uscire dal decodificatore l'ultima immagine del menu appena il disco segnala la fine della sequenza video, come fanno i lettori da tavolo.
+- **Tasti del joypad scritti sopra il menu del DVD:** la console di Linux ora resta nascosta mentre il lettore è aperto.
+- **Disco che ripartiva da solo** dopo stop e uscita: il Main ignora il disco nel lettore finché non viene tolto.
+
+Provata su un MiSTer vero il 17 e 18 ottobre 2026, su CRT Sony Trinitron via SCART RGB (anche su un secondo CRT): DVD PAL protetto con menu, scelta dei capitoli e tre tracce audio con il commento; 3709 immagini di film con solo 3 saltate; DivX e MP4.
+
 ## Novità della versione 2.1
 
 - **Uscita a 15 kHz per i CRT funzionante:** il video del lettore ora arriva al televisore CRT dalla VGA analogica (provato con cavo SCART RGB su un Trinitron). Con la 2.0 sul CRT si vedeva solo lo sfondo del menu, perché il Main non avvisava il core del menu che c'era un'immagine da mostrare.
@@ -47,22 +71,38 @@ Correzioni:
 
 Provata su un MiSTer vero (16 ottobre 2026): DVD e DivX su HDMI a 720p e su CRT a 15 kHz interlacciato, sia con il Main ufficiale precedente sia con l'ultimo Main ufficiale installato come `/media/fat/MiSTer`, quello usato dagli altri core.
 
-## Come funziona
+## Come funziona (parte tecnica)
 
-Il lavoro è diviso tra le due parti del MiSTer:
+Il MiSTer ha due parti: un processore **ARM** Cortex-A9 a due core a 800 MHz, con Linux, e un'**FPGA** che genera le uscite video. MMC divide il lavoro così: l'ARM legge e decodifica, l'FPGA mostra. L'FPGA non decodifica il video.
 
-| Parte | Cosa fa |
-| --- | --- |
-| **ARM** (processore Cortex-A9 a 800 MHz, Linux) | Il Main riconosce il disco. Il lettore `mediacenter` legge disco o file, decodifica video e audio con FFmpeg (DVD con libdvdnav e libdvdcss), gestisce menu dei DVD, sottotitoli e sincronismo audio/video, e scrive ogni immagine nel framebuffer, cioè in una zona della memoria condivisa con l'FPGA |
-| **FPGA** (core `menu_mediacenter.rbf` e scaler) | Legge le immagini dal framebuffer. Converte i colori da YUV a RGB, lavoro che toglie all'ARM circa 16 ms per immagine. Per l'HDMI lo scaler ingrandisce l'immagine alla risoluzione del televisore con le proporzioni giuste. Per il CRT il core genera da solo il segnale a 15 kHz: 240p/288p per il menu, 480i/576i interlacciato per DVD e video, restringendo l'immagine a 640 punti e aggiungendo le bande nere ai film 16:9 |
+### Lato ARM
 
-Il percorso di un'immagine:
+**Il Main (`MiSTer_MediaCenter`)** è il Main del MiSTer con in più il riconoscimento dei dischi:
 
-1. l'ARM decodifica l'immagine e la scrive in una delle tre pagine del framebuffer, mentre lo scaler mostra quella precedente (così l'immagine non si spezza);
-2. il lettore dice al Main quale pagina mostrare (`fb_cmd3 page`), e il Main lo comunica all'FPGA;
-3. l'FPGA manda la stessa immagine all'HDMI e alla VGA, contemporaneamente.
+- quando inserisci un disco lo esamina una volta: DVD-Video, Video CD, Super Video CD e DVD dati con file video li apre con il lettore, i giochi li avvia con il core della console;
+- riceve dal lettore i comandi `fb_cmd3` (formato e dimensioni del framebuffer, pagina da mostrare, Regola CRT, modo a 15 kHz) e li passa all'FPGA;
+- misura il segnale che esce davvero dal core e lo scrive in `/tmp/mediacenter_crt`;
+- se trova caricato il menu di serie, per esempio tornando da un gioco, ricarica il core di MMC.
 
-L'audio va dall'ARM all'uscita audio del MiSTer, e il video si regola sull'audio per restare sincronizzato.
+**Il lettore (`mediacenter`)** è un programma unico per dischi e file, che usa tutti e due i core dell'ARM:
+
+- un thread legge il disco: i DVD con libdvdnav e libdvdcss (menu, pulsanti, capitoli, fermi immagine), i Video CD e Super Video CD direttamente dai settori;
+- FFmpeg decodifica il video (MPEG-1, MPEG-2, MPEG-4, H.264…) in un thread a parte, e l'audio (AC3, DTS, MPEG, AAC…);
+- l'audio va all'uscita audio del MiSTer, e il video si regola sull'orologio dell'audio per restare sincronizzato;
+- nei DVD interlacciati il lettore fonde i due semiquadri di ogni immagine (con `MC_FIELDS=1` li tiene separati);
+- sottotitoli, pulsanti dei menu DVD e comandi a schermo vengono disegnati sopra l'immagine;
+- ogni immagine viene copiata nel framebuffer, una zona della memoria DDR condivisa con l'FPGA, in formato YUV 4:2:2, senza convertire i colori.
+
+Il framebuffer ha tre pagine: l'ARM scrive la prossima immagine in una pagina mentre l'FPGA ne mostra un'altra, poi dice al Main quale mostrare (`fb_cmd3 page`). Con un video H.264 a 720p l'ARM impiega circa 30 ms per decodificare un'immagine e 5,5 ms per copiarla, su 41,7 ms disponibili a 24 immagini al secondo.
+
+### Lato FPGA (core `menu_mediacenter.rbf`)
+
+È il core del menu del MiSTer con due aggiunte, che leggono lo stesso framebuffer dalla memoria DDR:
+
+- **HDMI:** lo scaler del MiSTer porta l'immagine in YUV fino all'uscita, la converte in RGB alla fine e la ingrandisce alla risoluzione del televisore (`video_mode`) con le proporzioni giuste. La conversione dei colori nell'FPGA toglie all'ARM circa 16 ms per immagine.
+- **CRT a 15 kHz (modulo `mc_out`):** genera da solo il segnale per il CRT, indipendente dall'HDMI: 576i o 480i per i video, secondo il DVD PAL o NTSC, oppure 288p o 240p se forzati in Regola CRT. Converte i colori, restringe l'immagine a 640 punti, aggiunge le bande nere ai film 16:9 e applica Regola CRT ridisegnando l'immagine nel nuovo riquadro senza toccare il sincronismo, così il CRT non perde mai l'aggancio. Cambia pagina solo all'inizio di un semiquadro e solo quando l'indirizzo è stabile, così l'immagine non si spezza. Il filtro tremolio fa la media di ogni riga con quella sotto.
+
+Le due uscite funzionano insieme: la stessa immagine va all'HDMI e alla VGA nello stesso momento. L'audio è uno solo e arriva insieme all'HDMI, all'uscita analogica e a quella ottica.
 
 L'FPGA non decodifica il video: un decodificatore H.264 non ci sta e non ne esiste uno libero adatto al MiSTer. Per questo il limite pratico è l'H.264 a 720p.
 
@@ -182,7 +222,7 @@ Per guardare un video HD conviene convertirlo, per esempio con HandBrake, a riso
 ## Uscita video: HDMI e CRT a 15 kHz
 
 - **HDMI (televisore LCD):** lo scaler dell'FPGA ingrandisce il video alla risoluzione impostata con `video_mode` in `MiSTer.ini`, con le proporzioni giuste (4:3, 16:9, 2.35:1 con le bande nere).
-- **VGA a 15 kHz (televisore CRT):** il core `menu_mediacenter.rbf` manda il video al CRT con il suo segnale originale. Il menu esce a 240p/288p; un DVD esce interlacciato a 480i (NTSC) o 576i (PAL), come da un lettore DVD; un film in 16:9 viene mostrato con le bande nere sopra e sotto (letterbox).
+- **VGA a 15 kHz (televisore CRT):** il core `menu_mediacenter.rbf` manda il video al CRT con il suo segnale originale. Gli elenchi del lettore escono a 480i (576i con `menu_pal=1` in `MiSTer.ini`); un DVD esce interlacciato a 576i (PAL) o 480i (NTSC), come da un lettore DVD, e con il modo Auto il CRT cambia frequenza da solo; un film in 16:9 viene mostrato con le bande nere sopra e sotto (letterbox).
 
 MMC non ha bisogno di forzare niente: HDMI e CRT funzionano con le impostazioni normali del MiSTer. Basta che nella parte generale `[MiSTer]` di `MiSTer.ini` lo scaler non sia collegato alla VGA:
 
@@ -210,7 +250,7 @@ Se il CRT ha la geometria sballata, l'immagine si può stringere, allargare e sp
 | B | Esce senza salvare |
 | Y | Riporta tutto a zero |
 
-Le regolazioni valgono per il video del lettore sull'uscita a 15 kHz; l'HDMI non cambia. Il core del menu ridisegna l'immagine nel nuovo riquadro senza cambiare il sincronismo, quindi il CRT non perde mai l'aggancio e i colori restano quelli originali. L'idea viene da [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) di rmonic79 (Umberto Parisi, Beceri Videoludici), adattata al modo in cui MMC disegna l'immagine.
+Le regolazioni valgono per il video del lettore sull'uscita a 15 kHz; l'HDMI non cambia. Il core del menu ridisegna l'immagine nel nuovo riquadro senza cambiare il sincronismo, quindi il CRT non perde mai l'aggancio e i colori restano quelli originali. Questa funzione è stata possibile grazie al lavoro di Umberto Parisi (rmonic79) dei Beceri Videoludici: viene dal suo [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust), adattato al modo in cui MMC disegna l'immagine. Seguite il loro canale YouTube, [I Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici).
 
 Nella stessa schermata ci sono due voci per l'uscita a 15 kHz, gestite dal core FPGA del menu:
 
@@ -227,7 +267,7 @@ Gli elenchi e la schermata Regola CRT usano un'immagine larga 640 punti con le r
 
 ## Prove su un MiSTer vero
 
-Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, uscita HDMI a 1280x720, fino al 16 ottobre 2026; CRT Sony Trinitron via SCART RGB.
+Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, uscita HDMI a 1280x720, fino al 18 ottobre 2026; CRT Sony Trinitron via SCART RGB.
 
 | Prova | Risultato |
 | --- | --- |
@@ -241,6 +281,12 @@ Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, usci
 | DVD su CRT (VGA 15 kHz, SCART RGB), versione 2.1 | Immagine centrata e intera, 576i; menu del DVD e film corretti |
 | DivX 576x432 su HDMI 720p e su CRT, versione 2.1 | Intero su tutte e due le uscite (prima della 2.1 era tagliato a destra su HDMI) |
 | Ultimo Main ufficiale (16 ottobre 2026) come `/media/fat/MiSTer`, versione 2.1 | Funziona tutto, nessun problema |
+| DVD PAL protetto su CRT a 576i 50 Hz, versione 2.5 | Fluido: 3709 immagini, 3 saltate; salti tra capitoli senza problemi |
+| Menu del DVD su CRT, versione 2.5 | Menu e scelta dei capitoli fluidi, scritte subito complete |
+| Cambio della traccia audio su CRT, versione 2.5 | Dal 5.1 al commento a 2 canali e ritorno senza scatti |
+| DVD avviato dallo script mediacenter, versione 2.5 | Fluido come con il disco inserito |
+| Ritorno al menu dopo un gioco, su CRT, versione 2.5 | Il CRT mostra subito il menu di MMC |
+| Regola CRT, versione 2.5 | Larghezza, posizioni, altezza, modo e filtro funzionanti; misura 480i 60 Hz negli elenchi e 576i 50 Hz nei DVD PAL |
 | Convivenza con il Main di Physical Disc | DVD e Video CD con MMC; un gioco PSX PAL con LibCrypt (The Legend of Dragoon) parte da solo e funziona con il Main di Physical Disc |
 
 Da provare: Super Video CD letto da un disco masterizzato.
@@ -314,6 +360,8 @@ MC_AV_OFFSET=0.05
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
 | `MC_FIELDS=1` | DVD interlacciati: manda al CRT i due semiquadri originali invece di fonderli. Più dettaglio nel movimento, ma i dettagli fini tremolano un po' |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
+| `MC_MENU_HD=1` | Elenchi a 1280x720 come nella versione 2.1, invece che disegnati per il CRT |
+| `MC_DIAG=0` | Spegne le righe di diagnosi `mediacenter: diag` nel log |
 
 Le stesse impostazioni si possono dare anche come variabili d'ambiente, come quelle per i test qui sotto.
 
@@ -341,11 +389,13 @@ Copiare i giochi in file CHD e riscriverli su CD-R, mantenendo il subcanale Q e 
 
 ## Segnalare un problema
 
+I vostri commenti sono molto preziosi: provate MMC con i vostri dischi e televisori e scrivetemi, anche quando funziona tutto. In caso di problemi mandatemi i log.
+
 Apri una segnalazione nella pagina [Issues](../../issues) e allega:
 
 1. cosa hai fatto e cosa è successo: disco o file, titolo, regione (PAL o NTSC);
 2. **foto o video dello schermo**, che aiutano molto a capire il problema;
-3. il file `/tmp/mediacenter.log`, da copiare prima di spegnere il MiSTer, perché la cartella `/tmp` si svuota a ogni riavvio;
+3. i file `/tmp/mediacenter.log`, `/tmp/mediacenter_main.log` e `/tmp/mediacenter_crt`, da copiare prima di spegnere il MiSTer, perché la cartella `/tmp` si svuota a ogni riavvio;
 4. il tipo di uscita video (HDMI o VGA a 15 kHz) e le righe di `MiSTer.ini` che hai cambiato.
 
 ## Per chi sviluppa
@@ -379,6 +429,12 @@ curl -fsSL https://download.videolan.org/pub/videolan/libdvdnav/6.1.1/libdvdnav-
 tools/mediacenter/build_dvdnav.sh libdvdread-6.1.3 libdvdnav-6.1.1 dvdnav-arm
 make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
 ```
+
+## Ringraziamenti
+
+- **Umberto Parisi** (rmonic79) dei **Beceri Videoludici**: la funzione Regola CRT è stata possibile grazie al suo lavoro su [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust). Lo ringrazio e vi consiglio di seguire il loro canale YouTube: [I Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici).
+- **Max Riptide**, per le numerose prove fatte e i suggerimenti.
+- **Simone Roncaglio**, per le idee suggerite per migliorare MMC.
 
 ## Provenienza e licenza
 
