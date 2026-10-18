@@ -10,6 +10,40 @@ if [ ! -x "$BIN" ]; then
   exit 1
 fi
 
+# The menu belongs to the MiSTer_MediaCenter Main ([menu] main= in
+# MiSTer.ini). Another Main can stay in charge of the menu after a game (seen
+# with MiSTer_Physical-CD after a PSX game): it keeps the stock menu core, so
+# the CRT shows the "modify MiSTer.ini" notice instead of the player. Then our
+# Main is started in its place; it loads the MediaCenter menu core, and the
+# script is started again from the Scripts menu.
+OURS=/media/fat/MiSTer_MediaCenter
+INI_MAIN=$(awk -F= '
+  /^[ \t]*\[/ { s = tolower($0); gsub(/[ \t\r]/, "", s); menu = (s == "[menu]"); next }
+  menu && tolower($1) ~ /^[ \t]*main[ \t]*$/ { v = $2; sub(/[;\r].*/, "", v); gsub(/[ \t]/, "", v); print v; exit }
+' /media/fat/MiSTer.ini 2>/dev/null)
+if [ -x "$OURS" ] && [ "/media/fat/$INI_MAIN" = "$OURS" ]; then
+  for p in /proc/[0-9]*; do
+    exe=$(readlink "$p/exe" 2>/dev/null)
+    case "$exe" in
+      /media/fat/MiSTer*) ;;
+      *) continue ;;
+    esac
+    [ "$exe" = "$OURS" ] && break
+    pid=${p#/proc/}
+    echo "$(date +%s) script: menu run by $exe (pid $pid), not by $OURS: starting $OURS" >>/tmp/mediacenter_main.log
+    echo "Il menu e' gestito da $exe."
+    echo "Riavvio il Main di MiSTer MediaCenter: poi lancia di nuovo lo script."
+    RESTART="sleep 1; kill $pid; sleep 1; kill -9 $pid 2>/dev/null; cd /media/fat; exec $OURS menu.rbf"
+    if command -v setsid >/dev/null 2>&1; then
+      setsid sh -c "$RESTART" </dev/null >/dev/null 2>&1 &
+    else
+      nohup sh -c "$RESTART" </dev/null >/dev/null 2>&1 &
+    fi
+    sleep 3
+    exit 0
+  done
+fi
+
 # The player needs the normal 32-bit framebuffer at the screen size. The
 # MiSTer_MediaCenter Main sets it with fb_cmd3; with another Main fall back to
 # a 640x480 framebuffer.
