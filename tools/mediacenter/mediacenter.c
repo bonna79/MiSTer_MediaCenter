@@ -18,6 +18,7 @@
 #undef main
 
 #include <dirent.h>
+#include <sched.h>
 #include <strings.h>
 #include <sys/mount.h>
 #include <sys/resource.h>
@@ -3190,6 +3191,19 @@ static void log_main_info(void)
 
 int main(int argc, char *argv[])
 {
+	// Both ARM cores. Started from the Scripts menu the player inherited the
+	// Main's own setting, the second core only, which the Main itself keeps
+	// busy: a DVD then dropped about one picture in five. Started for a disc
+	// the Main already gives it both.
+	{
+		cpu_set_t cpus;
+		CPU_ZERO(&cpus);
+		long n = sysconf(_SC_NPROCESSORS_CONF);
+		for (long i = 0; i < n && i < CPU_SETSIZE; i++) CPU_SET(i, &cpus);
+		if (n > 0 && sched_setaffinity(0, sizeof(cpus), &cpus))
+			fprintf(stderr, "mediacenter: CPU cores not set (%s)\n", strerror(errno));
+		else if (n > 0) fprintf(stderr, "mediacenter: %ld CPU cores in use\n", n);
+	}
 	load_settings();
 	crt_load();
 	fb_present_yuv = yuv_draw;
