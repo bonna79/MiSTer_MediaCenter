@@ -460,7 +460,7 @@ make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
 
 - **Umberto Parisi** (rmonic79) dei **Beceri Videoludici**: la funzione Regola CRT è stata possibile grazie al suo lavoro su [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust). Lo ringrazio e vi consiglio di seguire il loro canale YouTube: [I Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici).
 - **Max Riptide**, per le numerose prove fatte e i suggerimenti.
-- **Simone Roncaglio**, per le idee suggerite per migliorare MMC.
+- **mad4gith**, per le idee suggerite per migliorare MMC.
 
 ## Provenienza e licenza
 

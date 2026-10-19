@@ -462,7 +462,7 @@ make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
 
 - **Umberto Parisi** (rmonic79) of **Beceri Videoludici**: CRT Adjust was made possible by his work on [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust). Thanks to him, and I recommend following their YouTube channel: [I Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici).
 - **Max Riptide**, for the many tests and suggestions.
-- **Simone Roncaglio**, for the ideas suggested to improve MMC.
+- **mad4gith**, for the ideas suggested to improve MMC.
 
 ## Origin and license
 
