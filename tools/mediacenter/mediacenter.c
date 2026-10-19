@@ -2608,14 +2608,15 @@ static int crt_std = -1; // standard of the video on screen: 1 PAL, 0 NTSC, -1 u
 
 // The mode sent to the core. A fixed mode chosen in Regola CRT always wins.
 // In Auto, while a video is on screen, its frame rate chooses the standard:
-// 576i 50 Hz for 25/50 fps, 480i 60 Hz for 23.976/29.97/59.94 fps (288p or
-// 240p for a frame buffer under 400 lines, as Auto does). The lists keep
-// Auto (0): the core chooses from their lines and menu_pal.
+// 576i 50 Hz for 25/50 fps, 480i 60 Hz for 23.976/29.97/59.94 fps, always
+// interlaced: a 720p drawn with half its lines (1280x360) keeps all 360 of
+// them on the 576 or 480 lines, instead of losing a third in 288p/240p.
+// The lists keep Auto (0): the core chooses from their lines and menu_pal.
 static int crt_mode_now(void)
 {
 	if (crt_val[CRT_MODE]) return crt_val[CRT_MODE];
 	if (!native_w || fb_menu || crt_std < 0) return 0;
-	return crt_std ? (fb_h >= 400 ? 1 : 2) : (fb_h >= 400 ? 3 : 4);
+	return crt_std ? 1 : 3;
 }
 
 static int crt_write(const char *cmd)
