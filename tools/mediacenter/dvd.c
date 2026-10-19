@@ -897,6 +897,7 @@ typedef struct
 {
 	int x, y, w, rows;  // rows: the height, one more when softened
 	uint8_t *px;        // r, g, b, alpha for each pixel
+	uint8_t *yuv;       // the same as Y, U, V (BT.601 limited range), alpha
 	int16_t *x0, *x1;   // first and last pixel not transparent in each row
 } ovl_rect_t;
 
@@ -973,10 +974,12 @@ static void ovl_build(const dvd_sub_t *cur)
 		uint8_t *px = (uint8_t *)realloc(q->px, px_n);
 		int16_t *x0 = (int16_t *)realloc(q->x0, out_rows * sizeof(int16_t));
 		int16_t *x1 = (int16_t *)realloc(q->x1, out_rows * sizeof(int16_t));
+		uint8_t *yuv = (uint8_t *)realloc(q->yuv, px_n);
 		if (px) q->px = px;
 		if (x0) q->x0 = x0;
 		if (x1) q->x1 = x1;
-		if (!px || !x0 || !x1) return;
+		if (yuv) q->yuv = yuv;
+		if (!px || !x0 || !x1 || !yuv) return;
 		q->x = r->x; q->y = r->y; q->w = r->w; q->rows = out_rows;
 		for (int y = 0; y < out_rows; y++)
 		{
@@ -986,8 +989,15 @@ static void ovl_build(const dvd_sub_t *cur)
 			for (int x = 0; x < r->w; x++, o += 4, d += 4)
 			{
 				int a = o[3];
-				if (!a) { d[3] = 0; continue; }
+				if (!a) { d[3] = 0; yuv[d - px + 3] = 0; continue; }
 				d[0] = (uint8_t)(o[0] / a); d[1] = (uint8_t)(o[1] / a); d[2] = (uint8_t)(o[2] / a); d[3] = (uint8_t)a;
+				// as YUV for a picture that goes out in YUV (BT.601, 16-235)
+				int R = d[0], G = d[1], B = d[2];
+				uint8_t *e = yuv + (d - px);
+				e[0] = (uint8_t)(16 + ((66 * R + 129 * G + 25 * B + 128) >> 8));
+				e[1] = (uint8_t)(128 + ((-38 * R - 74 * G + 112 * B + 128) >> 8));
+				e[2] = (uint8_t)(128 + ((112 * R - 94 * G - 18 * B + 128) >> 8));
+				e[3] = (uint8_t)a;
 				if (x < first) first = x;
 				last = x;
 			}
@@ -1047,6 +1057,72 @@ static void dvd_overlay(void)
 	DVD_LOCK();
 	dvd_overlay_locked();
 	DVD_UNLOCK();
+}
+
+// The same for a picture that goes out in YUV (yuv_dvd_draw): the overlay is
+// locked and made ready once per drawing, then blended row by row into the
+// packed Y U Y V row. Y per pixel; U and V per pair of pixels, each pixel
+// weighing half. "shift" takes the subpicture line below (1 when the picture
+// lines are blended with the next one).
+static int ovl_yuv_n;
+
+static void dvd_overlay_yuv_begin(void)
+{
+	DVD_LOCK();
+	ovl_yuv_n = 0;
+	const dvd_sub_t *cur = dvd_current_sub();
+	if (!cur || !cur->sub.num_rects) return;
+	if (ovl_gen != dvd.ovl_gen || ovl_rect0 != cur->sub.rects[0] || ovl_soft != overlay_soften)
+	{
+		ovl_build(cur);
+		ovl_gen = dvd.ovl_gen;
+		ovl_rect0 = cur->sub.rects[0];
+		ovl_soft = overlay_soften;
+	}
+	ovl_yuv_n = ovl_n;
+}
+
+static void dvd_overlay_yuv_end(void)
+{
+	DVD_UNLOCK();
+}
+
+static void dvd_overlay_yuv_row(uint8_t *row, int y, int w, int shift)
+{
+	for (int n = 0; n < ovl_yuv_n; n++)
+	{
+		const ovl_rect_t *q = &ovl_r[n];
+		// moved up above the controls, as in dvd_overlay_locked
+		int h = q->rows - (overlay_soften ? 1 : 0);
+		int dy = 0;
+		if (ovl_shown && ovl_a && !dvd.hl_on && src_h == fb_h && q->y + h + 1 > ovl_y && h < ovl_y)
+			dy = ovl_y - (q->y + h + 1);
+		if (dy < -q->y) dy = -q->y;
+		int yy = y + shift - q->y - dy;
+		if (yy < 0 || yy >= q->rows || q->x1[yy] < q->x0[yy]) continue;
+		const uint8_t *e = q->yuv + (size_t)yy * q->w * 4;
+		int sx0 = q->x + q->x0[yy], sx1 = q->x + q->x1[yy];
+		if (sx0 < 0) sx0 = 0;
+		if (sx1 > w - 1) sx1 = w - 1;
+		for (int sx = sx0 & ~1; sx <= sx1; sx += 2)
+		{
+			uint8_t *p = row + 2 * sx; // Y0 U Y1 V
+			int u = p[1], v = p[3], du = 0, dv = 0;
+			for (int k = 0; k < 2; k++)
+			{
+				int x = sx + k - q->x;
+				if (sx + k < sx0 || sx + k > sx1 || x < q->x0[yy] || x > q->x1[yy]) continue;
+				const uint8_t *c = e + (size_t)x * 4;
+				int a = c[3];
+				if (!a) continue;
+				p[2 * k] = (uint8_t)((p[2 * k] * (255 - a) + c[0] * a) / 255);
+				du += (c[1] - u) * a;
+				dv += (c[2] - v) * a;
+			}
+			p[1] = (uint8_t)(u + du / 510);
+			p[3] = (uint8_t)(v + dv / 510);
+		}
+	}
 }
 
 static void dvd_show(AVFrame *f)
@@ -1319,8 +1395,14 @@ static int dvd_play(const char *device)
 	if (audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	fb_clear();
 	native_fb = !getenv("MC_ARMSCALE");
+	// pictures in YUV (yuv_dvd_draw) with the subtitles and buttons blended here
+	yuv_ovl_begin = dvd_overlay_yuv_begin;
+	yuv_ovl_row = dvd_overlay_yuv_row;
+	yuv_ovl_end = dvd_overlay_yuv_end;
 
 	frames_shown = frames_dropped = 0;
+	draw_convert = draw_present = 0;
+	draw_count = 0;
 	dvd_nav_state();
 	dvd.labels_req = 1;
 	dvd.thread_run = 1;
@@ -1745,8 +1827,14 @@ static int dvd_play(const char *device)
 
 	dvd_stop_thread();
 	native_fb = 0;
+	yuv_dvd = 0;
+	yuv_ovl_begin = yuv_ovl_end = NULL;
+	yuv_ovl_row = NULL;
 	fb_native(0, 0, 0);
 	printf("mediacenter: DVD pictures shown %d, dropped late %d\n", frames_shown, frames_dropped);
+	if (draw_count)
+		printf("mediacenter: DVD per picture: colour conversion %.1f ms, drawing on screen %.1f ms\n",
+			1000 * draw_convert / draw_count, 1000 * draw_present / draw_count);
 	av_report();
 	audio_close();
 	exit_question = "Uscire dal Video CD?";

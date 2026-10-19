@@ -282,6 +282,14 @@ static AVFrame *yuv_last;
 static int yuv_half;
 static int yuv_stream = -1;  // the file's pictures go out as YUV: -1 not decided yet
 
+// A DVD picture in a YUV framebuffer (yuv_dvd): copied line by line by
+// yuv_dvd_draw with the chroma of each line's own field (yuv_ilace), each
+// line blended with the next (yuv_deint, unless MC_FIELDS keeps the fields
+// apart), and the DVD's subtitles and buttons blended in YUV by dvd.c.
+static int yuv_dvd, yuv_ilace, yuv_deint;
+static void (*yuv_ovl_begin)(void), (*yuv_ovl_end)(void);
+static void (*yuv_ovl_row)(uint8_t *row, int y, int w, int shift);
+
 static void media_close(void)
 {
 	if (yuv_last) av_frame_unref(yuv_last);
@@ -1075,15 +1083,110 @@ static void pack_yuyv_map(uint8_t *dst, const uint8_t *y, const uint8_t *u, cons
 	}
 }
 
+// Two packed lines averaged (rounded down, as deinterlace_rgb does).
+static void yuv_mean(uint8_t *a, const uint8_t *b, int n)
+{
+	int i = 0;
+#if defined(__arm__)
+	for (; i + 16 <= n; i += 16) vst1q_u8(a + i, vhaddq_u8(vld1q_u8(a + i), vld1q_u8(b + i)));
+#endif
+	for (; i < n; i++) a[i] = (uint8_t)((a[i] + b[i]) >> 1);
+}
+
 #if defined(__arm__)
 #pragma GCC pop_options
 #endif
+
+// The controls blended in grey into framebuffer row y (YUYV): Y toward their
+// level, U and V toward 128.
+static void yuv_band(uint8_t *row_buf, int y)
+{
+	const uint8_t *a = ovl_a + (size_t)(y - ovl_y) * fb_w;
+	const uint8_t *v = ovl_v + (size_t)(y - ovl_y) * fb_w;
+	for (int x = 0; x + 1 < fb_w; x += 2)
+	{
+		if (!a[x] && !a[x + 1]) continue;
+		uint8_t *p = row_buf + 2 * x;
+		for (int k = 0; k < 2; k++)
+		{
+			unsigned al = a[x + k], vy = 16 + v[x + k] * 219 / 255;
+			p[2 * k] = (uint8_t)((p[2 * k] * (255 - al) + vy * al + 127) / 255);
+		}
+		unsigned ac = (a[x] + a[x + 1] + 1) / 2;
+		p[1] = (uint8_t)((p[1] * (255 - ac) + 128 * ac + 127) / 255);
+		p[3] = (uint8_t)((p[3] * (255 - ac) + 128 * ac + 127) / 255);
+	}
+}
+
+// Picture line l of a DVD picture packed as YUYV. An interlaced picture's
+// 4:2:0 colour rows alternate between its two fields: line l takes the row
+// of its own field (2 * (l / 4) + l % 2), or the colour of fast motion
+// smears across the fields.
+static void yuv_dvd_line(uint8_t *dst, const AVFrame *f, int l, int w)
+{
+	int ch = (f->height + 1) / 2;
+	int c = yuv_ilace ? 2 * (l >> 2) + (l & 1) : l / 2;
+	if (c >= ch) c = ch - 1;
+	pack_yuyv(dst, f->data[0] + (size_t)l * f->linesize[0], f->data[1] + (size_t)c * f->linesize[1],
+		f->data[2] + (size_t)c * f->linesize[2], w);
+}
+
+// fb_present for a DVD picture in a YUV framebuffer (as big as the picture).
+// Without MC_FIELDS each line is blended with the next, like deinterlace_rgb;
+// the subtitles, made soft (each line the mean of two), then take their line
+// below, so they are blended the same way.
+static void yuv_dvd_draw(void)
+{
+	static uint8_t *rows;
+	static int rows_size;
+	if (rows_size < 2 * fb_stride)
+	{
+		free(rows);
+		rows = (uint8_t *)malloc((size_t)2 * fb_stride);
+		rows_size = rows ? 2 * fb_stride : 0;
+		if (!rows) return;
+	}
+	uint8_t *row_buf = rows, *next = rows + fb_stride;
+	AVFrame *f = yuv_last;
+	int ok = have_frame && f && f->data[0];
+	int w = ok ? (fb_w < f->width ? fb_w : f->width) & ~1 : 0;
+	int ovl = ok && yuv_ovl_row && yuv_ovl_begin && yuv_ovl_end;
+	if (ovl) yuv_ovl_begin();
+	for (int y = 0; y < fb_h; y++)
+	{
+		uint8_t *out = fb_mem + (size_t)y * fb_stride;
+		int band = y >= ovl_y && ovl_shown && ovl_a;
+		if (!ok || y >= f->height)
+		{
+			fb_blank(row_buf, (size_t)fb_w * 2);
+		}
+		else
+		{
+			fb_blank(row_buf + w * 2, (size_t)(fb_w - w) * 2);
+			yuv_dvd_line(row_buf, f, y, w);
+			if (yuv_deint && y + 1 < f->height)
+			{
+				yuv_dvd_line(next, f, y + 1, w);
+				yuv_mean(row_buf, next, w * 2);
+			}
+			if (ovl) yuv_ovl_row(row_buf, y, w, yuv_deint ? 1 : 0);
+		}
+		if (band) yuv_band(row_buf, y);
+		memcpy(out, row_buf, (size_t)fb_w * 2);
+	}
+	if (ovl) yuv_ovl_end();
+}
 
 // fb_present for a YUV framebuffer: the picture is the size of the
 // framebuffer; the controls are blended in grey (Y toward their level, U and
 // V toward 128).
 static void yuv_draw(void)
 {
+	if (yuv_dvd)
+	{
+		yuv_dvd_draw();
+		return;
+	}
 	static uint8_t *row_buf;
 	static int row_size;
 	if (row_size < fb_stride)
@@ -1128,24 +1231,7 @@ static void yuv_draw(void)
 				pack_yuyv(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], w);
 		}
-		if (band)
-		{
-			const uint8_t *a = ovl_a + (size_t)(y - ovl_y) * fb_w;
-			const uint8_t *v = ovl_v + (size_t)(y - ovl_y) * fb_w;
-			for (int x = 0; x + 1 < fb_w; x += 2)
-			{
-				if (!a[x] && !a[x + 1]) continue;
-				uint8_t *p = row_buf + 2 * x;
-				for (int k = 0; k < 2; k++)
-				{
-					unsigned al = a[x + k], vy = 16 + v[x + k] * 219 / 255;
-					p[2 * k] = (uint8_t)((p[2 * k] * (255 - al) + vy * al + 127) / 255);
-				}
-				unsigned ac = (a[x] + a[x + 1] + 1) / 2;
-				p[1] = (uint8_t)((p[1] * (255 - ac) + 128 * ac + 127) / 255);
-				p[3] = (uint8_t)((p[3] * (255 - ac) + 128 * ac + 127) / 255);
-			}
-		}
+		if (band) yuv_band(row_buf, y);
 		memcpy(out, row_buf, (size_t)fb_w * 2);
 	}
 }
@@ -1198,6 +1284,11 @@ static void draw_video_frame(AVFrame *f)
 			yuv_stream = yuv_ok && !getenv("MC_NOYUV") && !frame_overlay && f->format == AV_PIX_FMT_YUV420P &&
 				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && (fw == f->width || narrow) && fh == h && !(fw & 1);
 		int yuv = yuv_stream && yuv_ok && (fw == f->width || narrow) && fh == h && f->format == AV_PIX_FMT_YUV420P;
+		// DVD pictures too (step 3), when they are drawn at their own size: the
+		// subtitles, buttons and line blending are done while copying.
+		int dvd_yuv = frame_overlay && yuv_ovl_row && yuv_ok && !getenv("MC_NOYUV") && f->format == AV_PIX_FMT_YUV420P &&
+			mx == 1 && fw == f->width && fh == h && !(fw & 1);
+		if (dvd_yuv) yuv = 1;
 		crt_video_std(f);
 		fb_native_fmt(fw, fh, fb_aspect, yuv);
 		if (yuv && !fb_yuv) fb_native_fmt(fw, fh, fb_aspect, 0); // refused
@@ -1210,6 +1301,10 @@ static void draw_video_frame(AVFrame *f)
 			av_frame_unref(yuv_last);
 			if (av_frame_ref(yuv_last, f) < 0) return;
 			yuv_half = half;
+			yuv_dvd = dvd_yuv;
+			yuv_ilace = (f->flags & AV_FRAME_FLAG_INTERLACED) != 0;
+			yuv_deint = dvd_yuv && yuv_ilace && !pic_fields;
+			if (dvd_yuv) overlay_soften = 1;
 			have_frame = 1;
 			fb_present_paged();
 			draw_present += now_seconds() - t_start;
