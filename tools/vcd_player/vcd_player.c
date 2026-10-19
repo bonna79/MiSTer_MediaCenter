@@ -764,12 +764,25 @@ static legend_t legend_menu[] =
 	{ "X", "Esci" },
 };
 
+// Columns of the frame buffer hidden at each side of a CRT. There the
+// picture is 720 dots wide (plus Larghezza of Regola CRT) and the red border
+// of Regola CRT, set to the edges of the screen, is 80 dots narrower: the
+// commands and the status line stay inside it, with a small gap.
+static int safe_x(void)
+{
+	const char *e = getenv("MC_CRT_HSIZE");
+	int h = e ? atoi(e) : 0;
+	if (h < -16) h = -16;
+	if (h > 15) h = 15;
+	return fb_w * 40 / (720 + 8 * h) + SX(8);
+}
+
 // One row of button items, centred, spread up to a maximum gap.
 static void legend_one_row(int y, legend_t *legend, int n)
 {
 	int total = 0;
 	for (int i = 0; i < n; i++) total += legend_item(0, 0, legend[i][0], legend[i][1], 0);
-	int avail = fb_w - 2 * SX(12);
+	int avail = fb_w - 2 * safe_x();
 	int gap = n > 1 ? (avail - total) / (n - 1) : 0;
 	if (gap > SX(14)) gap = SX(14);
 	if (gap < SX(2)) gap = SX(2);
@@ -783,7 +796,7 @@ static void legend_row(int y, legend_t *legend, int n)
 {
 	int total = 0;
 	for (int i = 0; i < n; i++) total += legend_item(0, 0, legend[i][0], legend[i][1], 0) + SX(2);
-	if (legend_rows < 2 || n < 2 || total <= fb_w - 2 * SX(12))
+	if (legend_rows < 2 || n < 2 || total <= fb_w - 2 * safe_x())
 	{
 		legend_one_row(y, legend, n);
 		return;
@@ -887,6 +900,7 @@ static void osd_draw(const osd_info_t *info)
 	status_y -= ovl_y;
 	info_y -= ovl_y;
 	int mx = SX(24);
+	if (mx < safe_x()) mx = safe_x();
 	char buf[64], t1[16], t2[16];
 
 	// A light shade towards the bottom keeps the white readable on bright
@@ -950,7 +964,7 @@ static void osd_draw(const osd_info_t *info)
 	{
 		const char *q = exit_question;
 		int w = text_width(q) + SX(16) + legend_item(0, 0, "A", "Conferma", 0) + SX(16) + text_width("Altro tasto: Annulla");
-		if (w > fb_w - 2 * SX(12) && legend_rows > 1)
+		if (w > fb_w - 2 * safe_x() && legend_rows > 1)
 		{
 			// two rows: the question above, the answers below
 			ovl_text((fb_w - text_width(q)) / 2, legend_y - LEGEND_H - SY(4) + SY(3), q);
