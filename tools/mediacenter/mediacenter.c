@@ -938,6 +938,7 @@ static int yuv_ok = 1;
 
 static void fb_native_fmt(int w, int h, double aspect, int yuv);
 static void crt_fb_changed(void);
+static void crt_video_std(const AVFrame *f);
 
 static void fb_native(int w, int h, double aspect)
 {
@@ -1197,6 +1198,7 @@ static void draw_video_frame(AVFrame *f)
 			yuv_stream = yuv_ok && !getenv("MC_NOYUV") && !frame_overlay && f->format == AV_PIX_FMT_YUV420P &&
 				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && (fw == f->width || narrow) && fh == h && !(fw & 1);
 		int yuv = yuv_stream && yuv_ok && (fw == f->width || narrow) && fh == h && f->format == AV_PIX_FMT_YUV420P;
+		crt_video_std(f);
 		fb_native_fmt(fw, fh, fb_aspect, yuv);
 		if (yuv && !fb_yuv) fb_native_fmt(fw, fh, fb_aspect, 0); // refused
 		if (fb_yuv && fb_mem)
@@ -2602,6 +2604,19 @@ static const char *const crt_mode_names[5] = { "Auto", "576i PAL", "288p PAL", "
 static const char *const crt_filter_names[3] = { "Auto", "Spento", "Acceso" };
 static int crt_val[CRT_ITEMS];
 static int crt_sent_mode = -1, crt_sent_filter = -1;
+static int crt_std = -1; // standard of the video on screen: 1 PAL, 0 NTSC, -1 unknown
+
+// The mode sent to the core. A fixed mode chosen in Regola CRT always wins.
+// In Auto, while a video is on screen, its frame rate chooses the standard:
+// 576i 50 Hz for 25/50 fps, 480i 60 Hz for 23.976/29.97/59.94 fps (288p or
+// 240p for a frame buffer under 400 lines, as Auto does). The lists keep
+// Auto (0): the core chooses from their lines and menu_pal.
+static int crt_mode_now(void)
+{
+	if (crt_val[CRT_MODE]) return crt_val[CRT_MODE];
+	if (!native_w || fb_menu || crt_std < 0) return 0;
+	return crt_std ? (fb_h >= 400 ? 1 : 2) : (fb_h >= 400 ? 3 : 4);
+}
 
 static int crt_write(const char *cmd)
 {
@@ -2625,7 +2640,7 @@ static int crt_filter_on(void)
 // rules (menu.sv), for the log.
 static const char *crt_expected(char *buf, size_t len)
 {
-	int m = crt_val[CRT_MODE];
+	int m = crt_mode_now();
 	int h = fb_h;
 	const char *mode;
 	if (m) mode = crt_mode_names[m];
@@ -2650,11 +2665,12 @@ static void crt_send(void)
 	snprintf(cmd, sizeof(cmd), "fb_cmd3 crt %d %d %d %d\n", crt_val[0], crt_val[1], crt_val[2], crt_val[3]);
 	if (crt_write(cmd)) fprintf(stderr, "mediacenter: CRT adjust not sent\n");
 	int flt = crt_filter_on();
-	if (crt_val[CRT_MODE] != crt_sent_mode || flt != crt_sent_filter)
+	int mode = crt_mode_now();
+	if (mode != crt_sent_mode || flt != crt_sent_filter)
 	{
-		snprintf(cmd, sizeof(cmd), "fb_cmd3 crtmode %d %d\n", crt_val[CRT_MODE], flt);
+		snprintf(cmd, sizeof(cmd), "fb_cmd3 crtmode %d %d\n", mode, flt);
 		crt_write(cmd);
-		crt_sent_mode = crt_val[CRT_MODE];
+		crt_sent_mode = mode;
 		crt_sent_filter = flt;
 	}
 }
@@ -2682,6 +2698,36 @@ static void crt_fb_changed(void)
 	crt_send();
 	fprintf(stderr, "mediacenter: CRT 15 kHz atteso: %dx%d -> %s\n", fb_w, fb_h, crt_expected(e, sizeof(e)));
 	if (crt_measured(m, sizeof(m))[0]) fprintf(stderr, "mediacenter: CRT 15 kHz misurato dal Main (ultimo): %s\n", m);
+}
+
+// The standard of the video being drawn, from its frame rate: 25 or 50 fps
+// PAL, 23.976/24, 29.97/30 or 59.94/60 fps NTSC; otherwise from its lines
+// (576/288 PAL, 480/240 NTSC); otherwise unknown (Auto as before).
+// The core gets it with the frame buffer, when crt_fb_changed sends the mode.
+static void crt_video_std(const AVFrame *f)
+{
+	double fps = 0;
+	if (mc.vdec && mc.vdec->framerate.num > 0 && mc.vdec->framerate.den > 0) fps = av_q2d(mc.vdec->framerate);
+	if (!(fps > 0) && mc.fmt && mc.vstream >= 0 && mc.vstream < (int)mc.fmt->nb_streams)
+		fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
+	int std = -1;
+	if (fps > 0)
+	{
+		if (fabs(fps - 25) < 0.6 || fabs(fps - 50) < 1.0) std = 1;
+		else if ((fps > 23.0 && fps < 24.6) || (fps > 29.0 && fps < 30.6) || (fps > 59.0 && fps < 60.6)) std = 0;
+	}
+	if (std < 0)
+	{
+		int h = f->height;
+		std = h == 576 || h == 288 ? 1 : h == 480 || h == 240 ? 0 : -1;
+	}
+	if (std != crt_std)
+	{
+		fprintf(stderr, "mediacenter: CRT standard dal video: %.3f fps, %d righe -> %s\n", fps, f->height,
+			std == 1 ? "PAL 50 Hz" : std == 0 ? "NTSC 60 Hz" : "come Auto");
+		crt_std = std;
+		if (native_w && !fb_menu) crt_send();
+	}
 }
 
 // Reads the settings (mediacenter.ini, already in the environment) and sends
