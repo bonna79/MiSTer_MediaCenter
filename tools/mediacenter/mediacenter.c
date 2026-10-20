@@ -591,7 +591,9 @@ static void *video_thread(void *arg)
 		// behind decode only key pictures until the pictures catch up.
 		double lag = isnan(mc.last_vpts) ? 0 : vt.clock - mc.last_vpts;
 		enum AVDiscard skip = skip_base;
-		if (lag > 0.3 && skip < AVDISCARD_NONREF) skip = AVDISCARD_NONREF;
+		// Light mode at half the lines (1080p) has no time to spare: skip
+		// them sooner, before decoding pictures that would be dropped late.
+		if (lag > (half_lines ? 0.1 : 0.3) && skip < AVDISCARD_NONREF) skip = AVDISCARD_NONREF;
 		// The decoder hands a key picture over only after decoding the
 		// pictures that follow it: after sending one, decode those again.
 		if (vt.key_sent && vt.frames != vt.key_frames) vt.key_sent = 0;
@@ -1084,6 +1086,59 @@ static void pack_yuyv_map(uint8_t *dst, const uint8_t *y, const uint8_t *u, cons
 	}
 }
 
+// pack_yuyv narrowing by exactly 3:2 (a 1920-wide picture on a 1280-wide
+// screen): every 3 source pixels give 2, each weighing the nearer pixel 2/3
+// and its neighbour 1/3; the colour likewise (3 samples give 2). w is the
+// output width.
+static inline uint8_t third2(int a, int b) { return (uint8_t)((a * 171 + b * 85) >> 8); }
+
+#if defined(__arm__)
+// third2 on 8 lanes: a * 171/256 + b * 85/256
+static inline uint8x8_t third2_8(uint8x8_t a, uint8x8_t b)
+{
+	return vshrn_n_u16(vmlal_u8(vmull_u8(a, vdup_n_u8(171)), b, vdup_n_u8(85)), 8);
+}
+#endif
+
+static void pack_yuyv_32(uint8_t *dst, const uint8_t *y, const uint8_t *u, const uint8_t *v, int w)
+{
+	int x = 0; // output pixel
+#if defined(__arm__)
+	for (; x + 32 <= w; x += 32)
+	{
+		// 48 source pixels -> 32 output pixels = 16 pairs; 24 colour samples -> 16
+		uint8x16x3_t s = vld3q_u8(y + x / 2 * 3);
+		uint8x8x3_t cu = vld3_u8(u + x / 4 * 3), cv = vld3_u8(v + x / 4 * 3);
+		uint8x16x4_t o;
+		o.val[0] = vcombine_u8(third2_8(vget_low_u8(s.val[0]), vget_low_u8(s.val[1])),
+			third2_8(vget_high_u8(s.val[0]), vget_high_u8(s.val[1])));
+		o.val[2] = vcombine_u8(third2_8(vget_low_u8(s.val[2]), vget_low_u8(s.val[1])),
+			third2_8(vget_high_u8(s.val[2]), vget_high_u8(s.val[1])));
+		uint8x8x2_t zu = vzip_u8(third2_8(cu.val[0], cu.val[1]), third2_8(cu.val[2], cu.val[1]));
+		uint8x8x2_t zv = vzip_u8(third2_8(cv.val[0], cv.val[1]), third2_8(cv.val[2], cv.val[1]));
+		o.val[1] = vcombine_u8(zu.val[0], zu.val[1]);
+		o.val[3] = vcombine_u8(zv.val[0], zv.val[1]);
+		vst4q_u8(dst + 2 * x, o);
+	}
+#endif
+	for (; x + 1 < w; x += 2)
+	{
+		int j = x / 2, sy = 3 * j, sc = 3 * (j / 2);
+		dst[2 * x] = third2(y[sy], y[sy + 1]);
+		dst[2 * x + 2] = third2(y[sy + 2], y[sy + 1]);
+		if (j & 1)
+		{
+			dst[2 * x + 1] = third2(u[sc + 2], u[sc + 1]);
+			dst[2 * x + 3] = third2(v[sc + 2], v[sc + 1]);
+		}
+		else
+		{
+			dst[2 * x + 1] = third2(u[sc], u[sc + 1]);
+			dst[2 * x + 3] = third2(v[sc], v[sc + 1]);
+		}
+	}
+}
+
 // Two packed lines averaged (rounded down, as deinterlace_rgb does).
 static void yuv_mean(uint8_t *a, const uint8_t *b, int n)
 {
@@ -1204,6 +1259,8 @@ static void yuv_draw(void)
 	// screen) is narrowed here, while it is copied.
 	static int *map, map_src, map_w;
 	int narrow = f && f->width > fb_w;
+	// exactly 3:2 (1920 on a 1280 screen): narrowed with NEON, averaging
+	int narrow32 = narrow && f->width * 2 == w * 3 && !(w & 3);
 	if (narrow && (map_src != f->width || map_w != w))
 	{
 		free(map);
@@ -1225,7 +1282,10 @@ static void yuv_draw(void)
 		else
 		{
 			fb_blank(row_buf + w * 2, (size_t)(fb_w - w) * 2);
-			if (narrow)
+			if (narrow32)
+				pack_yuyv_32(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+					f->data[2] + (size_t)cy * f->linesize[2], w);
+			else if (narrow)
 				pack_yuyv_map(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], map, w);
 			else
