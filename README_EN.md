@@ -36,6 +36,21 @@ The old `vcd_player` from the first versions is no longer needed: the Video CD p
 
 The player's on-screen texts are in Italian.
 
+## What's new in version 2.7
+
+2.7 brings the CRT output to the standard of a real DVD player.
+
+- **720-pixel CRT output, like a DVD player:** the 15 kHz output now runs at 13.5 MHz with 720 pixels per line, the DVD standard (ITU-R BT.601). A DVD reaches the CRT pixel for pixel, without being narrowed; other widths are fitted with a horizontal filter that blends neighbouring pixels. The lists stay 640 pixels wide, centred, with whole text.
+- **Player controls inside the red border:** the controls line, the status bar and on-screen questions stay inside the area marked by the red border of CRT Adjust; if the controls line does not fit it goes on two lines. The video stays a full 720 pixels.
+- **Auto 15 kHz mode from the video's frame rate:** in Auto the player picks the standard from the video's speed: 25 or 50 pictures per second go out at 576i 50 Hz (PAL), 23.976, 29.97 or 59.94 at 480i 60 Hz (NTSC). Videos always go out interlaced, with all their lines. Fixed modes chosen in CRT Adjust work as before.
+- **DVDs in YUV:** the FPGA now converts the colours of DVDs too, as for files. Subtitles and menu buttons are drawn directly in YUV. The ARM works less: about 4–6 ms per picture. `MC_NOYUV=1` goes back to RGB drawing.
+- **720p videos at full resolution:** 1280x720 H.264 videos now use all 720 lines (before, 360 enlarged by the scaler). Text is sharper on HDMI and on the CRT, and the video stays smooth. Only videos above 720 lines (1080p) still use half of the lines.
+- **DVD after a 720p video:** a DVD played after a 720p video, without restarting the script, started at half resolution (720x288). Now it always starts at 720x576 (PAL) or 720x480 (NTSC).
+- **MMC picture at start:** when you open the **mediacenter** script the MMC picture shows for 3 seconds (a key skips it; `MC_SPLASH=0` in `mediacenter.ini` turns it off). With a disc inserted the player starts straight away.
+- **`MC_FIELDS=1` recommended with a CRT:** see [Player settings](#4-player-settings-optional).
+
+Tested on a real MiSTer on 19 and 20 October 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI together: Star Wars Episode III and Shrek 2 PAL with menus and controls inside the red border; Star Wars in YUV with 4454 pictures and none dropped; 720p H.264 MP4 at 23.976 fps at a full 1280x720, 9528 pictures and only one not shown (0.1%), with perfect text on the CRT at 480i; a DVD after the 720p back at 720x576.
+
 ## What's new in version 2.6
 
 - **Videos wider than the screen much smoother:** a 1440x810 H.264 MKV lost 63.8% of its pictures, now 1.4%. The player narrows the picture while copying it, without converting the colours: the FPGA does the conversion, as for 720p videos.
@@ -102,7 +117,7 @@ The MiSTer has two halves: a dual-core 800 MHz Cortex-A9 **ARM** processor runni
 - one thread reads the disc: DVDs through libdvdnav and libdvdcss (menus, buttons, chapters, still pictures), Video CDs and Super Video CDs straight from the sectors;
 - FFmpeg decodes the video (MPEG-1, MPEG-2, MPEG-4, H.264…) in a thread of its own, and the sound (AC3, DTS, MPEG, AAC…);
 - the sound goes to the MiSTer's audio output, and the video follows the audio clock to stay in sync;
-- with interlaced DVDs the player blends the two fields of each picture (`MC_FIELDS=1` keeps them apart);
+- with interlaced DVDs the player blends the two fields of each picture (`MC_FIELDS=1` keeps them apart: the CRT gets them whole and on HDMI the Main's scaler blends them);
 - subtitles, DVD menu buttons and on-screen controls are drawn over the picture;
 - every picture is copied to the frame buffer, an area of DDR memory shared with the FPGA, in YUV 4:2:2 format, without converting the colours.
 
@@ -113,7 +128,7 @@ The frame buffer has three pages: the ARM writes the next picture into one page 
 It is the MiSTer menu core with two additions, which read the same frame buffer from DDR memory:
 
 - **HDMI:** the MiSTer scaler carries the picture in YUV up to the output, converts it to RGB at the end and enlarges it to the TV's resolution (`video_mode`) with the right shape. Converting the colours in the FPGA saves the ARM about 16 ms per picture.
-- **15 kHz CRT (`mc_out` module):** generates the CRT signal by itself, independent of HDMI: 576i or 480i for video, following a PAL or NTSC DVD, or 288p or 240p when forced in CRT Adjust. It converts the colours, narrows the picture to 640 pixels, adds black bars to 16:9 films and applies CRT Adjust by redrawing the picture in the new rectangle without touching the sync, so the CRT never loses lock. It changes page only at the start of a field and only once the address is stable, so the picture never tears. The flicker filter averages each line with the one below.
+- **15 kHz CRT (`mc_out` module):** generates the CRT signal by itself, independent of HDMI, at 13.5 MHz with 720 pixels per line like a DVD player: 576i or 480i for video, following a PAL or NTSC DVD or the file's frame rate, or 288p or 240p when forced in CRT Adjust. It converts the colours, brings the picture to 720 pixels (DVDs pixel for pixel, other widths with a filter that blends neighbouring pixels), adds black bars to 16:9 films and applies CRT Adjust by redrawing the picture in the new rectangle without touching the sync, so the CRT never loses lock. It changes page only at the start of a field and only once the address is stable, so the picture never tears. The flicker filter averages each line with the one below.
 
 The two outputs work together: the same picture goes to HDMI and VGA at the same time. There is a single sound stream, which reaches HDMI, the analog output and the optical output together.
 
@@ -230,7 +245,7 @@ MMC is made for standard-definition video. These are the recommended maximum res
 | Video | Frames not shown |
 | --- | --- |
 | DVD (MPEG-2 720x576) | less than 1% |
-| 8-bit H.264 1280x720 | 1.4–2.5% (was 10% before the FPGA converted the colours) |
+| 8-bit H.264 1280x720 | 0.1% at full resolution in 2.7 (1.4–2.5% in earlier versions, 10% before the FPGA converted the colours) |
 | 8-bit H.264 1440x810 | about 1.4% (was about 65% up to 2.5) |
 | 10-bit H.264 (Hi10p) 1280x720 | about 78% (measured with version 1.0) |
 
@@ -282,18 +297,18 @@ The same screen has two entries for the 15 kHz output, handled by the menu's FPG
 
 | Entry | Values |
 | --- | --- |
-| **Modo 15 kHz** (15 kHz mode) | **Auto** (576i for PAL DVDs, 480i for NTSC ones; lists in 480i or 576i following `menu_pal`), or fixed **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
+| **Modo 15 kHz** (15 kHz mode) | **Auto** (576i for PAL DVDs and 25/50 fps videos, 480i for NTSC DVDs and 23.976/29.97/59.94 fps videos; lists in 480i or 576i following `menu_pal`), or fixed **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
 | **Filtro tremolio** (flicker filter) | **Auto** (on for interlaced lists, off for video and at 288p/240p), **Spento** (off), **Acceso** (on) |
 
 The filter blends every line with the one below it: thin white text no longer flickers on the interlaced output. In Auto it stays off for video because the player already smooths the controls and subtitles, and the film stays sharp.
 
 Below the entries, **Misurata** (measured) shows the mode the Main actually measures on the core's output (for example `640x576i 15.63 kHz 50.0 Hz`). The same line, with the expected mode, also goes to `/tmp/mediacenter.log`.
 
-The lists and the CRT Adjust screen use a picture 640 pixels wide with the lines of the chosen mode: 480 in Auto (576 with `menu_pal=1`), or 576, 288, 480 or 240. The CRT shows it pixel for pixel and the text stays whole; HDMI enlarges it. With `MC_MENU_HD=1` in `mediacenter.ini` the lists go back to 1280x720 as in version 2.1.
+The lists and the CRT Adjust screen use a picture 640 pixels wide with the lines of the chosen mode: 480 in Auto (576 with `menu_pal=1`), or 576, 288, 480 or 240. The CRT shows it pixel for pixel, centred in the 720-pixel line, and the text stays whole; HDMI enlarges it. With `MC_MENU_HD=1` in `mediacenter.ini` the lists go back to 1280x720 as in version 2.1.
 
 ## Tested on a real MiSTer
 
-Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 18 October 2026; Sony Trinitron CRT over SCART RGB.
+Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI output at 1280x720, up to 20 October 2026; Sony Trinitron CRT over SCART RGB.
 
 | Test | Result |
 | --- | --- |
@@ -314,6 +329,10 @@ Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI o
 | Back to the menu after a game, on CRT, version 2.5 | The CRT shows the MMC menu at once |
 | CRT Adjust, version 2.5 | Width, positions, height, mode and filter work; measures 480i 60 Hz in lists and 576i 50 Hz with PAL DVDs |
 | Protected PAL DVD with adverts after the language choice (Shrek 2), version 2.6 | Adverts with picture, sound and subtitles; then menu and film. 1775 pictures, 2 dropped |
+| Player controls on a CRT with CRT Adjust, version 2.7 | Star Wars and Shrek 2: menus and controls inside the red border, video a full 720 pixels |
+| PAL DVD in YUV on CRT and HDMI, version 2.7 | Star Wars Episode III: 4454 pictures, none dropped; menus, subtitles and colours correct |
+| 720p H.264 MP4 at full resolution, version 2.7 | 1280x720 on HDMI, 480i on the CRT in Auto: 9528 pictures, only one not shown (0.1%); perfect text on the CRT |
+| DVD after a 720p video, version 2.7 | Back at 720x576: 4752 pictures, one dropped |
 | PSX game with the Physical Disc Main, then the mediacenter script, version 2.6 | The script puts the MMC Main back; on the second start the CRT shows the player |
 | Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
 
@@ -382,14 +401,27 @@ The player reads its settings from the text file `/media/fat/linux/mediacenter.i
 MC_AV_OFFSET=0.05
 ```
 
+With a CRT connected we recommend this setup: `MC_FIELDS=1` leaves interlaced DVDs as they are, and the CRT Adjust screen writes the `MC_CRT_` lines by itself (these are rgm's values, everyone will have their own).
+
+```ini
+# interlaced DVDs: whole fields on the CRT, blended by the scaler on HDMI
+MC_FIELDS=1
+# written by CRT Adjust (no MC_CRT_MODE line = Auto mode)
+MC_CRT_HSIZE=-3
+MC_CRT_HPOS=-1
+MC_CRT_VSIZE=-8
+MC_CRT_VPOS=2
+```
+
 | Setting | Effect |
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Moves the sound later (positive value) or earlier (negative), in seconds. Useful with TVs that delay the picture |
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
-| `MC_FIELDS=1` | Interlaced DVDs: sends the two original fields to the CRT instead of blending them. More detail in motion, but fine details flicker a little |
+| `MC_FIELDS=1` | Interlaced DVDs and videos: the player does not blend the two fields. The CRT gets them whole, as from a real DVD player (sharper and smoother in motion); on HDMI the Main's scaler blends them, with no combing. Recommended with a CRT. Without this line the player blends the lines for both outputs |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
 | `MC_MENU_HD=1` | Lists at 1280x720 as in version 2.1, instead of drawn for the CRT |
 | `MC_DIAG=0` | Turns off the `mediacenter: diag` diagnosis lines in the log |
+| `MC_SPLASH=0` | Turns off the MMC picture when the script starts |
 
 The same settings can also be given as environment variables, like the test variables below.
 
@@ -436,7 +468,7 @@ Open a report on the [Issues](../../issues) page and attach:
 | `MC_NOVSYNC=1` | Draws without waiting for vertical sync |
 | `MC_SLOWDRAW=1` | Draws pictures the old way, line by line |
 | `MC_DEBUG=1` | Logs DVD navigation events |
-| `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking, half of the lines enlarged by the FPGA scaler and, above 30 fps, only reference pictures) |
+| `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking, above 720 lines half of the lines enlarged by the FPGA scaler and, above 30 fps, only reference pictures) |
 | `MC_TEST=...` | Runs without screen or controller: simulated keys, pictures saved to `/tmp/mc_<seconds>.ppm`. With a `.cue` file it plays a Super Video CD image as if it were in the drive |
 
 To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. It analyzes at most the first minute of the file (Ctrl+C stops it earlier). If the result is above 100% of real time, the file can be played.
