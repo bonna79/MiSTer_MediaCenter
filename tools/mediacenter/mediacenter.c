@@ -176,8 +176,8 @@ static double ts_seconds(int64_t ts, AVRational tb)
 
 // Pictures the video decoder always skips (light mode for 50/60 fps HD).
 static enum AVDiscard skip_base = AVDISCARD_DEFAULT;
-// Light mode: only every other line is converted and drawn; the FPGA scaler
-// enlarges the half-height picture to the screen.
+// Light mode (pictures taller than 720 lines): only every other line is
+// converted and drawn; the FPGA scaler enlarges the half-height picture.
 static int half_lines = 0;
 
 static AVCodecContext *open_decoder(int stream)
@@ -209,7 +209,8 @@ static AVCodecContext *open_decoder(int stream)
 		double fps = av_q2d(st->avg_frame_rate);
 		if (fps > 31) skip_base = AVDISCARD_NONREF;
 		ctx->skip_frame = skip_base;
-		half_lines = st->codecpar->height >= 576;
+		// 720p keeps all its lines; 1080p is drawn with every other line
+		half_lines = st->codecpar->height > 720;
 		fprintf(stderr, "mediacenter: %dx%d %s, light decoding\n", st->codecpar->width, st->codecpar->height, codec->name);
 	}
 	if (avcodec_open2(ctx, codec, NULL) < 0)
@@ -2704,7 +2705,7 @@ static int crt_std = -1; // standard of the video on screen: 1 PAL, 0 NTSC, -1 u
 // The mode sent to the core. A fixed mode chosen in Regola CRT always wins.
 // In Auto, while a video is on screen, its frame rate chooses the standard:
 // 576i 50 Hz for 25/50 fps, 480i 60 Hz for 23.976/29.97/59.94 fps, always
-// interlaced: a 720p drawn with half its lines (1280x360) keeps all 360 of
+// interlaced: a 1080p drawn with half its lines (1920x540) keeps all 540 of
 // them on the 576 or 480 lines, instead of losing a third in 288p/240p.
 // The lists keep Auto (0): the core chooses from their lines and menu_pal.
 static int crt_mode_now(void)

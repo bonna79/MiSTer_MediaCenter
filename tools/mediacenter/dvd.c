@@ -1395,6 +1395,8 @@ static int dvd_play(const char *device)
 	if (audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	fb_clear();
 	native_fb = !getenv("MC_ARMSCALE");
+	// a video file played before may have left its light mode on
+	half_lines = 0;
 	// pictures in YUV (yuv_dvd_draw) with the subtitles and buttons blended here
 	yuv_ovl_begin = dvd_overlay_yuv_begin;
 	yuv_ovl_row = dvd_overlay_yuv_row;
