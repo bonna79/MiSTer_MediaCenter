@@ -572,6 +572,65 @@ static struct
 	double clock;         // copy of mc.clock for the thread
 } vt = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
+// Diagnosis of the decoder's time (MC_DIAG=0 turns it off; nothing here
+// changes the playback): the time each packet spends in the decoder, counted
+// only for packets decoded normally (not while skipping to catch up), with
+// a line every 10 s and a summary at the end.
+static struct
+{
+	int on;
+	double budget;             // time per picture (1 / fps)
+	double sum, max;           // whole video
+	int n, over, skipped;
+	double w_sum, w_max, w_start; // current 10 s window
+	int w_n, w_over, w_skipped, w_shown, w_dropped;
+} dd;
+
+static void dec_diag_reset(void)
+{
+	const char *e = getenv("MC_DIAG");
+	memset(&dd, 0, sizeof(dd));
+	dd.on = !(e && !strcmp(e, "0"));
+	double fps = mc.vstream >= 0 ? av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate) : 0;
+	dd.budget = fps > 1 ? 1.0 / fps : 0.04;
+}
+
+static int frames_shown, frames_dropped; // reported in the log
+
+static void dec_diag_add(double t0, double t1, int skipping)
+{
+	if (!dd.on) return;
+	if (!dd.w_start) dd.w_start = t0;
+	if (skipping)
+	{
+		dd.skipped++;
+		dd.w_skipped++;
+	}
+	else
+	{
+		double d = t1 - t0;
+		dd.sum += d;
+		dd.w_sum += d;
+		dd.n++;
+		dd.w_n++;
+		if (d > dd.max) dd.max = d;
+		if (d > dd.w_max) dd.w_max = d;
+		if (d > dd.budget) { dd.over++; dd.w_over++; }
+	}
+	if (t1 - dd.w_start >= 10)
+	{
+		printf("mediacenter: diag decoder %.0f s: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms, "
+			"%d saltate per recuperare; mostrate %d, scartate in ritardo %d\n",
+			mc.clock, dd.w_n, dd.w_n ? 1000 * dd.w_sum / dd.w_n : 0, 1000 * dd.w_max, dd.w_over, 1000 * dd.budget,
+			dd.w_skipped, frames_shown - dd.w_shown, frames_dropped - dd.w_dropped);
+		dd.w_shown = frames_shown;
+		dd.w_dropped = frames_dropped;
+		dd.w_sum = dd.w_max = 0;
+		dd.w_n = dd.w_over = dd.w_skipped = 0;
+		dd.w_start = t1;
+	}
+}
+
 static void *video_thread(void *arg)
 {
 	(void)arg;
@@ -609,6 +668,7 @@ static void *video_thread(void *arg)
 		vt.busy = 1;
 		pthread_mutex_unlock(&vt.lock);
 
+		double dec_t0 = now_seconds();
 		mc.vdec->skip_frame = skip;
 		if (avcodec_send_packet(mc.vdec, pkt) == AVERROR(EAGAIN))
 		{
@@ -631,6 +691,7 @@ static void *video_thread(void *arg)
 			pthread_mutex_unlock(&vt.lock);
 			av_frame_unref(frame);
 		}
+		if (pkt) dec_diag_add(dec_t0, now_seconds(), skip != skip_base);
 
 		pthread_mutex_lock(&vt.lock);
 		if (!pkt) vt.drained = 1;
@@ -1429,7 +1490,6 @@ static void draw_video_frame(AVFrame *f)
 
 // Takes the frames that are due; returns the most recent one (owned by the
 // caller) or NULL.
-static int frames_shown, frames_dropped; // reported in the log
 
 static AVFrame *due_frame(void)
 {
@@ -1575,6 +1635,7 @@ static int media_play(int in_playlist)
 	if (mc.astream >= 0 && audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	fb_clear();
 	if (mc.audio_only) draw_audio_screen();
+	dec_diag_reset();
 	vt_start();
 	frames_shown = frames_dropped = 0;
 	draw_convert = draw_present = 0;
@@ -1810,6 +1871,9 @@ static int media_play(int in_playlist)
 		if (draw_count)
 			printf("mediacenter: per picture: colour conversion %.1f ms, drawing on screen %.1f ms\n",
 				1000 * draw_convert / draw_count, 1000 * draw_present / draw_count);
+		if (dd.on && dd.n)
+			printf("mediacenter: diag decoder: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms (%.1f%%), %d saltate per recuperare\n",
+				dd.n, 1000 * dd.sum / dd.n, 1000 * dd.max, dd.over, 1000 * dd.budget, 100.0 * dd.over / dd.n, dd.skipped);
 		av_report();
 	}
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
