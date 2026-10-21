@@ -1275,25 +1275,31 @@ static void yuv_draw(void)
 		uint8_t *out = fb_mem + (size_t)y * fb_stride;
 		int band = y >= ovl_y && ovl_shown && ovl_a;
 		int ly = yuv_half ? 2 * y : y, cy = yuv_half ? y : y / 2;
+		// rows are packed straight into the framebuffer; only rows under the
+		// controls go through row_buf, as the blend reads them back
+		uint8_t *dst = band ? row_buf : out;
 		if (!have_frame || !f || !f->data[0] || ly >= f->height)
 		{
-			fb_blank(row_buf, (size_t)fb_w * 2);
+			fb_blank(dst, (size_t)fb_w * 2);
 		}
 		else
 		{
-			fb_blank(row_buf + w * 2, (size_t)(fb_w - w) * 2);
+			fb_blank(dst + w * 2, (size_t)(fb_w - w) * 2);
 			if (narrow32)
-				pack_yuyv_32(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+				pack_yuyv_32(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], w);
 			else if (narrow)
-				pack_yuyv_map(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+				pack_yuyv_map(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], map, w);
 			else
-				pack_yuyv(row_buf, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+				pack_yuyv(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], w);
 		}
-		if (band) yuv_band(row_buf, y);
-		memcpy(out, row_buf, (size_t)fb_w * 2);
+		if (band)
+		{
+			yuv_band(row_buf, y);
+			memcpy(out, row_buf, (size_t)fb_w * 2);
+		}
 	}
 }
 
