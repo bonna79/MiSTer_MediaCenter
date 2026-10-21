@@ -387,6 +387,9 @@ static void fb_blank(uint8_t *mem, size_t len)
 	for (size_t i = 0; i < len / 4; i++) p[i] = 0x80108010u;
 }
 
+// Physical address of the framebuffer (MiSTer MediaCenter's zero-copy), 0 unknown.
+static unsigned long fb_phys;
+
 static int fb_open(void)
 {
 	int fd = open("/dev/fb0", O_RDWR | O_CLOEXEC);
@@ -406,6 +409,7 @@ static int fb_open(void)
 	fb_stride = fix.line_length;
 	fb_bgr = var.red.offset == 16; // byte order B,G,R,A in memory
 	fb_len = (size_t)fb_stride * fb_h;
+	fb_phys = (fix.smem_start >= 0x20000000UL && fix.smem_start < 0x40000000UL) ? fix.smem_start : 0;
 	fprintf(stderr, "vcd_player: fb %dx%d stride %d bpp %d smem %u red.offset %d\n",
 		fb_w, fb_h, fb_stride, var.bits_per_pixel, fix.smem_len, var.red.offset);
 	// Never touch memory beyond what the driver reports for the framebuffer.

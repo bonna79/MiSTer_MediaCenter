@@ -183,6 +183,12 @@ static int half_lines = 0;
 // --zctest: the decoder's pictures in a pool of locked memory (zctest.c)
 static int (*zc_get_buffer2)(AVCodecContext *, AVFrame *, int) = NULL;
 
+// zero-copy (zerocopy.c)
+static void zcp_open(AVCodecContext *ctx, int width, int half);
+static void zcp_close(void);
+static void zcp_mark(const AVFrame *f);
+static int zcp_get_buffer(AVCodecContext *s, AVFrame *f, int flags);
+
 static AVCodecContext *open_decoder(int stream)
 {
 	AVStream *st = mc.fmt->streams[stream];
@@ -216,6 +222,7 @@ static AVCodecContext *open_decoder(int stream)
 		// 720p keeps all its lines; 1080p is drawn with every other line
 		half_lines = st->codecpar->height > 720;
 		fprintf(stderr, "mediacenter: %dx%d %s, light decoding\n", st->codecpar->width, st->codecpar->height, codec->name);
+		if (!zc_get_buffer2) zcp_open(ctx, st->codecpar->width, half_lines);
 	}
 	if (avcodec_open2(ctx, codec, NULL) < 0)
 	{
@@ -305,6 +312,7 @@ static void media_close(void)
 	sws_freeContext(mc.sws);
 	av_packet_free(&mc.pkt);
 	av_frame_free(&mc.frame);
+	zcp_close();
 	if (mc.fmt) avformat_close_input(&mc.fmt);
 	free(mc.pend);
 	memset(&mc, 0, sizeof(mc));
@@ -529,6 +537,7 @@ static void queue_video_at(AVFrame *f, double pts, double frame_time)
 {
 	if (isnan(pts)) pts = isnan(mc.last_vpts) ? 0 : mc.last_vpts + frame_time;
 	mc.last_vpts = pts;
+	zcp_mark(f);
 	if (mc.vq_count >= MC_VQ_MAX) return;
 	AVFrame *copy = av_frame_clone(f);
 	if (!copy) return;
@@ -1310,6 +1319,8 @@ static void yuv_dvd_draw(void)
 	if (ovl) yuv_ovl_end();
 }
 
+#include "zerocopy.c"
+
 // fb_present for a YUV framebuffer: the picture is the size of the
 // framebuffer; the controls are blended in grey (Y toward their level, U and
 // V toward 128).
@@ -1347,7 +1358,14 @@ static void yuv_draw(void)
 		if (!map) return;
 		for (int x = 0; x < w; x++) map[x] = x * f->width / w;
 	}
-	for (int y = 0; y < fb_h; y++)
+	// 1080p: the core draws the lines above the controls (zerocopy.c)
+	int core_rows = 0;
+	if (narrow32 && yuv_half && have_frame && f && f->data[0] && w == fb_w)
+	{
+		int rows = (ovl_shown && ovl_a && ovl_y < fb_h) ? (ovl_y > 0 ? ovl_y : 0) : fb_h;
+		if (zcp_draw(f, rows)) core_rows = rows;
+	}
+	for (int y = core_rows; y < fb_h; y++)
 	{
 		uint8_t *out = fb_mem + (size_t)y * fb_stride;
 		int band = y >= ovl_y && ovl_shown && ovl_a;
@@ -1889,6 +1907,7 @@ static int media_play(int in_playlist)
 		if (draw_count)
 			printf("mediacenter: per picture: colour conversion %.1f ms, drawing on screen %.1f ms\n",
 				1000 * draw_convert / draw_count, 1000 * draw_present / draw_count);
+		zcp_report();
 		if (dd.on && dd.n)
 			printf("mediacenter: diag decoder: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms (%.1f%%), %d saltate per recuperare\n",
 				dd.n, 1000 * dd.sum / dd.n, 1000 * dd.max, dd.over, 1000 * dd.budget, 100.0 * dd.over / dd.n, dd.skipped);

@@ -198,6 +198,8 @@ wire        ddr_pause = FB | fb_own;
 wire [28:0] clr_addr, fb_addr;
 wire  [7:0] clr_burst, clr_be, fb_burst;
 wire        clr_rd, clr_we, fb_rd, fb_idle;
+wire [63:0] clr_din;
+wire        bus_idle;
 
 ddram ddr
 (
@@ -208,6 +210,7 @@ ddram ddr
 	.DDRAM_RD(clr_rd),
 	.DDRAM_BE(clr_be),
 	.DDRAM_WE(clr_we),
+	.DDRAM_DIN(clr_din),
 	.we(we & ~ddr_pause),
    .dout(),
    .din(0),
@@ -233,14 +236,67 @@ always @(posedge clk_sys) begin
 
 	fb_req <= FB;
 	if(fb_req & ~clr_we) fb_own <= 1;
-	else if(~fb_req & fb_idle) fb_own <= 0;
+	else if(~fb_req & bus_idle) fb_own <= 0;
 end
 
-assign DDRAM_ADDR     = fb_own ? fb_addr  : clr_addr;
-assign DDRAM_BURSTCNT = fb_own ? fb_burst : clr_burst;
-assign DDRAM_RD       = fb_own ? fb_rd    : clr_rd;
-assign DDRAM_WE       = fb_own ? 1'b0     : clr_we;
-assign DDRAM_BE       = fb_own ? 8'hFF    : clr_be;
+// While the frame buffer owns the bus, mc_out (the CRT output) shares it with
+// mc_zc (MiSTer MediaCenter's zero-copy), mc_out first.
+wire [28:0] zc_addr, bus_addr;
+wire  [7:0] zc_burst, bus_burst;
+wire [63:0] zc_din;
+wire        zc_rd, zc_we, zc_want, zc_idle, zc_grant, zc_ready;
+wire        fb_grant, fb_ready, bus_rd, bus_we, zc_sel;
+
+mc_zc mc_zc
+(
+	.clk(clk_sys),
+	.enable(fb_own & FB),
+	.ddr_addr(zc_addr),
+	.ddr_burst(zc_burst),
+	.ddr_rd(zc_rd),
+	.ddr_we(zc_we),
+	.ddr_din(zc_din),
+	.ddr_busy(DDRAM_BUSY),
+	.ddr_dout(DDRAM_DOUT),
+	.ddr_dout_ready(zc_ready),
+	.grant(zc_grant),
+	.want(zc_want),
+	.idle(zc_idle)
+);
+
+mc_bus mc_bus
+(
+	.clk(clk_sys),
+	.own(fb_own),
+	.m_addr(fb_addr),
+	.m_burst(fb_burst),
+	.m_rd(fb_rd),
+	.m_idle(fb_idle),
+	.m_grant(fb_grant),
+	.m_ready(fb_ready),
+	.z_addr(zc_addr),
+	.z_burst(zc_burst),
+	.z_rd(zc_rd),
+	.z_we(zc_we),
+	.z_want(zc_want),
+	.z_idle(zc_idle),
+	.z_grant(zc_grant),
+	.z_ready(zc_ready),
+	.ready(DDRAM_DOUT_READY),
+	.addr(bus_addr),
+	.burst(bus_burst),
+	.rd(bus_rd),
+	.we(bus_we),
+	.zsel_o(zc_sel),
+	.idle(bus_idle)
+);
+
+assign DDRAM_ADDR     = fb_own ? bus_addr  : clr_addr;
+assign DDRAM_BURSTCNT = fb_own ? bus_burst : clr_burst;
+assign DDRAM_RD       = fb_own ? bus_rd    : clr_rd;
+assign DDRAM_WE       = fb_own ? bus_we    : clr_we;
+assign DDRAM_BE       = fb_own ? 8'hFF     : clr_be;
+assign DDRAM_DIN      = fb_own ? zc_din    : clr_din;
 
 ////////////////////////////  MT32pi  ////////////////////////////////// 
 
@@ -497,13 +553,13 @@ wire        fb_active;
 mc_out mc_out
 (
 	.clk_sys(clk_sys),
-	.ddr_grant(fb_own),
+	.ddr_grant(fb_grant),
 	.ddr_addr(fb_addr),
 	.ddr_burst(fb_burst),
 	.ddr_rd(fb_rd),
 	.ddr_busy(DDRAM_BUSY),
 	.ddr_dout(DDRAM_DOUT),
-	.ddr_dout_ready(DDRAM_DOUT_READY),
+	.ddr_dout_ready(fb_ready),
 	.ddr_idle(fb_idle),
 
 	.fb_fmt(LFB_FMT),

@@ -261,6 +261,7 @@ always @(posedge clk_vid) begin
 end
 
 reg  [2:0] req_s = 0;
+reg        req_p = 0;  // a line asked for, not started yet (the bus may be lent)
 reg  [1:0] start = 0;
 reg        fetch = 0;
 reg [11:0] line, line2;
@@ -273,7 +274,7 @@ reg        bwe = 0, bsub = 0;
 reg [10:0] baddr;
 reg [63:0] bdata;
 
-assign ddr_idle = ~fetch & ~|start & ~ddr_rd;
+assign ddr_idle = ~fetch & ~|start & ~ddr_rd & ~req_p;
 
 wire [12:0] colsp1 = w + 1'd1;
 wire [12:0] colsp3 = w + 2'd3;
@@ -283,6 +284,7 @@ always @(posedge clk_sys) begin
 
 	req_s <= {req_s[1:0], req_t};
 	bwe   <= 0;
+	if(req_s[2] != req_s[1]) req_p <= 1;
 
 	if(ddr_rd && !ddr_busy) begin
 		ddr_rd   <= 0;
@@ -299,7 +301,8 @@ always @(posedge clk_sys) begin
 	end
 
 	case(start)
-		0: if(!fetch && req_s[2] != req_s[1] && ddr_grant) begin
+		0: if(!fetch && (req_p || req_s[2] != req_s[1]) && ddr_grant) begin
+				req_p <= 0;
 				line  <= req_line;
 				line2 <= req_line2;
 				bank  <= req_bank;
