@@ -180,6 +180,9 @@ static enum AVDiscard skip_base = AVDISCARD_DEFAULT;
 // converted and drawn; the FPGA scaler enlarges the half-height picture.
 static int half_lines = 0;
 
+// --zctest: the decoder's pictures in a pool of locked memory (zctest.c)
+static int (*zc_get_buffer2)(AVCodecContext *, AVFrame *, int) = NULL;
+
 static AVCodecContext *open_decoder(int stream)
 {
 	AVStream *st = mc.fmt->streams[stream];
@@ -193,6 +196,7 @@ static AVCodecContext *open_decoder(int stream)
 	if (!ctx) return NULL;
 	avcodec_parameters_to_context(ctx, st->codecpar);
 	ctx->pkt_timebase = st->time_base;
+	if (zc_get_buffer2 && ctx->codec_type == AVMEDIA_TYPE_VIDEO) ctx->get_buffer2 = zc_get_buffer2;
 	ctx->thread_count = 2; // both Cortex-A9 cores
 	ctx->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 	// Light mode: H.264/HEVC above DVD size is beyond the Cortex-A9. The
@@ -3369,6 +3373,8 @@ static int bench(const char *path)
 	return 0;
 }
 
+#include "zctest.c"
+
 // Headless test mode for development (no screen, no controller):
 //   MC_TEST="<seconds>;<t>:<key>,...;<t>,..." mediacenter <file|dvd>
 // plays for <seconds> into a 640x480 memory framebuffer, presses the keys at
@@ -3569,6 +3575,8 @@ int main(int argc, char *argv[])
 
 	// Decoding speed test: decodes the whole file without output.
 	if (arg && !strcmp(arg, "--bench") && argc > 2) return bench(argv[2]);
+	// Zero-copy feasibility test (zctest.c).
+	if (arg && !strcmp(arg, "--zctest") && argc > 2) return zctest(argv[2]);
 
 	// The console back in text mode (mediacenter.sh, after a crash).
 	if (arg && !strcmp(arg, "--console-text"))
