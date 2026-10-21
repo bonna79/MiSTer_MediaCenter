@@ -1415,6 +1415,7 @@ static int dvd_play(const char *device)
 		return END_DONE;
 	}
 	dvd.thread_on = 1;
+	main_idle(1);
 
 	int result = END_DONE;
 	double last = now_seconds(), osd_built = 0, title_time = 0;
@@ -1828,6 +1829,7 @@ static int dvd_play(const char *device)
 	}
 
 	dvd_stop_thread();
+	main_idle(0);
 	native_fb = 0;
 	yuv_dvd = 0;
 	yuv_ovl_begin = yuv_ovl_end = NULL;

@@ -99,6 +99,7 @@ int  toggle_kbdled(int mask);
 void sysled_enable(int en);
 
 void input_notify_mode();
+void input_idle_wait(int ms);
 int input_poll(int getchar);
 int is_key_pressed(int key);
 

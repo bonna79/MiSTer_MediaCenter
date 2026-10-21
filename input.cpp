@@ -6353,6 +6353,14 @@ void key_update_frames_held_cb(void)
 	}
 }
 
+// MiSTer MediaCenter: while its player plays, the Main waits here up to ms
+// between rounds instead of looping, so the player has the second CPU core;
+// a command from the player or an input event wakes it at once.
+void input_idle_wait(int ms)
+{
+	poll(pool, NUMDEV + 3, ms);
+}
+
 int input_poll(int getchar)
 {
 	#ifdef PROFILING

@@ -4379,8 +4379,33 @@ static void fb_set_page(int n)
 	DisableIO();
 }
 
+// MiSTer MediaCenter's player is playing (fb_cmd3 idle 1) or has stopped
+// (fb_cmd3 idle 0): meanwhile the Main rests between its rounds.
+static int mc_idle = 0;
+
+int video_mc_idle()
+{
+	return mc_idle && is_menu();
+}
+
 void video_cmd(char *cmd)
 {
+	// fb_cmd3 idle <0|1>, taken out of the commands read with it
+	char *idle = strstr(cmd, "fb_cmd3 idle ");
+	if (idle)
+	{
+		mc_idle = idle[13] == '1';
+		char *rest = strchr(idle, '\n');
+		if (idle > cmd)
+		{
+			idle[0] = 0;
+			if (idle[-1] == '\n') idle[-1] = 0;
+			if (cmd[0]) video_cmd(cmd);
+		}
+		if (rest && rest[1]) video_cmd(rest + 1);
+		return;
+	}
+
 	// fb_cmd3 crt <h size> <h position> <v size> <v position>: MiSTer
 	// MediaCenter's CRT Adjust, size and position of the picture on the menu
 	// core's 15 kHz output. Can come together with page switches.
@@ -4463,6 +4488,7 @@ void video_cmd(char *cmd)
 		// fb_cmd3 default: back to the normal frame buffer.
 		if (!strcmp(cmd, "fb_cmd3 default"))
 		{
+			mc_idle = 0;
 			fb_set_fields(0);
 			fb_paged.on = 0;
 			if (is_menu()) user_io_status_set("[9]", 0);

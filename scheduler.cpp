@@ -85,6 +85,8 @@ void scheduler_run(void)
 	for (;;)
 	{
 		scheduler_schedule();
+		// MiSTer MediaCenter's player is playing: rest up to 1 ms a round
+		if (co_last == co_ui && video_mc_idle()) input_idle_wait(1);
 	}
 
 	co_delete(co_ui);

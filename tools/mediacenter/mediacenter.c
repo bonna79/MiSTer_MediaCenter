@@ -997,6 +997,18 @@ static void fb_present_paged(void)
 	}
 }
 
+// Tells the Main the player is playing (1) or has stopped (0): meanwhile
+// the Main rests between its rounds instead of keeping a CPU core busy, so
+// the decoder has both cores. A Main that does not know it ignores it.
+static void main_idle(int on)
+{
+	if (fb_cmd_fd < 0) fb_cmd_fd = open("/dev/MiSTer_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+	char cmd[24];
+	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 idle %d\n", on ? 1 : 0);
+	if (fb_cmd_fd >= 0 && write(fb_cmd_fd, cmd, n) != n)
+		fprintf(stderr, "mediacenter: Main not told it can rest (%d)\n", on);
+}
+
 static void screen_rebuild(void)
 {
 	free(ovl_a); free(ovl_v); free(full_line);
@@ -1640,6 +1652,7 @@ static int media_play(int in_playlist)
 	fb_clear();
 	if (mc.audio_only) draw_audio_screen();
 	dec_diag_reset();
+	main_idle(1);
 	vt_start();
 	frames_shown = frames_dropped = 0;
 	draw_convert = draw_present = 0;
@@ -1866,6 +1879,7 @@ static int media_play(int in_playlist)
 	}
 
 	vt_end();
+	main_idle(0);
 	if (mc.vstream >= 0 && played > 1)
 	{
 		double fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
