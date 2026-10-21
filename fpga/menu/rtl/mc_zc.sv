@@ -104,8 +104,20 @@ wire        c_half = hdr[10][16];
 reg  [31:0] tab_lo[1024], tab_hi[1024];
 reg  [10:0] tab_n;
 reg  [10:0] tab_ra;
-reg  [31:0] tab_q;
-always @(posedge clk) tab_q <= tab_ra[0] ? tab_hi[tab_ra[10:1]] : tab_lo[tab_ra[10:1]];
+reg  [31:0] tab_lq, tab_hq;
+reg         tab_sel;
+// read straight into a register each, so both are block RAM
+always @(posedge clk) tab_lq <= tab_lo[tab_ra[10:1]];
+always @(posedge clk) tab_hq <= tab_hi[tab_ra[10:1]];
+always @(posedge clk) tab_sel <= tab_ra[0];
+wire [31:0] tab_q = tab_sel ? tab_hq : tab_lq;
+
+// written a clock after the word arrives
+reg         twe = 0;
+reg   [9:0] twa;
+reg  [63:0] twd;
+always @(posedge clk) if(twe) tab_lo[twa] <= twd[31:0];
+always @(posedge clk) if(twe) tab_hi[twa] <= twd[63:32];
 
 // ---------------------------------------------------------------- line buffers
 // Two banks (one filled while the other is used). Y, U and V each split into
@@ -239,6 +251,7 @@ always @(posedge clk) begin
 	reg [10:0] n;
 
 	bwe   <= 0;
+	twe   <= 0;
 	mk_go <= 0;
 	if(state != S_WAIT && state != S_DEAD) cycles <= cycles + 1'd1;
 
@@ -256,7 +269,7 @@ always @(posedge clk) begin
 		rx   <= rx + 1'd1;
 		case(rd_kind)
 			0: if(rx < 16) begin hdr[{rx[2:0], 1'b0}] <= ddr_dout[31:0]; hdr[{rx[2:0], 1'b1}] <= ddr_dout[63:32]; end
-			1: begin tab_lo[rx[9:0]] <= ddr_dout[31:0]; tab_hi[rx[9:0]] <= ddr_dout[63:32]; end
+			1: begin twe <= 1; twa <= rx[9:0]; twd <= ddr_dout; end
 			2: begin
 					bwe   <= 1;
 					bbank <= rd_bank;
