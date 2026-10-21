@@ -5,12 +5,15 @@
 // The pictures are decoded into a pool of locked memory (with Linux told not
 // to move locked pages, vm.compact_unevictable_allowed=0, restored at the
 // end), and the test checks:
-//  1. the decoding speed with the pool, over the first 10 s without checks;
+//  1. the decoding speed with the pool, over the first 60 s without checks
+//     (the stretch --bench measures), and the time spent making the pool;
 //  2. that Linux gives the physical address of each page of the pool, and
 //     whether the pages move while decoding;
-//  3. what the FPGA would read: from 0:10 to 6:00, one picture in four is
-//     read through /dev/mem without the caches (O_SYNC), as DDR holds it,
-//     when the decoder hands it over and 2 pictures later. A checksum of
+//  3. what the FPGA would read: from 1:00 to 4:00, one picture in four is
+//     read through /dev/mem without the caches (O_SYNC), as DDR holds it:
+//     every other one when the decoder hands it over and 2 pictures later,
+//     the others only 2 pictures later (a first check reads the whole
+//     picture through the caches and could push its pieces out itself). A checksum of
 //     each 32-byte piece (a cache line) is taken from DDR first, then
 //     compared with what the ARM sees, so the check itself disturbs the
 //     caches as little as possible. Pieces that differ were still in the
@@ -32,6 +35,7 @@ typedef struct
 
 static zc_slot_t zc_slot[ZC_SLOTS];
 static int zc_nslots, zc_pagemap = -1, zc_devmem = -1, zc_pool_fail, zc_not_pool;
+static double zc_pool_time; // making the pool's blocks
 static pthread_mutex_t zc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static uint64_t zc_phys_page(const void *v)
@@ -64,6 +68,7 @@ static zc_slot_t *zc_take(size_t need)
 	zc_slot_t *s = NULL;
 	if (zc_nslots < ZC_SLOTS)
 	{
+		double t = now_seconds();
 		size_t size = (need + ZC_PAGE - 1) & ~(size_t)(ZC_PAGE - 1);
 		void *m = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_LOCKED | MAP_POPULATE, -1, 0);
 		if (m != MAP_FAILED)
@@ -77,6 +82,7 @@ static zc_slot_t *zc_take(size_t need)
 			s->used = 1;
 		}
 		else zc_pool_fail++;
+		zc_pool_time += now_seconds() - t;
 	}
 	pthread_mutex_unlock(&zc_lock);
 	return s;
@@ -191,6 +197,7 @@ typedef struct
 	zc_slot_t *slot;
 	size_t bytes;
 	int age;
+	int only2; // not checked when handed over
 } zc_held_t;
 
 static const char *zc_time(double t, char *buf)
@@ -202,7 +209,7 @@ static const char *zc_time(double t, char *buf)
 
 static int zctest(const char *path)
 {
-	printf("mediacenter: zctest v2: prova zero-copy su %s\n", path);
+	printf("mediacenter: zctest v3: prova zero-copy su %s\n", path);
 	zc_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
 	zc_devmem = open("/dev/mem", O_RDONLY | O_SYNC | O_CLOEXEC);
 	if (zc_pagemap < 0) printf("mediacenter: zctest: /proc/self/pagemap non apribile (%s)\n", strerror(errno));
@@ -240,10 +247,11 @@ static int zctest(const char *path)
 	double fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
 	double clean_decode = 0, t_decode = 0;
 	int clean_frames = 0, frames = 0, refused = 0;
-	// totals and the current 10 s window: [0] when handed over, [1] 2 pictures later
-	long long n[2] = { 0 }, bad[2] = { 0 }, stale[2] = { 0 }, moved = 0;
-	long long wn[2] = { 0 }, wbad[2] = { 0 }, wstale[2] = { 0 }, wmoved = 0;
-	double w_decode = 0, w_start = 10;
+	// totals and the current 10 s window: [0] when handed over, [1] 2 pictures
+	// later, [2] 2 pictures later and not checked before
+	long long n[3] = { 0 }, bad[3] = { 0 }, stale[3] = { 0 }, moved = 0;
+	long long wn[3] = { 0 }, wbad[3] = { 0 }, wstale[3] = { 0 }, wmoved = 0;
+	double w_decode = 0, w_start = 60;
 	int w_frames = 0;
 	zc_held_t held[4];
 	int nheld = 0;
@@ -253,11 +261,11 @@ static int zctest(const char *path)
 	for (int more = 1; more && !quit_requested;)
 	{
 		double media = !isnan(mc.last_vpts) ? mc.last_vpts : mc.audio_end;
-		if (media >= 360.0) break;
+		if (media >= 240.0) break;
 		double a = now_seconds();
 		more = decode_step();
 		double d = now_seconds() - a;
-		if (media < 10.0)
+		if (media < 60.0)
 		{
 			clean_decode += d;
 			clean_frames += mc.vq_count;
@@ -278,27 +286,32 @@ static int zctest(const char *path)
 				zc_held_t *h = &held[k];
 				if (++h->age < 2) { k++; continue; }
 				long long st, mv;
+				int g = h->only2 ? 2 : 1;
 				if (zc_check(h->slot, h->bytes, &st, &mv)) refused = 1;
 				else
 				{
-					n[1]++; wn[1]++;
-					if (st) { bad[1]++; wbad[1]++; stale[1] += st; wstale[1] += st; }
+					n[g]++; wn[g]++;
+					if (st) { bad[g]++; wbad[g]++; stale[g] += st; wstale[g] += st; }
 					moved += mv; wmoved += mv;
 				}
 				av_frame_free(&h->f);
 				held[k] = held[--nheld];
 			}
 			zc_slot_t *s = f->data[0] ? zc_slot_of(f->data[0]) : NULL;
-			if (pts >= 10.0 && frames % 4 == 0 && s && s->pfn && nheld < 4 && !refused)
+			if (pts >= 60.0 && frames % 4 == 0 && s && s->pfn && nheld < 4 && !refused)
 			{
 				size_t bytes = (size_t)(f->data[2] - f->data[0]) + (size_t)f->linesize[2] * ((f->height + 1) / 2);
-				long long st, mv;
-				if (zc_check(s, bytes, &st, &mv)) refused = 1;
+				int only2 = (frames / 4) & 1;
+				long long st = 0, mv = 0;
+				if (!only2 && zc_check(s, bytes, &st, &mv)) refused = 1;
 				else
 				{
-					n[0]++; wn[0]++;
-					if (st) { bad[0]++; wbad[0]++; stale[0] += st; wstale[0] += st; }
-					moved += mv; wmoved += mv;
+					if (!only2)
+					{
+						n[0]++; wn[0]++;
+						if (st) { bad[0]++; wbad[0]++; stale[0] += st; wstale[0] += st; }
+						moved += mv; wmoved += mv;
+					}
 					AVFrame *keep = av_frame_clone(f);
 					if (keep)
 					{
@@ -306,6 +319,7 @@ static int zctest(const char *path)
 						held[nheld].slot = s;
 						held[nheld].bytes = bytes;
 						held[nheld].age = 0;
+						held[nheld].only2 = only2;
 						nheld++;
 					}
 				}
@@ -313,14 +327,17 @@ static int zctest(const char *path)
 			frames++;
 			if (pts >= w_start + 10)
 			{
-				printf("mediacenter: zctest: %s-%s: decodifica %.1f ms (rallentata dai confronti); controllate %lld+%lld; "
-					"pezzi vecchi subito %lld (in %lld immagini), dopo 2 immagini %lld (in %lld); pagine spostate %lld\n",
+				printf("mediacenter: zctest: %s-%s: decodifica %.1f ms (rallentata dai confronti); pezzi vecchi: "
+					"subito %lld in %lld/%lld immagini, dopo 2 %lld in %lld/%lld, solo dopo 2 %lld in %lld/%lld; pagine spostate %lld\n",
 					zc_time(w_start, ta), zc_time(w_start + 10, tb), w_frames ? 1000 * w_decode / w_frames : 0,
-					wn[0], wn[1], wstale[0], wbad[0], wstale[1], wbad[1], wmoved);
+					wstale[0], wbad[0], wn[0], wstale[1], wbad[1], wn[1], wstale[2], wbad[2], wn[2], wmoved);
 				w_start += 10;
 				w_decode = 0;
 				w_frames = 0;
-				wn[0] = wn[1] = wbad[0] = wbad[1] = wstale[0] = wstale[1] = wmoved = 0;
+				memset(wn, 0, sizeof(wn));
+				memset(wbad, 0, sizeof(wbad));
+				memset(wstale, 0, sizeof(wstale));
+				wmoved = 0;
 			}
 		}
 		vq_clear();
@@ -344,8 +361,8 @@ static int zctest(const char *path)
 
 	printf("mediacenter: zctest: %d immagini in %.0f s\n", frames, now_seconds() - t0);
 	if (clean_frames)
-		printf("mediacenter: zctest: 1) decodifica senza confronti (0:00-0:10) %.1f ms per immagine (con audio); tempo disponibile %.1f ms\n",
-			1000 * clean_decode / clean_frames, fps > 0 ? 1000 / fps : 0);
+		printf("mediacenter: zctest: 1) decodifica senza confronti (0:00-1:00) %.1f ms per immagine (con audio), di cui %.1f ms in tutto per creare la zona; tempo disponibile %.1f ms\n",
+			1000 * clean_decode / clean_frames, 1000 * zc_pool_time, fps > 0 ? 1000 / fps : 0);
 	printf("mediacenter: zctest:    zona bloccata: %d blocchi, %.1f MB, %d non riusciti, %d immagini fuori zona\n",
 		zc_nslots, pages * ZC_PAGE / 1048576.0, zc_pool_fail, zc_not_pool);
 	if (!pages || !zc_slot[0].pfn || !zc_slot[0].pfn[0])
@@ -361,6 +378,8 @@ static int zctest(const char *path)
 			n[0], bad[0], stale[0]);
 		printf("mediacenter: zctest: 3) dopo 2 immagini: %lld immagini controllate, %lld con pezzi vecchi, %lld pezzi vecchi da 32 byte\n",
 			n[1], bad[1], stale[1]);
+		printf("mediacenter: zctest: 3) solo dopo 2 immagini (senza controllo subito): %lld immagini controllate, %lld con pezzi vecchi, %lld pezzi vecchi da 32 byte\n",
+			n[2], bad[2], stale[2]);
 	}
 	media_close();
 	ret = 0;
