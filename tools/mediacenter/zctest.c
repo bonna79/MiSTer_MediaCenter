@@ -2,22 +2,21 @@
 // reading the decoded pictures straight from memory instead of the ARM
 // copying them into the framebuffer). Nothing here is used when playing.
 //
-// The pictures are decoded into a pool of locked memory, and the test checks:
-//  1. the decoding speed with the pool (to compare with --bench);
+// The pictures are decoded into a pool of locked memory (with Linux told not
+// to move locked pages, vm.compact_unevictable_allowed=0, restored at the
+// end), and the test checks:
+//  1. the decoding speed with the pool, over the first 10 s without checks;
 //  2. that Linux gives the physical address of each page of the pool, and
-//     that the pages do not move while decoding;
-//  3. what the FPGA would read: each tracked picture is read again through
-//     /dev/mem without the caches (O_SYNC), as DDR holds it, and compared
-//     with what the ARM sees. This is done when the decoder hands the
-//     picture over and 1 and 2 pictures later, half of the pictures with the
-//     ARM's cacheflush first and half without;
-//  4. what the cacheflush costs.
+//     whether the pages move while decoding;
+//  3. what the FPGA would read: from 0:10 to 6:00, one picture in four is
+//     read through /dev/mem without the caches (O_SYNC), as DDR holds it,
+//     when the decoder hands it over and 2 pictures later. A checksum of
+//     each 32-byte piece (a cache line) is taken from DDR first, then
+//     compared with what the ARM sees, so the check itself disturbs the
+//     caches as little as possible. Pieces that differ were still in the
+//     cache: the FPGA would read them stale. A line every 10 s of video.
 
 #include <sys/mman.h>
-
-#ifndef __ARM_NR_cacheflush
-#define __ARM_NR_cacheflush 0x0f0002
-#endif
 
 #define ZC_SLOTS 64
 #define ZC_PAGE 4096
@@ -124,27 +123,66 @@ static int zc_get_buffer(AVCodecContext *s, AVFrame *f, int flags)
 	return 0;
 }
 
-// Bytes of the slot's first n bytes that differ between the ARM's view and
-// DDR (read through /dev/mem without the caches). -1: /dev/mem refused.
-static long long zc_compare(zc_slot_t *s, size_t n)
+
+static uint16_t *zc_sums;  // DDR checksum of each 32-byte piece
+static uint64_t *zc_fresh; // physical pages read just before a check
+static int zc_sums_n, zc_fresh_n;
+
+static uint16_t zc_sum32(const uint8_t *p)
 {
-	long long diff = 0;
+	const uint32_t *w = (const uint32_t *)p;
+	uint32_t s = 0;
+	for (int i = 0; i < 8; i++) s = (s << 5 | s >> 27) ^ w[i];
+	return (uint16_t)(s ^ s >> 16);
+}
+
+// Checks the slot's first n bytes: pieces of 32 bytes that DDR holds
+// differently from what the ARM sees (*stale), pages that moved since the
+// last check (*moved). Returns -1 when /dev/mem refuses.
+static int zc_check(zc_slot_t *s, size_t n, long long *stale, long long *moved)
+{
 	int pages = (int)((n + ZC_PAGE - 1) / ZC_PAGE);
+	int lines = pages * (ZC_PAGE / 32);
+	if (lines > zc_sums_n)
+	{
+		free(zc_sums);
+		zc_sums = (uint16_t *)malloc((size_t)lines * sizeof(uint16_t));
+		zc_sums_n = zc_sums ? lines : 0;
+	}
+	if (pages > zc_fresh_n)
+	{
+		free(zc_fresh);
+		zc_fresh = (uint64_t *)malloc((size_t)pages * sizeof(uint64_t));
+		zc_fresh_n = zc_fresh ? pages : 0;
+	}
+	if (!zc_sums || !zc_fresh) return -1;
+	*stale = *moved = 0;
+	for (int p = 0; p < pages; p++)
+	{
+		zc_fresh[p] = zc_phys_page(s->mem + (size_t)p * ZC_PAGE);
+		if (zc_fresh[p] != s->pfn[p])
+		{
+			(*moved)++;
+			s->pfn[p] = zc_fresh[p];
+		}
+	}
+	// first DDR, without the caches
 	for (int p = 0; p < pages;)
 	{
-		// a run of physically consecutive pages, mapped at once
 		int run = 1;
-		while (p + run < pages && s->pfn[p + run] == s->pfn[p] + (uint64_t)run) run++;
+		while (p + run < pages && zc_fresh[p + run] == zc_fresh[p] + (uint64_t)run) run++;
 		size_t len = (size_t)run * ZC_PAGE;
-		const uint8_t *u = (const uint8_t *)mmap(NULL, len, PROT_READ, MAP_SHARED, zc_devmem, (off_t)(s->pfn[p] * ZC_PAGE));
+		const uint8_t *u = (const uint8_t *)mmap(NULL, len, PROT_READ, MAP_SHARED, zc_devmem, (off_t)(zc_fresh[p] * ZC_PAGE));
 		if (u == MAP_FAILED) return -1;
-		const uint8_t *c = s->mem + (size_t)p * ZC_PAGE;
-		if (memcmp(u, c, len))
-			for (size_t i = 0; i < len; i++) diff += u[i] != c[i];
+		uint16_t *sum = zc_sums + (size_t)p * (ZC_PAGE / 32);
+		for (size_t i = 0; i < len; i += 32) *sum++ = zc_sum32(u + i);
 		munmap((void *)u, len);
 		p += run;
 	}
-	return diff;
+	// then what the ARM sees
+	for (int l = 0; l < lines; l++)
+		if (zc_sum32(s->mem + (size_t)l * 32) != zc_sums[l]) (*stale)++;
+	return 0;
 }
 
 typedef struct
@@ -152,145 +190,187 @@ typedef struct
 	AVFrame *f;
 	zc_slot_t *slot;
 	size_t bytes;
-	int age, flushed;
+	int age;
 } zc_held_t;
+
+static const char *zc_time(double t, char *buf)
+{
+	int s = (int)(t + 0.5);
+	sprintf(buf, "%d:%02d", s / 60, s % 60);
+	return buf;
+}
 
 static int zctest(const char *path)
 {
-	printf("mediacenter: zctest: prova zero-copy su %s\n", path);
+	printf("mediacenter: zctest v2: prova zero-copy su %s\n", path);
 	zc_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
 	zc_devmem = open("/dev/mem", O_RDONLY | O_SYNC | O_CLOEXEC);
 	if (zc_pagemap < 0) printf("mediacenter: zctest: /proc/self/pagemap non apribile (%s)\n", strerror(errno));
 	if (zc_devmem < 0) printf("mediacenter: zctest: /dev/mem non apribile (%s)\n", strerror(errno));
 
+	// Linux told not to move locked pages while the test runs
+	static const char *cua = "/proc/sys/vm/compact_unevictable_allowed";
+	char cua_old[16] = "";
+	int cua_set = 0;
+	FILE *fp = fopen(cua, "r");
+	if (fp)
+	{
+		if (!fgets(cua_old, sizeof(cua_old), fp)) cua_old[0] = 0;
+		fclose(fp);
+	}
+	fp = cua_old[0] ? fopen(cua, "w") : NULL;
+	if (fp)
+	{
+		cua_set = fputs("0\n", fp) >= 0;
+		if (fclose(fp)) cua_set = 0;
+	}
+	printf("mediacenter: zctest: %s: era %s, %s\n", cua, cua_old[0] ? strtok(cua_old, "\n") : "(assente)",
+		cua_set ? "messo a 0 per la prova" : "NON modificabile");
+
 	zc_get_buffer2 = zc_get_buffer;
-	if (media_open(path)) return 1;
+	int ret = 1;
+	if (media_open(path)) goto restore;
 	if (mc.vstream < 0 || !mc.vdec)
 	{
 		printf("mediacenter: zctest: il file non ha video\n");
 		media_close();
-		return 1;
+		goto restore;
 	}
 
-	// [flushed][age]: pictures compared, pictures with differences, bytes
-	long long cmp_n[2][3] = { { 0 } }, cmp_bad[2][3] = { { 0 } }, cmp_bytes[2][3] = { { 0 } };
-	int devmem_refused = 0, no_phys = 0;
-	double t_decode = 0, t_flush = 0;
-	int flushes = 0, frames = 0;
+	double fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
+	double clean_decode = 0, t_decode = 0;
+	int clean_frames = 0, frames = 0, refused = 0;
+	// totals and the current 10 s window: [0] when handed over, [1] 2 pictures later
+	long long n[2] = { 0 }, bad[2] = { 0 }, stale[2] = { 0 }, moved = 0;
+	long long wn[2] = { 0 }, wbad[2] = { 0 }, wstale[2] = { 0 }, wmoved = 0;
+	double w_decode = 0, w_start = 10;
+	int w_frames = 0;
 	zc_held_t held[4];
 	int nheld = 0;
 	double t0 = now_seconds();
+	char ta[16], tb[16];
 
 	for (int more = 1; more && !quit_requested;)
 	{
 		double media = !isnan(mc.last_vpts) ? mc.last_vpts : mc.audio_end;
-		if (media >= 30.0) break;
+		if (media >= 360.0) break;
 		double a = now_seconds();
 		more = decode_step();
-		t_decode += now_seconds() - a;
-		for (int i = 0; i < mc.vq_count; i++)
+		double d = now_seconds() - a;
+		if (media < 10.0)
+		{
+			clean_decode += d;
+			clean_frames += mc.vq_count;
+		}
+		else
+		{
+			t_decode += d;
+			w_decode += d;
+			w_frames += mc.vq_count;
+		}
+		for (int i = 0; i < mc.vq_count && !refused; i++)
 		{
 			AVFrame *f = mc.vq[i].frame;
-			// pictures held from before are now one picture older
+			double pts = mc.vq[i].pts;
+			// held pictures are now one picture older: checked at 2
 			for (int k = 0; k < nheld;)
 			{
 				zc_held_t *h = &held[k];
-				h->age++;
-				long long d = devmem_refused ? -1 : zc_compare(h->slot, h->bytes);
-				if (d < 0) devmem_refused = 1;
+				if (++h->age < 2) { k++; continue; }
+				long long st, mv;
+				if (zc_check(h->slot, h->bytes, &st, &mv)) refused = 1;
 				else
 				{
-					cmp_n[h->flushed][h->age]++;
-					if (d) { cmp_bad[h->flushed][h->age]++; cmp_bytes[h->flushed][h->age] += d; }
+					n[1]++; wn[1]++;
+					if (st) { bad[1]++; wbad[1]++; stale[1] += st; wstale[1] += st; }
+					moved += mv; wmoved += mv;
 				}
-				if (h->age >= 2)
-				{
-					av_frame_free(&h->f);
-					held[k] = held[--nheld];
-				}
-				else k++;
+				av_frame_free(&h->f);
+				held[k] = held[--nheld];
 			}
-			// every 8th picture is tracked, alternately with and without cacheflush
 			zc_slot_t *s = f->data[0] ? zc_slot_of(f->data[0]) : NULL;
-			if (frames % 8 == 0 && s && nheld < 4)
+			if (pts >= 10.0 && frames % 4 == 0 && s && s->pfn && nheld < 4 && !refused)
 			{
-				if (!s->pfn || !s->pfn[0]) no_phys = 1;
+				size_t bytes = (size_t)(f->data[2] - f->data[0]) + (size_t)f->linesize[2] * ((f->height + 1) / 2);
+				long long st, mv;
+				if (zc_check(s, bytes, &st, &mv)) refused = 1;
 				else
 				{
-					int flush = (frames / 8) & 1;
-					size_t bytes = (size_t)(f->data[2] - f->data[0]) + (size_t)f->linesize[2] * ((f->height + 1) / 2);
-					if (flush)
-					{
-						double b = now_seconds();
-						syscall(__ARM_NR_cacheflush, (uintptr_t)s->mem, (uintptr_t)s->mem + bytes, 0);
-						t_flush += now_seconds() - b;
-						flushes++;
-					}
-					long long d = devmem_refused ? -1 : zc_compare(s, bytes);
-					if (d < 0) devmem_refused = 1;
-					else
-					{
-						cmp_n[flush][0]++;
-						if (d) { cmp_bad[flush][0]++; cmp_bytes[flush][0] += d; }
-					}
+					n[0]++; wn[0]++;
+					if (st) { bad[0]++; wbad[0]++; stale[0] += st; wstale[0] += st; }
+					moved += mv; wmoved += mv;
 					AVFrame *keep = av_frame_clone(f);
-					if (keep && !devmem_refused)
+					if (keep)
 					{
 						held[nheld].f = keep;
 						held[nheld].slot = s;
 						held[nheld].bytes = bytes;
 						held[nheld].age = 0;
-						held[nheld].flushed = flush;
 						nheld++;
 					}
-					else av_frame_free(&keep);
 				}
 			}
 			frames++;
+			if (pts >= w_start + 10)
+			{
+				printf("mediacenter: zctest: %s-%s: decodifica %.1f ms (rallentata dai confronti); controllate %lld+%lld; "
+					"pezzi vecchi subito %lld (in %lld immagini), dopo 2 immagini %lld (in %lld); pagine spostate %lld\n",
+					zc_time(w_start, ta), zc_time(w_start + 10, tb), w_frames ? 1000 * w_decode / w_frames : 0,
+					wn[0], wn[1], wstale[0], wbad[0], wstale[1], wbad[1], wmoved);
+				w_start += 10;
+				w_decode = 0;
+				w_frames = 0;
+				wn[0] = wn[1] = wbad[0] = wbad[1] = wstale[0] = wstale[1] = wmoved = 0;
+			}
 		}
 		vq_clear();
 		mc.pend_len = 0;
+		if (refused) break;
 	}
 	for (int k = 0; k < nheld; k++) av_frame_free(&held[k].f);
 
-	// did the pages move?
-	long long pages = 0, moved = 0, runs = 0;
+	long long pages = 0, runs = 0;
 	for (int i = 0; i < zc_nslots; i++)
 	{
 		zc_slot_t *s = &zc_slot[i];
 		for (int p = 0; s->pfn && p < s->npages; p++)
 		{
+			uint64_t now = zc_phys_page(s->mem + (size_t)p * ZC_PAGE);
 			pages++;
-			if (zc_phys_page(s->mem + (size_t)p * ZC_PAGE) != s->pfn[p]) moved++;
-			if (!p || s->pfn[p] != s->pfn[p - 1] + 1) runs++;
+			if (now != s->pfn[p]) moved++;
+			if (!p || now != zc_phys_page(s->mem + (size_t)(p - 1) * ZC_PAGE) + 1) runs++;
 		}
 	}
 
-	double secs = now_seconds() - t0;
-	double media = !isnan(mc.last_vpts) ? mc.last_vpts : mc.audio_end;
-	double fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
-	printf("mediacenter: zctest: %d immagini, %.1f s di video in %.1f s (con i confronti)\n", frames, media, secs);
-	if (frames)
-		printf("mediacenter: zctest: 1) decodifica %.1f ms per immagine (con audio); tempo disponibile %.1f ms\n",
-			1000 * t_decode / frames, fps > 0 ? 1000 / fps : 0);
+	printf("mediacenter: zctest: %d immagini in %.0f s\n", frames, now_seconds() - t0);
+	if (clean_frames)
+		printf("mediacenter: zctest: 1) decodifica senza confronti (0:00-0:10) %.1f ms per immagine (con audio); tempo disponibile %.1f ms\n",
+			1000 * clean_decode / clean_frames, fps > 0 ? 1000 / fps : 0);
 	printf("mediacenter: zctest:    zona bloccata: %d blocchi, %.1f MB, %d non riusciti, %d immagini fuori zona\n",
 		zc_nslots, pages * ZC_PAGE / 1048576.0, zc_pool_fail, zc_not_pool);
-	if (no_phys || !pages || zc_slot[0].pfn == NULL || !zc_slot[0].pfn[0])
+	if (!pages || !zc_slot[0].pfn || !zc_slot[0].pfn[0])
 		printf("mediacenter: zctest: 2) indirizzi fisici NON disponibili\n");
 	else
-		printf("mediacenter: zctest: 2) indirizzi fisici ok: %lld pagine, %lld spostate, in media %.1f pagine consecutive\n",
+		printf("mediacenter: zctest: 2) indirizzi fisici ok: %lld pagine, %lld spostamenti in tutto, in media %.1f pagine consecutive\n",
 			pages, moved, runs ? (double)pages / runs : 0);
-	if (devmem_refused || zc_devmem < 0)
-		printf("mediacenter: zctest: 3) lettura senza cache RIFIUTATA da Linux (/dev/mem): la prova la fara' l'FPGA\n");
+	if (refused || zc_devmem < 0)
+		printf("mediacenter: zctest: 3) lettura senza cache RIFIUTATA da Linux (/dev/mem)\n");
 	else
-		for (int fl = 0; fl < 2; fl++)
-			for (int age = 0; age < 3; age++)
-				printf("mediacenter: zctest: 3) %s, %s: %lld immagini confrontate, %lld con differenze, %lld byte diversi\n",
-					fl ? "con cacheflush" : "senza cacheflush",
-					age == 0 ? "subito" : age == 1 ? "dopo 1 immagine" : "dopo 2 immagini",
-					cmp_n[fl][age], cmp_bad[fl][age], cmp_bytes[fl][age]);
-	if (flushes)
-		printf("mediacenter: zctest: 4) cacheflush %.2f ms per immagine\n", 1000 * t_flush / flushes);
+	{
+		printf("mediacenter: zctest: 3) subito: %lld immagini controllate, %lld con pezzi vecchi, %lld pezzi vecchi da 32 byte\n",
+			n[0], bad[0], stale[0]);
+		printf("mediacenter: zctest: 3) dopo 2 immagini: %lld immagini controllate, %lld con pezzi vecchi, %lld pezzi vecchi da 32 byte\n",
+			n[1], bad[1], stale[1]);
+	}
 	media_close();
-	return 0;
+	ret = 0;
+
+restore:
+	if (cua_set && (fp = fopen(cua, "w")))
+	{
+		fprintf(fp, "%s\n", cua_old);
+		fclose(fp);
+		printf("mediacenter: zctest: %s rimesso a %s\n", cua, cua_old);
+	}
+	return ret;
 }
