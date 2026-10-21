@@ -28,6 +28,9 @@
 // this block only starts a transfer while mc_out has nothing to fetch, and
 // gives the bus back between its bursts (at most 32 words).
 
+// The 2/3 and 1/3 weights are done in logic, leaving the DSP blocks to the
+// HDMI scaler (with them, its timing failed).
+(* multstyle = "logic" *)
 module mc_zc #(parameter [31:0] MBOX = 32'h23F00000)
 (
 	input             clk,
