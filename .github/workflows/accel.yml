@@ -15,12 +15,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Synthesis, fit and timing with Quartus
         run: |
-          docker run --rm -v "$PWD/accel:/build" -w /build/syn theypsilon/quartus-lite-c5:17.0.2 \
-            quartus_sh --flow compile acc.qpf > quartus.log 2>&1 || (tail -80 quartus.log; exit 1)
-          grep -E "Error|Critical Warning" quartus.log | head -40 || true
-          cat accel/syn/output_files/acc.fit.summary
-          echo "--- resources by entity"
-          grep -A40 "; Compilation Hierarchy Node" accel/syn/output_files/acc.fit.rpt | head -60 || true
-          echo "--- timing"
-          grep -B2 -A12 "Slow 1100mV 100C Model Setup Summary" accel/syn/output_files/acc.sta.rpt | head -30 || true
-          grep -A30 "; Fmax Summary" accel/syn/output_files/acc.sta.rpt | head -20 || true
+          Q="docker run --rm -v $PWD/accel:/build -w /build/syn theypsilon/quartus-lite-c5:17.0.2"
+          R=accel/syn/output_files
+          $Q quartus_map acc > map.log 2>&1 || (grep -E "Error" map.log | head -40; exit 1)
+          echo "--- synthesis: resources by entity"
+          grep -A30 "; Analysis & Synthesis Resource Utilization by Entity" $R/acc.map.rpt | head -40 || true
+          echo "--- synthesis: RAM inferred"
+          grep -A40 "; Analysis & Synthesis RAM Summary" $R/acc.map.rpt | head -50 || true
+          grep -E "Implemented|Info \(276|Warning \(276" map.log | head -40 || true
+          echo "--- fit"
+          if $Q quartus_fit acc > fit.log 2>&1; then
+            cat $R/acc.fit.summary
+            grep -A40 "; Compilation Hierarchy Node" $R/acc.fit.rpt | head -60 || true
+            $Q quartus_sta acc > sta.log 2>&1 || true
+            echo "--- timing"
+            grep -B2 -A12 "Slow 1100mV 100C Model Setup Summary" $R/acc.sta.rpt | head -30 || true
+            grep -A30 "; Fmax Summary" $R/acc.sta.rpt | head -20 || true
+          else
+            grep -E "Error" fit.log | head -20
+            exit 1
+          fi

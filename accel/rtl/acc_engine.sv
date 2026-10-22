@@ -740,6 +740,12 @@ always @(posedge clk) begin
 
 		// macroblock to memory, one word per write
 		S_WB: begin
+			// bottom rows into the line buffers, one word per clock (block RAM)
+			if (wbk < 4) lby[{mbx, wbk[1:0]}] <= {cy[{4'd15, wbk[1:0], 2'd3}], cy[{4'd15, wbk[1:0], 2'd2}], cy[{4'd15, wbk[1:0], 2'd1}], cy[{4'd15, wbk[1:0], 2'd0}]};
+			if (wbk < 2) begin
+				lbu[{mbx, wbk[0]}] <= {cu[{3'd7, wbk[0], 2'd3}], cu[{3'd7, wbk[0], 2'd2}], cu[{3'd7, wbk[0], 2'd1}], cu[{3'd7, wbk[0], 2'd0}]};
+				lbv[{mbx, wbk[0]}] <= {cv[{3'd7, wbk[0], 2'd3}], cv[{3'd7, wbk[0], 2'd2}], cv[{3'd7, wbk[0], 2'd1}], cv[{3'd7, wbk[0], 2'd0}]};
+			end
 			if (!wb_we || !mem_busy) begin
 				if (wbk == 48 && (!wb_we || !mem_busy)) begin
 					wb_we <= 0;
@@ -757,12 +763,6 @@ always @(posedge clk) begin
 
 		// line buffers, left column and corner for the next macroblock
 		S_LB: begin
-			for (i = 0; i < 4; i = i + 1)
-				lby[{mbx, 2'(i)}] <= {cy[240 + i * 4 + 3], cy[240 + i * 4 + 2], cy[240 + i * 4 + 1], cy[240 + i * 4]};
-			for (i = 0; i < 2; i = i + 1) begin
-				lbu[{mbx, 1'(i)}] <= {cu[56 + i * 4 + 3], cu[56 + i * 4 + 2], cu[56 + i * 4 + 1], cu[56 + i * 4]};
-				lbv[{mbx, 1'(i)}] <= {cv[56 + i * 4 + 3], cv[56 + i * 4 + 2], cv[56 + i * 4 + 1], cv[56 + i * 4]};
-			end
 			for (i = 0; i < 16; i = i + 1) lefty[i] <= cy[i * 16 + 15];
 			for (i = 0; i < 8; i = i + 1) begin leftu[i] <= cu[i * 8 + 7]; leftv[i] <= cv[i * 8 + 7]; end
 			cornery <= topy[15];
