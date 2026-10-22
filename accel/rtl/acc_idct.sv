@@ -33,12 +33,13 @@ reg  [2:0] k;
 // one 1D transform per clock, in two stages: the row k of c or the column
 // k of t is picked into d* (stage 1), transformed and stored (stage 2). One
 // empty clock between the row and the column pass lets the last row reach t.
-reg  [2:0] ph;                // 0 idle, 1 rows, 2 gap, 3 columns, 4 last column
+reg  [2:0] ph;                // 0 idle, 1 rows, 2 and 5 gap, 3 columns, 4 last column
 reg        s_v, s_cols;
 reg  [2:0] s_k;
 reg signed [21:0] d0, d1, d2, d3, d4, d5, d6, d7;
 reg signed [21:0] a0, a1, a2, a3, a4, a5, a6, a7, b0, b1, b2, b3, b4, b5, b6, b7;
 reg signed [21:0] o0, o1, o2, o3, o4, o5, o6, o7;
+// stage 2: first two butterfly levels (4x4: the first level in b0..b3)
 always @* begin
 	if (big) begin
 		a0 = d0 + d4;
@@ -57,17 +58,27 @@ always @* begin
 		b7 = a7 - (a1 >>> 2);
 		b3 = a3 + (a5 >>> 2);
 		b5 = (a3 >>> 2) - a5;
-		o0 = b0 + b7; o1 = b2 + b5; o2 = b4 + b3; o3 = b6 + b1;
-		o4 = b6 - b1; o5 = b4 - b3; o6 = b2 - b5; o7 = b0 - b7;
 	end
 	else begin
-		a0 = d0 + d2;
-		a1 = d0 - d2;
-		a2 = (d1 >>> 1) - d3;
-		a3 = d1 + (d3 >>> 1);
-		o0 = a0 + a3; o1 = a1 + a2; o2 = a1 - a2; o3 = a0 - a3;
+		b0 = d0 + d2;
+		b1 = d0 - d2;
+		b2 = (d1 >>> 1) - d3;
+		b3 = d1 + (d3 >>> 1);
+		{a0, a1, a2, a3, a4, a5, a6, a7, b4, b5, b6, b7} = 0;
+	end
+end
+// stage 3: last level
+reg signed [21:0] c0, c1, c2, c3, c4, c5, c6, c7;
+reg        s2_v, s2_cols;
+reg  [2:0] s2_k;
+always @* begin
+	if (big) begin
+		o0 = c0 + c7; o1 = c2 + c5; o2 = c4 + c3; o3 = c6 + c1;
+		o4 = c6 - c1; o5 = c4 - c3; o6 = c2 - c5; o7 = c0 - c7;
+	end
+	else begin
+		o0 = c0 + c3; o1 = c1 + c2; o2 = c1 - c2; o3 = c0 - c3;
 		o4 = 0; o5 = 0; o6 = 0; o7 = 0;
-		{a4, a5, a6, a7, b0, b1, b2, b3, b4, b5, b6, b7} = 0;
 	end
 end
 
@@ -117,7 +128,8 @@ always @(posedge clk) begin
 				end
 				else k <= k + 1'd1;
 			end
-			2: ph <= 3;
+			2: ph <= 5;                 // two empty clocks: the last row reaches t
+			5: ph <= 3;
 			3: begin
 				d0 <= t[{3'd0, k}]; d1 <= t[{3'd1, k}]; d2 <= t[{3'd2, k}]; d3 <= t[{3'd3, k}];
 				d4 <= t[{3'd4, k}]; d5 <= t[{3'd5, k}]; d6 <= t[{3'd6, k}]; d7 <= t[{3'd7, k}];
@@ -130,19 +142,25 @@ always @(posedge clk) begin
 			default: ;
 		endcase
 
-		// stage 2: transform, store
-		if (s_v && !s_cols) begin
-			t[{s_k, 3'd0}] <= o0; t[{s_k, 3'd1}] <= o1; t[{s_k, 3'd2}] <= o2; t[{s_k, 3'd3}] <= o3;
-			t[{s_k, 3'd4}] <= o4; t[{s_k, 3'd5}] <= o5; t[{s_k, 3'd6}] <= o6; t[{s_k, 3'd7}] <= o7;
+		// stage 2: first levels
+		s2_v <= s_v;
+		s2_cols <= s_cols;
+		s2_k <= s_k;
+		c0 <= b0; c1 <= b1; c2 <= b2; c3 <= b3; c4 <= b4; c5 <= b5; c6 <= b6; c7 <= b7;
+
+		// stage 3: last level, store
+		if (s2_v && !s2_cols) begin
+			t[{s2_k, 3'd0}] <= o0; t[{s2_k, 3'd1}] <= o1; t[{s2_k, 3'd2}] <= o2; t[{s2_k, 3'd3}] <= o3;
+			t[{s2_k, 3'd4}] <= o4; t[{s2_k, 3'd5}] <= o5; t[{s2_k, 3'd6}] <= o6; t[{s2_k, 3'd7}] <= o7;
 		end
-		if (s_v && s_cols) begin
+		if (s2_v && s2_cols) begin
 			res_valid <= 1;
-			res_col <= s_k;
+			res_col <= s2_k;
 			res[0] <= 16'((o0 + 22'sd32) >>> 6); res[1] <= 16'((o1 + 22'sd32) >>> 6);
 			res[2] <= 16'((o2 + 22'sd32) >>> 6); res[3] <= 16'((o3 + 22'sd32) >>> 6);
 			res[4] <= 16'((o4 + 22'sd32) >>> 6); res[5] <= 16'((o5 + 22'sd32) >>> 6);
 			res[6] <= 16'((o6 + 22'sd32) >>> 6); res[7] <= 16'((o7 + 22'sd32) >>> 6);
-			if (s_k == last) begin
+			if (s2_k == last) begin
 				busy <= 0;
 				ph <= 0;
 			end

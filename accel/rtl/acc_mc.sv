@@ -71,7 +71,7 @@ endfunction
 
 // ------------------------------------------------------------ fetch side
 
-localparam F_IDLE = 0, F_REGION = 1, F_SETUP = 2, F_REQ = 3, F_NEXT = 4;
+localparam F_IDLE = 0, F_REGION = 1, F_SETUP = 2, F_REQ = 3, F_NEXT = 4, F_SW = 5, F_REQ0 = 6;
 reg  [2:0] fs;
 reg  [1:0] f_rq, f_rk;
 reg        f_b;               // window buffer being filled
@@ -111,6 +111,9 @@ always @* begin
 	sn[2] = sn[1];
 end
 
+reg signed [15:0] r_swx[3], r_swy[3];
+reg  [4:0] r_sn[3];
+
 // request parameters of the region being requested
 reg signed [15:0] jwy[3];
 reg  [4:0] jn[3];
@@ -130,8 +133,13 @@ wire [AW-1:0] slot_base = AW'(f_slot) << SLOT_L2;
 
 reg  [1:0] rq_j;
 reg  [4:0] rq_row;
-wire signed [15:0] rq_y = clampv(jwy[rq_j] + $signed({11'd0, rq_row}), rq_j == 0 ? H : Hc);
-wire [AW-1:0] rq_addr = jbase[rq_j] + (AW'(rq_y) << (rq_j == 0 ? YSTRIDE_L2 : CSTRIDE_L2)) + jw0[rq_j];
+// request (rq_j, rq_row) goes out next; rq_yc is its row, clamped
+reg signed [15:0] rq_yc;
+wire       rq_end = rq_row + 1'd1 == jn[rq_j];
+wire [1:0] rq_nj = fs == F_REQ0 ? 2'd0 : (rq_end ? rq_j + 1'd1 : rq_j);
+wire [4:0] rq_nrow = fs == F_REQ0 ? 5'd0 : (rq_end ? 5'd0 : rq_row + 1'd1);
+wire signed [15:0] rq_ync = clampv(jwy[rq_nj] + $signed({11'd0, rq_nrow}), rq_nj == 0 ? H : Hc);
+wire [AW-1:0] rq_addr = jbase[rq_j] + (AW'(rq_yc) << (rq_j == 0 ? YSTRIDE_L2 : CSTRIDE_L2)) + jw0[rq_j];
 
 // ---------------------------------------------------------- receive side
 
@@ -220,6 +228,8 @@ reg  [8:0] lw;
 reg  [7:0] lo;
 reg [16:0] cwu, cwv;
 reg  [1:0] plane;             // chroma plane being predicted: 1 U, 2 V
+reg [50:0] wsel;              // weights of quadrant c_rq
+always @(posedge clk) wsel <= qwt[c_rq * 51 +: 51];
 wire [31:0] c_mv = all16 || quad_eq[c_rq] ? `MVOF({c_rq, 2'b00}) : `MVOF({c_rq, c_rk});
 
 // luma rows: output row ly comes from window rows ly .. ly + 5, kept in
@@ -411,44 +421,57 @@ always @(posedge clk) begin
 			f_mvx <= f_mv[15:0];
 			f_mvy <= f_mv[31:16];
 			f_slot <= qslot[f_rq * 8 +: 8];
-			fs <= F_SETUP;
+			fs <= F_SW;
 		end
 
 		// the three windows of the region; its rows are requested next
+		F_SW: begin
+			for (i = 0; i < 3; i = i + 1) begin
+				r_swx[i] <= swx[i];
+				r_swy[i] <= swy[i];
+				r_sn[i] <= sn[i];
+			end
+			fs <= F_SETUP;
+		end
+
 		F_SETUP: begin
 			for (i = 0; i < 3; i = i + 1) begin
-				jwy[i] <= swy[i];
-				jn[i] <= sn[i];
-				jw0[i] <= clampv(swx[i], i == 0 ? W : Wc) >>> 3;
-				jK[i] <= 3'((clampv(swx[i] + $signed({11'd0, sn[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
-				            (clampv(swx[i], i == 0 ? W : Wc) >>> 3) + 1);
+				jwy[i] <= r_swy[i];
+				jn[i] <= r_sn[i];
+				jw0[i] <= clampv(r_swx[i], i == 0 ? W : Wc) >>> 3;
+				jK[i] <= 3'((clampv(r_swx[i] + $signed({11'd0, r_sn[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
+				            (clampv(r_swx[i], i == 0 ? W : Wc) >>> 3) + 1);
 				jbase[i] <= slot_base + (i == 0 ? AW'(0) : (i == 1 ? AW'(UOFF) : AW'(VOFF)));
-				kn[f_b * 3 + i] <= sn[i];
-				kK[f_b * 3 + i] <= 3'((clampv(swx[i] + $signed({11'd0, sn[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
-				                      (clampv(swx[i], i == 0 ? W : Wc) >>> 3) + 1);
-				ksh[f_b * 3 + i] <= 3'(swx[i]);
-				klf[f_b * 3 + i] <= swx[i] >= 0 ? 5'd0 : (swx[i] < -21 ? 5'd21 : 5'(-swx[i]));
+				kn[f_b * 3 + i] <= r_sn[i];
+				kK[f_b * 3 + i] <= 3'((clampv(r_swx[i] + $signed({11'd0, r_sn[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
+				                      (clampv(r_swx[i], i == 0 ? W : Wc) >>> 3) + 1);
+				ksh[f_b * 3 + i] <= 3'(r_swx[i]);
+				klf[f_b * 3 + i] <= r_swx[i] >= 0 ? 5'd0 : (r_swx[i] < -21 ? 5'd21 : 5'(-r_swx[i]));
 				jlim = (i == 0 ? W : Wc) - 16'sd1;
-				krl[f_b * 3 + i] <= jlim - swx[i] < -1 ? -7'sd1 : (jlim - swx[i] > 31 ? 7'sd31 : 7'(jlim - swx[i]));
-				krc[f_b * 3 + i] <= 5'(jlim - (clampv(swx[i], i == 0 ? W : Wc) & ~16'sd7));
+				krl[f_b * 3 + i] <= jlim - r_swx[i] < -1 ? -7'sd1 : (jlim - r_swx[i] > 31 ? 7'sd31 : 7'(jlim - r_swx[i]));
+				krc[f_b * 3 + i] <= 5'(jlim - (clampv(r_swx[i], i == 0 ? W : Wc) & ~16'sd7));
 			end
 			bused[f_b] <= 1;
 			rq_j <= 0;
 			rq_row <= 0;
+			fs <= F_REQ0;
+		end
+
+		F_REQ0: begin
+			rq_yc <= rq_ync;
 			fs <= F_REQ;
 		end
 
-		// rows of the three windows, back to back
+		// rows of the three windows, back to back; the clamped row of the
+		// next request is worked out while this one goes out
 		F_REQ: if (!mem_rd || !mem_busy) begin
 			mem_rd <= 1;
 			mem_addr <= rq_addr;
 			mem_burst <= jK[rq_j];
-			if (rq_row + 1'd1 == jn[rq_j]) begin
-				rq_row <= 0;
-				rq_j <= rq_j + 1'd1;
-				if (rq_j == 2) fs <= F_NEXT;
-			end
-			else rq_row <= rq_row + 1'd1;
+			rq_j <= rq_nj;
+			rq_row <= rq_nrow;
+			rq_yc <= rq_ync;
+			if (rq_row + 1'd1 == jn[rq_j] && rq_j == 2) fs <= F_NEXT;
 		end
 
 		F_NEXT: begin
@@ -511,11 +534,11 @@ always @(posedge clk) begin
 			else begin rx <= {c_rq[0], c_rk[0], 2'd0}; ry <= {c_rq[1], c_rk[1], 2'd0}; end
 			mvx <= c_mv[15:0];
 			mvy <= c_mv[31:16];
-			{lw, lo, cwu, cwv} <= qwt[c_rq * 51 +: 51];
 			ms <= M_WAITY;
 		end
 
 		M_WAITY: if (got[c_b][0]) begin
+			{lw, lo, cwu, cwv} <= wsel;
 			ms <= M_LLOAD;
 			lk <= 0;
 		end

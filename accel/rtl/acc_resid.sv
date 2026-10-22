@@ -37,11 +37,11 @@ module acc_resid
 	input      [31:0] p_px,
 
 	// row group: plane (0 Y, 1 U, 2 V), first x, y; values of x .. x+3 come
-	// out on the next clock
+	// out two clocks later
 	input       [1:0] r_plane,
 	input       [3:0] r_x,
 	input       [3:0] r_y,
-	output reg [39:0] r_vals
+	output reg [39:0] r_vals     // two clocks after the read
 );
 
 integer k, j;
@@ -115,13 +115,25 @@ always @* begin
 	end
 end
 
+// the bank writes go to the RAMs one clock later
+reg        bwe_r[8];
+reg  [6:0] bwa_r[8];
+reg  [9:0] bwd_r[8];
+integer wk;
+always @(posedge clk)
+	for (wk = 0; wk < 8; wk = wk + 1) begin
+		bwe_r[wk] <= bwe[wk];
+		bwa_r[wk] <= bwa[wk];
+		bwd_r[wk] <= bwd[wk];
+	end
+
 wire [79:0] bq;
 genvar gb;
 generate
 	for (gb = 0; gb < 8; gb = gb + 1) begin : bank
 		acc_ram #(.W(10), .A(7)) ram
 		(
-			.clk(clk), .we(bwe[gb]), .wa(bwa[gb]), .wd(bwd[gb]), .ra(bra[gb]), .q(bq[gb * 10 +: 10])
+			.clk(clk), .we(bwe_r[gb]), .wa(bwa_r[gb]), .wd(bwd_r[gb]), .ra(bra[gb]), .q(bq[gb * 10 +: 10])
 		);
 	end
 endgenerate
@@ -150,11 +162,11 @@ end
 
 reg  [4:0] qb;
 reg  [3:0] qx;
-always @* begin
+always @(posedge clk) begin
 	for (j = 0; j < 4; j = j + 1) begin
 		qx = q_x + 4'(j);
 		qb = q_pl == 0 ? {1'b0, q_y[3], qx[3], q_y[2], qx[2]} : (q_pl == 1 ? 5'd16 : 5'd20) + {q_y[2], qx[2]};
-		r_vals[j * 10 +: 10] = q_coded[qb] ? bq[3'(qx + q_y) * 10 +: 10] : 10'd0;
+		r_vals[j * 10 +: 10] <= q_coded[qb] ? bq[3'(qx + q_y) * 10 +: 10] : 10'd0;
 	end
 end
 

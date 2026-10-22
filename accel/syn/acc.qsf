@@ -16,3 +16,4 @@ set_global_assignment -name SEED 1
 set_instance_assignment -name VIRTUAL_PIN ON -to cmd_*
 set_instance_assignment -name VIRTUAL_PIN ON -to mem_*
 set_instance_assignment -name VIRTUAL_PIN ON -to st_*
+set_global_assignment -name AUTO_SHIFT_REGISTER_RECOGNITION OFF
