@@ -30,7 +30,10 @@ jobs:
             $Q quartus_sta acc > sta.log 2>&1 || true
             echo "--- timing"
             grep -B2 -A12 "Slow 1100mV 100C Model Setup Summary" $R/acc.sta.rpt | head -30 || true
-            grep -A30 "; Fmax Summary" $R/acc.sta.rpt | head -20 || true
+            $Q quartus_sta -t paths.tcl > paths.log 2>&1 || true
+            cat accel/syn/fmax.txt || true
+            echo "--- worst paths"
+            cat accel/syn/paths.txt | cut -c1-220 | head -70 || true
           else
             grep -E "Error" fit.log | head -20
             exit 1
