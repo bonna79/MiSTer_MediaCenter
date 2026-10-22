@@ -16,8 +16,8 @@ jobs:
       - name: Synthesis, fit and timing with Quartus
         run: |
           Q="docker run --rm -v $PWD/accel:/build -w /build/syn theypsilon/quartus-lite-c5:17.0.2"
-          R=accel/syn/output_files
           $Q quartus_map acc > map.log 2>&1 || (grep -E "Error" map.log | head -40; exit 1)
+          R=$(dirname $(find accel/syn -name acc.map.rpt | head -1))
           echo "--- synthesis: resources by entity"
           grep -A30 "; Analysis & Synthesis Resource Utilization by Entity" $R/acc.map.rpt | head -40 || true
           echo "--- synthesis: RAM inferred"
@@ -25,7 +25,7 @@ jobs:
           grep -E "Implemented|Info \(276|Warning \(276" map.log | head -40 || true
           echo "--- fit"
           if $Q quartus_fit acc > fit.log 2>&1; then
-            cat $R/acc.fit.summary
+            cat $R/acc.fit.summary || true
             grep -A40 "; Compilation Hierarchy Node" $R/acc.fit.rpt | head -60 || true
             $Q quartus_sta acc > sta.log 2>&1 || true
             echo "--- timing"

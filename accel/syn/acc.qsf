@@ -7,6 +7,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE acc_syn.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_engine.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_mc.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_idct.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_resid.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_recon.sv
 set_global_assignment -name SDC_FILE acc.sdc
 set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
 set_global_assignment -name SEED 1

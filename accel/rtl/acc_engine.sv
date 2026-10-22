@@ -64,10 +64,6 @@ reg  [6:0] qref[4];           // reference of each 8x8 (list 0), bit 6 = unused
 reg [31:0] mv[16];
 
 // reference list 0 (list 1 kept for B pictures, phase 2)
-reg  [7:0] ref_slot[32];
-reg  [8:0] ref_lw[32];
-reg  [7:0] ref_lo[32];
-reg [16:0] ref_cb[32], ref_cr[32];
 reg  [5:0] n0, n1;
 reg        two_lists;
 reg  [1:0] use_w;
@@ -86,10 +82,13 @@ reg        go_pending;
 
 // ------------------------------------------------------------- MB storage
 
-reg  [7:0] cy[256];           // reconstructed macroblock
-reg  [7:0] cu[64], cv[64];
-reg signed [15:0] ry[256];    // residual
-reg signed [15:0] ru[64], rv[64];
+// The reconstructed macroblock and its residual are in block RAM (acc_recon,
+// acc_resid); here only the pixels the intra prediction needs inside the
+// macroblock: bottom row of each band of 4 luma rows (rows 3, 7, 11, 15)
+// and right column of each band of 4 luma columns (columns 3, 7, 11, 15),
+// pixel i at bits i*8; for chroma the bottom row and right column.
+reg [127:0] brow[4], rcol[4];
+reg  [63:0] cbot_u, cbot_v, crt_u, crt_v;
 
 reg  [7:0] topy[24];          // row above (16 + 8 above right)
 reg  [7:0] topu[8], topv[8];
@@ -119,35 +118,16 @@ reg  [5:0] idct_pos;
 reg signed [15:0] idct_val;
 reg  [4:0] idct_blk, coef_blk;
 reg        idct_big, coef_have, coef_last;
-wire       idct_busy, idct_rv;
+wire       idct_busy, idct_rv, idct_in;
 wire [2:0] idct_col;
 wire signed [15:0] idct_res[8];
 
 acc_idct idct
 (
 	.clk(clk), .clr(idct_clr), .t8(idct_big), .wr(idct_wr), .wr_pos(idct_pos), .wr_val(idct_val),
-	.go(idct_go), .busy(idct_busy), .res_valid(idct_rv), .res_col(idct_col), .res(idct_res)
+	.go(idct_go), .busy(idct_busy), .in_ready(idct_in), .res_valid(idct_rv), .res_col(idct_col), .res(idct_res)
 );
 
-// residual position of IDCT output column idct_col, row i
-function [7:0] res_index(input [4:0] b, input big, input [2:0] col, input [2:0] row);
-	reg [3:0] x, y;
-	begin
-		if (b < 16 && big) begin
-			x = {b[2], col};
-			y = {b[3], row};
-		end
-		else if (b < 16) begin
-			x = {b[2], b[0], col[1:0]};
-			y = {b[3], b[1], row[1:0]};
-		end
-		else begin
-			x = {1'b0, b[0], col[1:0]};
-			y = {1'b0, b[1], row[1:0]};
-		end
-		res_index = b < 16 ? {y, x} : {2'b00, y[2:0], x[2:0]};
-	end
-endfunction
 
 // -------------------------------------------------- intra 4x4 / 8x8 edges
 
@@ -164,10 +144,10 @@ wire [3:0] by = {byq, 2'b00};
 integer ii;
 always @* begin
 	for (ii = 0; ii < 16; ii = ii + 1)
-		eraw[9 + ii] = byq == 0 ? topy[bx + ii] : (bx + ii < 16 ? cy[{by - 4'd1, 4'(bx + ii)}] : 8'd0);
+		eraw[9 + ii] = byq == 0 ? topy[bx + ii] : (bx + ii < 16 ? brow[byq - 2'd1][(bx + ii) * 8 +: 8] : 8'd0);
 	for (ii = 0; ii < 8; ii = ii + 1)
-		eraw[7 - ii] = bxq == 0 ? lefty[by + ii] : cy[{4'(by + ii), bx - 4'd1}];
-	eraw[8] = byq == 0 ? (bxq == 0 ? cornery : topy[bx - 1]) : (bxq == 0 ? lefty[by - 1] : cy[{by - 4'd1, bx - 4'd1}]);
+		eraw[7 - ii] = by + ii >= 16 ? 8'd0 : (bxq == 0 ? lefty[by + ii] : rcol[bxq - 2'd1][(by + ii) * 8 +: 8]);
+	eraw[8] = byq == 0 ? (bxq == 0 ? cornery : topy[bx - 1]) : (bxq == 0 ? lefty[by - 1] : brow[byq - 2'd1][(bx - 1) * 8 +: 8]);
 end
 
 // 8x8 reference filtering (FFmpeg PREDICT_8x8_LOAD_*)
@@ -354,16 +334,11 @@ wire       mc_rd;
 wire [AW-1:0] mc_addr;
 wire [7:0] mc_burst;
 
-// per 8x8 quadrant: slot and weights of its reference
-wire [7:0]  q_slot[4];
-wire [50:0] q_wt[4];
+// per 8x8 quadrant: slot and weights of its reference (read from the
+// reference table as the reference indexes arrive)
+reg  [7:0] q_slot[4];
+reg [50:0] q_wt[4];
 genvar gq;
-generate
-	for (gq = 0; gq < 4; gq = gq + 1) begin : qw
-		assign q_slot[gq] = ref_slot[qref[gq][4:0]];
-		assign q_wt[gq] = {ref_lw[qref[gq][4:0]], ref_lo[qref[gq][4:0]], ref_cb[qref[gq][4:0]], ref_cr[qref[gq][4:0]]};
-	end
-endgenerate
 
 wire [511:0] mv_flat;
 generate
@@ -396,15 +371,10 @@ reg [AW-1:0] wb_addr;
 reg [63:0] wb_din;
 
 wire [AW-1:0] slot_base = AW'(cur_slot) << SLOT_L2;
-integer bb;
-reg [63:0] wb_word;
-always @* begin
-	wb_word = 0;
-	for (bb = 0; bb < 8; bb = bb + 1)
-		if (wbk < 32) wb_word[bb * 8 +: 8] = cy[{wbk[4:1], wbk[0], 3'(bb)}];
-		else if (wbk < 40) wb_word[bb * 8 +: 8] = cu[{wbk[2:0], 3'(bb)}];
-		else wb_word[bb * 8 +: 8] = cv[{wbk[2:0], 3'(bb)}];
-end
+// the RAM is read one word ahead: address of the word to send next clock
+wire        wb_adv = st == S_WB && (!wb_we || !mem_busy) && wbk != 48;
+wire  [5:0] rc_addr = st == S_WB ? (wb_adv ? wbk + 1'd1 : wbk) : 6'd0;
+wire [63:0] wb_word;
 wire [AW-1:0] wb_word_addr =
 	wbk < 32 ? slot_base + ((AW'({mby, wbk[4:1]})) << YSTRIDE_L2) + {mbx, wbk[0]} :
 	slot_base + (wbk < 40 ? AW'(UOFF) : AW'(VOFF)) + ((AW'({mby, wbk[2:0]})) << CSTRIDE_L2) + mbx;
@@ -421,39 +391,187 @@ assign mem_be    = 8'hFF;
 wire [7:0] tag = cmd_data[31:24];
 wire coef_blk_change = coef_have && cmd_data[26:22] != coef_blk;
 assign cmd_ready = !reset && (st == S_CMD || st == S_PIC || st == S_REFS || st == S_MB1 || st == S_INFO ||
-                   st == S_NCOEF || st == S_PCM || (st == S_COEF && !coef_blk_change));
+                   st == S_NCOEF || st == S_PCM || (st == S_COEF && !coef_blk_change && idct_in && !idct_go));
 wire take = cmd_valid && cmd_ready;
 
 wire [15:0] X16 = {mbx, 4'd0};
 
+// ------------------------------------------------------ pixel write port
+// Every reconstructed pixel goes through here: prediction + residual,
+// clipped, into acc_recon; the residual of the group was read the clock
+// before (intra: the next group is known in advance; inter: the MC output
+// is delayed one clock).
+
+reg        resid_clr;
+reg        mcd_valid;
+reg  [1:0] mcd_pl;
+reg  [3:0] mcd_x, mcd_y;
+reg  [2:0] mcd_n;
+reg [31:0] mcd_px;
+
+reg        px_we, px_res;
+reg  [1:0] px_pl;
+reg  [3:0] px_x, px_y;
+reg  [2:0] px_n;
+reg [31:0] px_pr, px_d;
+wire [39:0] res_q;
+integer pk;
+always @* begin
+	px_we = 0;
+	px_res = 1;
+	px_pl = 0;
+	px_x = 0;
+	px_y = 0;
+	px_n = 4;
+	px_pr = {dpred[3], dpred[2], dpred[1], dpred[0]};
+	case (st)
+		S_I4:  if (ph != 0) begin px_we = 1; px_x = bx; px_y = by + 4'(prow); end
+		S_I8:  if (ph != 0) begin px_we = 1; px_x = bx + 4'(pcol); px_y = by + 4'(prow); end
+		S_I16: if (ph != 0) begin
+			px_we = 1;
+			px_x = {pgrp, 2'b00};
+			px_y = prow16;
+			px_pr = {bpred[3], bpred[2], bpred[1], bpred[0]};
+		end
+		S_CHR: if (ph != 0) begin
+			px_we = 1;
+			px_pl = cpl ? 2'd2 : 2'd1;
+			px_x = {1'b0, pgrp[0], 2'b00};
+			px_y = prow16;
+			px_pr = {bpred[3], bpred[2], bpred[1], bpred[0]};
+		end
+		S_PCM: if (take) begin
+			px_we = 1;
+			px_res = 0;
+			px_pr = cmd_data;
+			if (pcnt < 64) begin px_x = {pcnt[1:0], 2'b00}; px_y = pcnt[5:2]; end
+			else begin px_pl = pcnt < 80 ? 2'd1 : 2'd2; px_x = {1'b0, pcnt[0], 2'b00}; px_y = {1'b0, pcnt[3:1]}; end
+		end
+		default: ;
+	endcase
+	if (mcd_valid) begin
+		px_we = 1;
+		px_pl = mcd_pl;
+		px_x = mcd_x;
+		px_y = mcd_y;
+		px_n = mcd_n;
+		px_pr = mcd_px;
+	end
+	for (pk = 0; pk < 4; pk = pk + 1)
+		px_d[pk * 8 +: 8] = px_res ? clip8($signed({12'd0, px_pr[pk * 8 +: 8]}) + $signed({{10{res_q[pk * 10 + 9]}}, res_q[pk * 10 +: 10]}))
+		                           : px_pr[pk * 8 +: 8];
+end
+
+// residual group needed on the next clock
+reg  [1:0] rr_pl;
+reg  [3:0] rr_x, rr_y;
+always @* begin
+	rr_pl = 0;
+	rr_x = 0;
+	rr_y = 0;
+	case (st)
+		S_I4: begin rr_x = bx; rr_y = by + (ph == 0 ? 4'd0 : 4'(prow) + 4'd1); end
+		S_I8: begin
+			if (ph == 0) begin rr_x = bx; rr_y = by; end
+			else if (pcol == 0) begin rr_x = bx + 4'd4; rr_y = by + 4'(prow); end
+			else begin rr_x = bx; rr_y = by + 4'(prow) + 4'd1; end
+		end
+		S_I16: begin
+			if (ph == 0) begin rr_x = 0; rr_y = 0; end
+			else if (pgrp == 3) begin rr_x = 0; rr_y = prow16 + 4'd1; end
+			else begin rr_x = {pgrp + 2'd1, 2'b00}; rr_y = prow16; end
+		end
+		S_CHR: begin
+			rr_pl = cpl ? 2'd2 : 2'd1;
+			if (ph == 0) begin rr_x = 0; rr_y = 0; end
+			else if (!pgrp[0]) begin rr_x = 4; rr_y = prow16; end
+			else begin rr_x = 0; rr_y = prow16 + 4'd1; end
+		end
+		default: begin rr_pl = mc_px_plane; rr_x = mc_px_x; rr_y = mc_px_y; end
+	endcase
+end
+
+// reference table (list 0) in block RAM: {slot, lw, lo}, cb, cr
+wire       rt_we = st == S_REFS && take && !rlist;
+reg [24:0] rt_a[32];
+reg [16:0] rt_b[32], rt_c[32];
+reg [24:0] rt_aq;
+reg [16:0] rt_bq, rt_cq;
+always @(posedge clk) begin
+	if (rt_we && rword == 0) rt_a[ridx[4:0]] <= cmd_data[24:0];
+	if (rt_we && rword == 1) rt_b[ridx[4:0]] <= cmd_data[16:0];
+	if (rt_we && rword == 2) rt_c[ridx[4:0]] <= cmd_data[16:0];
+	rt_aq <= rt_a[cmd_data[4:0]];
+	rt_bq <= rt_b[cmd_data[4:0]];
+	rt_cq <= rt_c[cmd_data[4:0]];
+end
+reg        rt_cap;
+reg  [1:0] rt_k;
+always @(posedge clk) begin
+	rt_cap <= st == S_INFO && take && mtype == 0 && icnt < 4;
+	rt_k <= icnt[1:0];
+	if (rt_cap) begin
+		q_slot[rt_k] <= rt_aq[7:0];
+		q_wt[rt_k] <= {rt_aq[16:8], rt_aq[24:17], rt_bq, rt_cq};
+	end
+end
+
+acc_resid resid
+(
+	.clk(clk), .clr(resid_clr),
+	.w_en(idct_rv), .w_blk(idct_blk), .w_big(idct_big), .w_col(idct_col),
+	.w_vals({idct_res[7], idct_res[6], idct_res[5], idct_res[4], idct_res[3], idct_res[2], idct_res[1], idct_res[0]}),
+	.r_plane(rr_pl), .r_x(rr_x), .r_y(rr_y), .r_vals(res_q)
+);
+
+acc_recon recon
+(
+	.clk(clk),
+	.w_en(px_we), .w_plane(px_pl), .w_x(px_x), .w_y(px_y), .w_n(px_n), .w_px(px_d),
+	.r_addr(rc_addr), .r_word(wb_word)
+);
+
 integer i;
 always @(posedge clk) begin
-	idct_clr <= 0;
+	idct_clr <= reset;
 	idct_wr <= 0;
 	idct_go <= 0;
 	mc_start <= 0;
 	pic_done <= 0;
 
-	// IDCT results into the residual
-	if (idct_rv)
-		for (i = 0; i < 8; i = i + 1)
-			if (i < (idct_big ? 8 : 4)) begin
-				if (idct_blk < 16) ry[res_index(idct_blk, idct_big, idct_col, 3'(i))] <= idct_res[i];
-				else if (idct_blk < 20) ru[res_index(idct_blk, idct_big, idct_col, 3'(i))] <= idct_res[i];
-				else rv[res_index(idct_blk, idct_big, idct_col, 3'(i))] <= idct_res[i];
-			end
+	resid_clr <= 0;
 
-	// inter prediction + residual
-	if (mc_px_valid)
-		for (i = 0; i < 4; i = i + 1)
-			if (i < mc_px_n) begin
-				if (mc_px_plane == 0)
-					cy[{mc_px_y, 4'(mc_px_x + i)}] <= clip8($signed({12'd0, mc_px[i * 8 +: 8]}) + ry[{mc_px_y, 4'(mc_px_x + i)}]);
-				else if (mc_px_plane == 1)
-					cu[{mc_px_y[2:0], 3'(mc_px_x + i)}] <= clip8($signed({12'd0, mc_px[i * 8 +: 8]}) + ru[{mc_px_y[2:0], 3'(mc_px_x + i)}]);
-				else
-					cv[{mc_px_y[2:0], 3'(mc_px_x + i)}] <= clip8($signed({12'd0, mc_px[i * 8 +: 8]}) + rv[{mc_px_y[2:0], 3'(mc_px_x + i)}]);
+	// inter prediction: residual read this clock, pixels written next clock
+	mcd_valid <= mc_px_valid;
+	mcd_pl <= mc_px_plane;
+	mcd_x <= mc_px_x;
+	mcd_y <= mc_px_y;
+	mcd_n <= mc_px_n;
+	mcd_px <= mc_px;
+
+	// intra edges inside the macroblock, from every pixel write
+	if (px_we) begin
+		if (px_pl == 0) begin
+			if (px_y[1:0] == 3) brow[px_y[3:2]][px_x * 8 +: 32] <= px_d;
+			rcol[px_x[3:2]][px_y * 8 +: 8] <= px_d[31:24];
+		end
+		else begin
+			if (px_y[2:0] == 7) begin
+				if (px_n == 2) begin
+					if (px_pl == 1) cbot_u[px_x[2:0] * 8 +: 16] <= px_d[15:0];
+					else cbot_v[px_x[2:0] * 8 +: 16] <= px_d[15:0];
+				end
+				else begin
+					if (px_pl == 1) cbot_u[px_x[2:0] * 8 +: 32] <= px_d;
+					else cbot_v[px_x[2:0] * 8 +: 32] <= px_d;
+				end
 			end
+			if (px_x[2:0] + px_n == 8) begin
+				if (px_pl == 1) crt_u[px_y[2:0] * 8 +: 8] <= px_n == 2 ? px_d[15:8] : px_d[31:24];
+				else crt_v[px_y[2:0] * 8 +: 8] <= px_n == 2 ? px_d[15:8] : px_d[31:24];
+			end
+		end
+	end
 
 	if (reset) begin
 		st <= S_CMD;
@@ -483,8 +601,7 @@ always @(posedge clk) begin
 					mbx <= cmd_data[7:0];
 					mby <= cmd_data[15:8];
 					mtype <= cmd_data[18:16];
-					for (i = 0; i < 256; i = i + 1) ry[i] <= 0;
-					for (i = 0; i < 64; i = i + 1) begin ru[i] <= 0; rv[i] <= 0; end
+					resid_clr <= 1;
 					icnt <= 0;
 					pcnt <= 0;
 					st <= cmd_data[18:16] == 4 ? S_PCM : S_MB1;
@@ -505,11 +622,6 @@ always @(posedge clk) begin
 
 		S_REFS: if (take) begin
 			if (!rlist) begin
-				case (rword)
-					0: begin ref_slot[ridx[4:0]] <= cmd_data[7:0]; ref_lw[ridx[4:0]] <= cmd_data[16:8]; ref_lo[ridx[4:0]] <= cmd_data[24:17]; end
-					1: ref_cb[ridx[4:0]] <= cmd_data[16:0];
-					default: ref_cr[ridx[4:0]] <= cmd_data[16:0];
-				endcase
 			end
 			if (rword == 2) begin
 				rword <= 0;
@@ -552,17 +664,19 @@ always @(posedge clk) begin
 			ctxk <= 0;
 		end
 
+		// coefficients of the next block go in as soon as the transform of the
+		// previous one has read them (its row pass)
 		S_COEF: begin
 			if (coef_blk_change && cmd_valid) begin
 				// the previous block is complete: transform it
-				idct_go <= 1;
-				idct_blk <= coef_blk;
-				idct_big <= coef_blk < 16 && t8;
-				coef_last <= 0;
-				st <= S_IDCTW;
+				if (!idct_busy && !idct_go) begin
+					idct_go <= 1;
+					idct_blk <= coef_blk;
+					idct_big <= coef_blk < 16 && t8;
+					coef_have <= 0;
+				end
 			end
 			else if (take) begin
-				idct_clr <= !coef_have;
 				idct_wr <= 1;
 				idct_pos <= cmd_data[21:16];
 				idct_val <= cmd_data[15:0];
@@ -580,10 +694,12 @@ always @(posedge clk) begin
 		S_IDCTW: begin
 			if (go_pending) begin
 				// last block: its last coefficient is written this clock
-				go_pending <= 0;
-				idct_go <= 1;
-				idct_blk <= coef_blk;
-				idct_big <= coef_blk < 16 && t8;
+				if (!idct_busy && !idct_go) begin
+					go_pending <= 0;
+					idct_go <= 1;
+					idct_blk <= coef_blk;
+					idct_big <= coef_blk < 16 && t8;
+				end
 			end
 			else if (!idct_go && !idct_busy && !idct_rv) begin
 				coef_have <= 0;
@@ -628,8 +744,6 @@ always @(posedge clk) begin
 				pcol <= 0;
 			end
 			else begin
-				for (i = 0; i < 4; i = i + 1)
-					cy[{by + 4'(prow), bx + 4'(i)}] <= clip8($signed({12'd0, dpred[i]}) + ry[{by + 4'(prow), bx + 4'(i)}]);
 				prow <= prow + 1'd1;
 				if (prow == 3) begin
 					ph <= 0;
@@ -648,8 +762,6 @@ always @(posedge clk) begin
 				pcol <= 0;
 			end
 			else begin
-				for (i = 0; i < 4; i = i + 1)
-					cy[{by + 4'(prow), bx + 4'(pcol) + 4'(i)}] <= clip8($signed({12'd0, dpred[i]}) + ry[{by + 4'(prow), bx + 4'(pcol) + 4'(i)}]);
 				pcol <= pcol ^ 3'd4;
 				if (pcol == 4) begin
 					prow <= prow + 1'd1;
@@ -679,8 +791,6 @@ always @(posedge clk) begin
 				pgrp <= 0;
 			end
 			else begin
-				for (i = 0; i < 4; i = i + 1)
-					cy[{prow16, 4'({pgrp, 2'b00}) + 4'(i)}] <= clip8($signed({12'd0, bpred[i]}) + ry[{prow16, 4'({pgrp, 2'b00}) + 4'(i)}]);
 				pgrp <= pgrp + 1'd1;
 				if (pgrp == 3) begin
 					prow16 <= prow16 + 1'd1;
@@ -711,9 +821,6 @@ always @(posedge clk) begin
 				pgrp <= 0;
 			end
 			else begin
-				for (i = 0; i < 4; i = i + 1)
-					if (!cpl) cu[{prow16[2:0], pgrp[0], 2'(i)}] <= clip8($signed({12'd0, bpred[i]}) + ru[{prow16[2:0], pgrp[0], 2'(i)}]);
-					else      cv[{prow16[2:0], pgrp[0], 2'(i)}] <= clip8($signed({12'd0, bpred[i]}) + rv[{prow16[2:0], pgrp[0], 2'(i)}]);
 				pgrp[0] <= ~pgrp[0];
 				if (pgrp[0]) begin
 					prow16 <= prow16 + 1'd1;
@@ -729,11 +836,6 @@ always @(posedge clk) begin
 		S_MC: if (mc_done) begin st <= S_WB; wbk <= 0; end
 
 		S_PCM: if (take) begin
-			for (i = 0; i < 4; i = i + 1) begin
-				if (pcnt < 64) cy[{pcnt[5:0], 2'(i)}] <= cmd_data[i * 8 +: 8];
-				else if (pcnt < 80) cu[{pcnt[3:0], 2'(i)}] <= cmd_data[i * 8 +: 8];
-				else cv[{pcnt[3:0], 2'(i)}] <= cmd_data[i * 8 +: 8];
-			end
 			pcnt <= pcnt + 1'd1;
 			if (pcnt == 95) begin st <= S_CTX; ctxk <= 0; end
 		end
@@ -741,10 +843,10 @@ always @(posedge clk) begin
 		// macroblock to memory, one word per write
 		S_WB: begin
 			// bottom rows into the line buffers, one word per clock (block RAM)
-			if (wbk < 4) lby[{mbx, wbk[1:0]}] <= {cy[{4'd15, wbk[1:0], 2'd3}], cy[{4'd15, wbk[1:0], 2'd2}], cy[{4'd15, wbk[1:0], 2'd1}], cy[{4'd15, wbk[1:0], 2'd0}]};
+			if (wbk < 4) lby[{mbx, wbk[1:0]}] <= brow[3][wbk[1:0] * 32 +: 32];
 			if (wbk < 2) begin
-				lbu[{mbx, wbk[0]}] <= {cu[{3'd7, wbk[0], 2'd3}], cu[{3'd7, wbk[0], 2'd2}], cu[{3'd7, wbk[0], 2'd1}], cu[{3'd7, wbk[0], 2'd0}]};
-				lbv[{mbx, wbk[0]}] <= {cv[{3'd7, wbk[0], 2'd3}], cv[{3'd7, wbk[0], 2'd2}], cv[{3'd7, wbk[0], 2'd1}], cv[{3'd7, wbk[0], 2'd0}]};
+				lbu[{mbx, wbk[0]}] <= cbot_u[wbk[0] * 32 +: 32];
+				lbv[{mbx, wbk[0]}] <= cbot_v[wbk[0] * 32 +: 32];
 			end
 			if (!wb_we || !mem_busy) begin
 				if (wbk == 48 && (!wb_we || !mem_busy)) begin
@@ -763,8 +865,8 @@ always @(posedge clk) begin
 
 		// line buffers, left column and corner for the next macroblock
 		S_LB: begin
-			for (i = 0; i < 16; i = i + 1) lefty[i] <= cy[i * 16 + 15];
-			for (i = 0; i < 8; i = i + 1) begin leftu[i] <= cu[i * 8 + 7]; leftv[i] <= cv[i * 8 + 7]; end
+			for (i = 0; i < 16; i = i + 1) lefty[i] <= rcol[3][i * 8 +: 8];
+			for (i = 0; i < 8; i = i + 1) begin leftu[i] <= crt_u[i * 8 +: 8]; leftv[i] <= crt_v[i * 8 +: 8]; end
 			cornery <= topy[15];
 			corneru <= topu[7];
 			cornerv <= topv[7];

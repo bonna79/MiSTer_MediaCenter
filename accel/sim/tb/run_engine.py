@@ -41,7 +41,7 @@ if big:
     defs += ['-DSLOT_L2=19', '-DYS_L2=8', '-DCS_L2=7', '-DUOFF=278528', '-DVOFF=348160']
 else:
     defs += ['-DSLOT_L2=16', '-DYS_L2=6', '-DCS_L2=5', '-DUOFF=%d' % (64 * hh), '-DVOFF=%d' % (64 * hh + 32 * hh // 2)]
-srcs = [os.path.join(here, 'tb_engine.sv')] + [os.path.join(rtl, f) for f in ('acc_engine.sv', 'acc_mc.sv', 'acc_idct.sv')]
+srcs = [os.path.join(here, 'tb_engine.sv')] + [os.path.join(rtl, f) for f in ('acc_engine.sv', 'acc_mc.sv', 'acc_idct.sv', 'acc_resid.sv', 'acc_recon.sv')]
 subprocess.check_call(['iverilog', '-g2012', '-o', os.path.join(work, 'sim')] + defs + srcs)
 r = subprocess.run(['vvp', '-n', 'sim'], cwd=work, capture_output=True, text=True)
 print(r.stdout[-3000:], r.stderr[-2000:])

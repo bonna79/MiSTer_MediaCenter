@@ -1,10 +1,12 @@
 // H.264 inverse transform, 4x4 and 8x8 (8.5.12 / 8.5.13), for the FPGA
 // reconstruction engine. Coefficients are already dequantised by the ARM.
 //
-// Use: pulse clr, write the non-zero coefficients (pos = row * n + col),
-// pulse go. Rows are transformed first (one per clock), then columns: each
-// column comes out on res (rows 0..n-1, (x + 32) >> 6 done) with res_valid
-// and res_col. busy is high from go until the last column.
+// Use: write the non-zero coefficients (pos = row * n + col), pulse go.
+// Rows are transformed first (one per clock), then columns: each column
+// comes out on res (rows 0..n-1, (x + 32) >> 6 done) with res_valid and
+// res_col. busy is high from go until the last column. The row pass leaves
+// the coefficients at zero, so the next block can be written as soon as
+// in_ready is high (during the column pass); clr zeroes them all (reset).
 module acc_idct
 (
 	input             clk,
@@ -15,6 +17,7 @@ module acc_idct
 	input signed [15:0] wr_val,
 	input             go,
 	output reg        busy,
+	output            in_ready,
 	output reg        res_valid,
 	output reg  [2:0] res_col,
 	output reg signed [15:0] res[8]
@@ -76,13 +79,18 @@ always @* begin
 end
 
 wire [2:0] last = big ? 3'd7 : 3'd3;
+assign in_ready = !busy || cols;
 
 always @(posedge clk) begin
 	res_valid <= 0;
 	if (clr) for (int i = 0; i < 64; i++) c[i] <= 0;
 	if (wr) c[wr_pos] <= wr_val; // clr and wr together: clear, then write
 
-	if (go) begin
+	if (clr) begin
+		busy <= 0;
+		cols <= 0;
+	end
+	else if (go) begin
 		busy <= 1;
 		big <= t8;
 		cols <= 0;
@@ -90,6 +98,9 @@ always @(posedge clk) begin
 	end
 	else if (busy) begin
 		if (!cols) begin
+			for (int j = 0; j < 8; j++)
+				if (big) c[{k, 3'(j)}] <= 0;
+				else if (j < 4) c[{k[1:0], 2'(j)}] <= 0;
 			t[{k, 3'd0}] <= o0; t[{k, 3'd1}] <= o1; t[{k, 3'd2}] <= o2; t[{k, 3'd3}] <= o3;
 			t[{k, 3'd4}] <= o4; t[{k, 3'd5}] <= o5; t[{k, 3'd6}] <= o6; t[{k, 3'd7}] <= o7;
 			if (k == last) begin

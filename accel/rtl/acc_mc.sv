@@ -75,6 +75,7 @@ reg  [8:0] lw;
 reg  [7:0] lo;
 reg [16:0] cwu, cwv;
 reg  [1:0] plane;             // chroma plane being predicted: 1 U, 2 V
+reg signed [15:0] jlim;
 
 wire [3:0] rblk = {rq, rk};   // luma4x4BlkIdx of a 4x4 region
 wire [31:0] rmv = all16 || quad_eq[rq] ? `MVOF({rq, 2'b00}) : `MVOF(rblk);
@@ -117,6 +118,10 @@ reg  [4:0] jn[3];
 reg [15:0] jw0[3];            // first word of each row
 reg  [2:0] jK[3];             // words per row
 reg [AW-1:0] jbase[3];
+reg  [2:0] jsh[3];            // first pixel's byte in the first word
+reg  [4:0] jlf[3];            // pixels repeated from the left edge (window starting left of x 0)
+reg signed [6:0] jrl[3];      // last pixel inside the picture (later ones repeat it)
+reg  [4:0] jrc[3];            // byte of that pixel among the row's words
 
 wire [AW-1:0] slot_base = AW'(rslot) << SLOT_L2;
 
@@ -132,20 +137,22 @@ reg [191:0] rowbuf;
 wire signed [15:0] rq_y = clampv(jwy[rq_j] + $signed({11'd0, rq_row}), rq_j == 0 ? H : Hc);
 wire [AW-1:0] rq_addr = jbase[rq_j] + (AW'(rq_y) << (rq_j == 0 ? YSTRIDE_L2 : CSTRIDE_L2)) + jw0[rq_j];
 
-// row being received, with the picture edges repeated
+// row being received, with the picture edges repeated: the words shifted to
+// the first pixel, then the pixels outside the picture replaced by the edge
 reg [167:0] winrow[21];       // luma window rows
 reg  [71:0] cwin_u[9], cwin_v[9];
 reg [255:0] rb;
+reg [255:0] rsh;
 reg [167:0] newrow;
-integer col;
+reg  [7:0] lpix, rpix;
 always @* begin
 	rb = {mem_dout, rowbuf};
 	rb = rb >> ((3 - rv_word) * 64);      // the row's words, first at bit 0
-	newrow = 0;
-	for (i = 0; i < 21; i = i + 1) begin
-		col = clampv(jwx[rv_j] + i, rv_j == 0 ? W : Wc) - {jw0[rv_j], 3'b000};
-		if (i < jn[rv_j]) newrow[i * 8 +: 8] = rb[col * 8 +: 8];
-	end
+	rsh = jlf[rv_j] != 0 ? rb << (jlf[rv_j] * 8) : rb >> (jsh[rv_j] * 8);
+	lpix = rb[7:0];
+	rpix = rb[jrc[rv_j] * 8 +: 8];
+	for (i = 0; i < 21; i = i + 1)
+		newrow[i * 8 +: 8] = i < jlf[rv_j] ? lpix : ($signed(7'(i)) > jrl[rv_j] ? rpix : rsh[i * 8 +: 8]);
 end
 
 // ------------------------------------------------------------ luma rows
@@ -318,6 +325,11 @@ always @(posedge clk) begin
 				jK[i] <= 3'((clampv(swx[i] + $signed({11'd0, sn[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
 				            (clampv(swx[i], i == 0 ? W : Wc) >>> 3) + 1);
 				jbase[i] <= slot_base + (i == 0 ? AW'(0) : (i == 1 ? AW'(UOFF) : AW'(VOFF)));
+				jsh[i] <= 3'(swx[i]);
+				jlf[i] <= swx[i] >= 0 ? 5'd0 : (swx[i] < -21 ? 5'd21 : 5'(-swx[i]));
+				jlim = (i == 0 ? W : Wc) - 16'sd1;
+				jrl[i] <= jlim - swx[i] < -1 ? -7'sd1 : (jlim - swx[i] > 31 ? 7'sd31 : 7'(jlim - swx[i]));
+				jrc[i] <= 5'(jlim - (clampv(swx[i], i == 0 ? W : Wc) & ~16'sd7));
 			end
 			rq_on <= 1;
 			rq_j <= 0;
