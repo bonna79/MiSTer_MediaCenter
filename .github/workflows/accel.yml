@@ -1,0 +1,26 @@
+name: Accelerator engine synthesis (size and timing)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'accel/rtl/**'
+      - 'accel/syn/**'
+      - '.github/workflows/accel.yml'
+
+jobs:
+  engine:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synthesis, fit and timing with Quartus
+        run: |
+          docker run --rm -v "$PWD/accel:/build" -w /build/syn theypsilon/quartus-lite-c5:17.0.2 \
+            quartus_sh --flow compile acc.qpf > quartus.log 2>&1 || (tail -80 quartus.log; exit 1)
+          grep -E "Error|Critical Warning" quartus.log | head -40 || true
+          cat accel/syn/output_files/acc.fit.summary
+          echo "--- resources by entity"
+          grep -A40 "; Compilation Hierarchy Node" accel/syn/output_files/acc.fit.rpt | head -60 || true
+          echo "--- timing"
+          grep -B2 -A12 "Slow 1100mV 100C Model Setup Summary" accel/syn/output_files/acc.sta.rpt | head -30 || true
+          grep -A30 "; Fmax Summary" accel/syn/output_files/acc.sta.rpt | head -20 || true

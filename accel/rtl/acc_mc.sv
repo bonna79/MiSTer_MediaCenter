@@ -115,19 +115,23 @@ always @* begin
 	end
 end
 
-// ------------------------------------------------------- luma 4x4 blocks
+// ------------------------------------------------------------ luma rows
+// Output row ly comes from window rows ly .. ly + 5, kept in lw6; groups of
+// 4 pixels (lg) are done one a clock, then the rows move up by one. The
+// window RAM is read one row ahead (address set in the same clock).
 
-reg  [3:0] lb;                // 4x4 block inside the region
 reg  [3:0] lk;
-reg  [1:0] lr;                // output row
-reg  [7:0] sw[81];            // 9 x 9 window of the block
-reg  [4:0] win_ra;
+reg  [3:0] ly;                // output row in the region
+reg  [1:0] lg;                // group of 4 pixels in the row
+reg [167:0] lw6[6];
 reg [167:0] win_q;
-always @(posedge clk) win_q <= winrow[win_ra];
-
-wire [3:0] lb_last = S == 16 ? 4'd15 : (S == 8 ? 4'd3 : 4'd0);
-wire [3:0] sx = S == 16 ? {lb[1:0], 2'b00} : {1'b0, lb[0], 2'b00};
-wire [3:0] sy = S == 16 ? {lb[3:2], 2'b00} : {1'b0, lb[1], 2'b00};
+wire [1:0] lg_last = S == 16 ? 2'd3 : (S == 8 ? 2'd1 : 2'd0);
+reg  [4:0] win_addr;
+always @* begin
+	if (ms == M_LLOAD) win_addr = lk[2:0];
+	else win_addr = lg == lg_last ? ly + 5'd7 : ly + 5'd6;
+end
+always @(posedge clk) win_q <= winrow[win_addr];
 
 wire [1:0] xf = mvx[1:0], yf = mvy[1:0];
 
@@ -139,9 +143,9 @@ integer p, gr, gc;
 integer b1v[0:5];   // b1 at (X, Y-2 .. Y+3)
 integer bb0, bb1, hh0, hh1, jj, v;
 reg  [7:0] lpx[4];
-// window sample at (dx, dy) from pixel p of output row lr (direct array
-// read, so that the simulator sees sw[] in the sensitivity)
-`define G(dx, dy, pp, rr) sw[((rr) + 2 + (dy)) * 9 + (pp) + 2 + (dx)]
+// window sample at (dx, dy) from pixel pp of the current group (direct
+// array read, so that the simulator sees lw6[] in the sensitivity)
+`define G(dx, dy, pp, rr) lw6[2 + (dy)][(lg * 4 + (pp) + 2 + (dx)) * 8 +: 8]
 always @* begin
 	for (p = 0; p < 4; p = p + 1) begin
 		for (gr = 0; gr < 6; gr = gr + 1)
@@ -295,7 +299,6 @@ always @(posedge clk) begin
 						rcv_row <= rcv_row + 1'd1;
 						if (rcv_row + 1 == nrows) begin
 							ms <= plane == 0 ? M_LLOAD : M_CCALC;
-							lb <= 0;
 							lk <= 0;
 							cr <= 0;
 							cg <= 0;
@@ -306,37 +309,37 @@ always @(posedge clk) begin
 			end
 		end
 
-		// 9 rows of the 4x4 block window
+		// first 6 window rows
 		M_LLOAD: begin
-			win_ra <= sy + lk;
 			lk <= lk + 1'd1;
-			if (lk >= 2)
-				for (i = 0; i < 9; i = i + 1) sw[(lk - 2) * 9 + i] <= win_q[(sx + i) * 8 +: 8];
-			if (lk == 10) begin
+			if (lk >= 1) lw6[lk - 1] <= win_q;
+			if (lk == 6) begin
 				ms <= M_LCALC;
-				lr <= 0;
+				ly <= 0;
+				lg <= 0;
 			end
 		end
 
 		M_LCALC: begin
 			px_valid <= 1;
 			px_plane <= 0;
-			px_x <= rx + sx;
-			px_y <= ry + sy + lr;
+			px_x <= rx + {lg, 2'b00};
+			px_y <= ry + ly;
 			px_n <= 4;
 			for (i = 0; i < 4; i = i + 1) px[i * 8 +: 8] <= use_w ? wt(lpx[i], lw, lo, lden) : lpx[i];
-			lr <= lr + 1'd1;
-			if (lr == 3) begin
-				lk <= 0;
-				lb <= lb + 1'd1;
-				if (lb == lb_last) begin
+			if (lg == lg_last) begin
+				lg <= 0;
+				ly <= ly + 1'd1;
+				for (i = 0; i < 5; i = i + 1) lw6[i] <= lw6[i + 1];
+				lw6[5] <= win_q;
+				if (ly == S - 1) begin
 					// luma done: chroma U
 					plane <= 1;
 					ms <= M_FETCH;
 					req_row <= 31;
 				end
-				else ms <= M_LLOAD;
 			end
+			else lg <= lg + 1'd1;
 		end
 
 		M_CCALC: begin

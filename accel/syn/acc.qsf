@@ -1,0 +1,15 @@
+# Synthesis-only project of the accelerator engine: size and timing on the
+# DE10-Nano FPGA at the menu core clock (108 MHz). Not a core.
+set_global_assignment -name FAMILY "Cyclone V"
+set_global_assignment -name DEVICE 5CSEBA6U23I7
+set_global_assignment -name TOP_LEVEL_ENTITY acc_syn
+set_global_assignment -name SYSTEMVERILOG_FILE acc_syn.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_engine.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_mc.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_idct.sv
+set_global_assignment -name SDC_FILE acc.sdc
+set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+set_global_assignment -name SEED 1
+set_instance_assignment -name VIRTUAL_PIN ON -to cmd_*
+set_instance_assignment -name VIRTUAL_PIN ON -to mem_*
+set_instance_assignment -name VIRTUAL_PIN ON -to st_*
