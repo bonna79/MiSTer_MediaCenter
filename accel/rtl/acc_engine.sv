@@ -189,7 +189,9 @@ always @* begin
 end
 
 // DC of the block from the (filtered) edge
-reg  [7:0] dcv;
+reg  [7:0] dcv, dcv_c;
+wire       blk_dc = imode[blk] == 2 || imode[blk] > 8;   // DC modes
+always @(posedge clk) dcv <= dcv_c;
 reg [11:0] st4, sl4, st8, sl8;
 always @* begin
 	st4 = e[9] + e[10] + e[11] + e[12];
@@ -198,32 +200,39 @@ always @* begin
 	sl8 = sl4 + e[3] + e[2] + e[1] + e[0];
 	if (mtype == 1)
 		case (imode[blk])
-			9:       dcv = (sl4 + 2) >> 2;
-			10:      dcv = (st4 + 2) >> 2;
-			11:      dcv = 128;
-			default: dcv = (st4 + sl4 + 4) >> 3;
+			9:       dcv_c = (sl4 + 2) >> 2;
+			10:      dcv_c = (st4 + 2) >> 2;
+			11:      dcv_c = 128;
+			default: dcv_c = (st4 + sl4 + 4) >> 3;
 		endcase
 	else
 		case (imode[blk])
-			9:       dcv = (sl8 + 4) >> 3;
-			10:      dcv = (st8 + 4) >> 3;
-			11:      dcv = 128;
-			default: dcv = (st8 + sl8 + 8) >> 4;
+			9:       dcv_c = (sl8 + 4) >> 3;
+			10:      dcv_c = (st8 + 4) >> 3;
+			11:      dcv_c = 128;
+			default: dcv_c = (st8 + sl8 + 8) >> 4;
 		endcase
 end
 
-// four predicted pixels of row prow, columns pcol..pcol+3 of the block
+// four predicted pixels of row prow, columns pcol..pcol+3 of the block. The
+// operation and the edge samples of each pixel are worked out one clock
+// ahead (for the next group) and kept in registers.
 reg  [2:0] prow, pcol;
 reg  [7:0] dpred[4];
-integer pp, xx, yy, z, idx, nn, op, kk;
-// edge sample i (-n .. 2n, clamped), read directly: no function here, so
-// that the simulator sees e[] in the sensitivity of the block
-`define ECL(i) e[8 + ((i) < -nn ? -nn : ((i) > 2 * nn ? 2 * nn : (i)))]
-always @* begin
+reg  [1:0] opr[4];
+reg  [4:0] ia[4], ib[4], ic[4];
+integer pp, pq, pd, xx, yy, z, idx, nn, op, kk, nx, ny;
+function [4:0] ecl(input integer i, input integer n);
+	ecl = 5'(8 + (i < -n ? -n : (i > 2 * n ? 2 * n : i)));
+endfunction
+always @(posedge clk) begin
 	nn = mtype == 1 ? 4 : 8;
-	for (pp = 0; pp < 4; pp = pp + 1) begin
-		xx = pcol + pp;
-		yy = prow;
+	if (ph == 0 || ph == 2) begin nx = 0; ny = 0; end
+	else if (mtype != 1 && pcol == 0) begin nx = 4; ny = prow; end
+	else begin nx = 0; ny = prow + 1; end
+	for (pq = 0; pq < 4; pq = pq + 1) begin
+		xx = nx + pq;
+		yy = ny;
 		op = 0;
 		idx = 0;
 		case (imode[blk])
@@ -255,13 +264,20 @@ always @* begin
 			end
 			default: op = 3;
 		endcase
-		case (op)
-			0: dpred[pp] = `ECL(idx);
-			1: dpred[pp] = (`ECL(idx) + `ECL(idx + 1) + 1) >> 1;
-			2: dpred[pp] = (`ECL(idx - 1) + 2 * `ECL(idx) + `ECL(idx + 1) + 2) >> 2;
-			default: dpred[pp] = dcv;
-		endcase
+		opr[pq] <= 2'(op);
+		ia[pq] <= ecl(idx - 1, nn);
+		ib[pq] <= ecl(idx, nn);
+		ic[pq] <= ecl(idx + 1, nn);
 	end
+end
+always @* begin
+	for (pd = 0; pd < 4; pd = pd + 1)
+		case (opr[pd])
+			0: dpred[pd] = e[ib[pd]];
+			1: dpred[pd] = (9'(e[ib[pd]]) + e[ic[pd]] + 1) >> 1;
+			2: dpred[pd] = (10'(e[ia[pd]]) + 2 * e[ib[pd]] + e[ic[pd]] + 2) >> 2;
+			default: dpred[pd] = dcv;
+		endcase
 end
 
 // ------------------------------------------------- 16x16 and chroma intra
@@ -310,32 +326,41 @@ always @* begin
 	end
 end
 
-// four predicted pixels of the 16x16 / chroma block, row prow16, group pgrp
+// four predicted pixels of the 16x16 / chroma block, row prow16, group
+// pgrp: worked out one clock ahead (for the next group) into bpred
 reg  [7:0] bpred[4];
 reg signed [19:0] pv;
+reg signed [19:0] hs_r, vs_r;
+reg [12:0] stop_r, sleft_r;
+reg [10:0] sqt0_r, sqt1_r, sql0_r, sql1_r;
+reg  [3:0] nrow;
+reg  [1:0] ngrp;
 integer bxx, byy;
-always @* begin
-	byy = prow16;
+always @(posedge clk) begin
+	if (ph == 3) begin nrow = 0; ngrp = 0; end
+	else if (sb == S_I16 ? pgrp == 3 : pgrp[0]) begin nrow = prow16 + 1'd1; ngrp = 0; end
+	else begin nrow = prow16; ngrp = pgrp + 1'd1; end
+	byy = nrow;
 	for (pp = 0; pp < 4; pp = pp + 1) begin
-		bxx = pgrp * 4 + pp;
+		bxx = ngrp * 4 + pp;
 		if (sb == S_I16) begin
 			pv = (pa + pb * (bxx - 7) + pc * (byy - 7) + 16) >>> 5;
-			if (pcm) bpred[pp] = 0;
+			if (pcm) bpred[pp] <= 0;
 			else case (i16mode)
-				1: bpred[pp] = lefty[prow16];
-				2: bpred[pp] = topy[bxx];
-				3: bpred[pp] = clip8(pv);
-				default: bpred[pp] = dc16;
+				1: bpred[pp] <= lefty[nrow];
+				2: bpred[pp] <= topy[bxx];
+				3: bpred[pp] <= clip8(pv);
+				default: bpred[pp] <= dc16;
 			endcase
 		end
 		else begin
 			pv = (pa + pb * (bxx - 3) + pc * (byy - 3) + 16) >>> 5;
-			if (pcm) bpred[pp] = 0;
+			if (pcm) bpred[pp] <= 0;
 			else case (cmode)
-				1: bpred[pp] = cpl ? leftv[prow16] : leftu[prow16];
-				2: bpred[pp] = cpl ? topv[bxx] : topu[bxx];
-				3: bpred[pp] = clip8(pv);
-				default: bpred[pp] = dcq[{prow16[2], pgrp[0]}];
+				1: bpred[pp] <= cpl ? leftv[nrow] : leftu[nrow];
+				2: bpred[pp] <= cpl ? topv[bxx] : topu[bxx];
+				3: bpred[pp] <= clip8(pv);
+				default: bpred[pp] <= dcq[{nrow[2], ngrp[0]}];
 			endcase
 		end
 	end
@@ -434,13 +459,51 @@ wire [15:0] X16 = {mbx, 4'd0};
 // is delayed one clock).
 
 reg        resid_clr;
-reg        mcd_valid;
-reg  [1:0] mcd_pl;
-reg  [3:0] mcd_x, mcd_y;
-reg  [2:0] mcd_n;
-reg [31:0] mcd_px;
 
-reg        px_we, px_res;
+// group made this clock (stage 0): its residual is read now and it is
+// written on the next clock (stage 1, w1_*)
+reg        q_we;
+reg  [1:0] q_pl;
+reg  [3:0] q_x, q_y;
+reg  [2:0] q_n;
+reg [31:0] q_pr;
+always @* begin
+	q_we = 0;
+	q_pl = 0;
+	q_x = 0;
+	q_y = 0;
+	q_n = 4;
+	q_pr = {dpred[3], dpred[2], dpred[1], dpred[0]};
+	case (sb)
+		S_I4:  if (ph == 1) begin q_we = 1; q_x = bx; q_y = by + 4'(prow); end
+		S_I8:  if (ph == 1) begin q_we = 1; q_x = bx + 4'(pcol); q_y = by + 4'(prow); end
+		S_I16: if (ph == 1) begin
+			q_we = 1;
+			q_x = {pgrp, 2'b00};
+			q_y = prow16;
+			q_pr = {bpred[3], bpred[2], bpred[1], bpred[0]};
+		end
+		S_CHR: if (ph == 1) begin
+			q_we = 1;
+			q_pl = cpl ? 2'd2 : 2'd1;
+			q_x = {1'b0, pgrp[0], 2'b00};
+			q_y = prow16;
+			q_pr = {bpred[3], bpred[2], bpred[1], bpred[0]};
+		end
+		default: ;
+	endcase
+	if (mc_px_valid) begin
+		q_we = 1;
+		q_pl = mc_px_plane;
+		q_x = mc_px_x;
+		q_y = mc_px_y;
+		q_n = mc_px_n;
+		q_pr = mc_px;
+	end
+end
+
+// stage 1: prediction + residual, clipped, into acc_recon and the edges
+reg        px_we;
 reg  [1:0] px_pl;
 reg  [3:0] px_x, px_y;
 reg  [2:0] px_n;
@@ -448,71 +511,8 @@ reg [31:0] px_pr, px_d;
 wire [39:0] res_q;
 integer pk;
 always @* begin
-	px_we = 0;
-	px_res = 1;
-	px_pl = 0;
-	px_x = 0;
-	px_y = 0;
-	px_n = 4;
-	px_pr = {dpred[3], dpred[2], dpred[1], dpred[0]};
-	case (sb)
-		S_I4:  if (ph != 0) begin px_we = 1; px_x = bx; px_y = by + 4'(prow); end
-		S_I8:  if (ph != 0) begin px_we = 1; px_x = bx + 4'(pcol); px_y = by + 4'(prow); end
-		S_I16: if (ph != 0) begin
-			px_we = 1;
-			px_x = {pgrp, 2'b00};
-			px_y = prow16;
-			px_pr = {bpred[3], bpred[2], bpred[1], bpred[0]};
-		end
-		S_CHR: if (ph != 0) begin
-			px_we = 1;
-			px_pl = cpl ? 2'd2 : 2'd1;
-			px_x = {1'b0, pgrp[0], 2'b00};
-			px_y = prow16;
-			px_pr = {bpred[3], bpred[2], bpred[1], bpred[0]};
-		end
-		default: ;
-	endcase
-	if (mcd_valid) begin
-		px_we = 1;
-		px_pl = mcd_pl;
-		px_x = mcd_x;
-		px_y = mcd_y;
-		px_n = mcd_n;
-		px_pr = mcd_px;
-	end
 	for (pk = 0; pk < 4; pk = pk + 1)
-		px_d[pk * 8 +: 8] = px_res ? clip8($signed({12'd0, px_pr[pk * 8 +: 8]}) + $signed({{10{res_q[pk * 10 + 9]}}, res_q[pk * 10 +: 10]}))
-		                           : px_pr[pk * 8 +: 8];
-end
-
-// residual group needed on the next clock
-reg  [1:0] rr_pl;
-reg  [3:0] rr_x, rr_y;
-always @* begin
-	rr_pl = 0;
-	rr_x = 0;
-	rr_y = 0;
-	case (sb)
-		S_I4: begin rr_x = bx; rr_y = by + (ph == 0 ? 4'd0 : 4'(prow) + 4'd1); end
-		S_I8: begin
-			if (ph == 0) begin rr_x = bx; rr_y = by; end
-			else if (pcol == 0) begin rr_x = bx + 4'd4; rr_y = by + 4'(prow); end
-			else begin rr_x = bx; rr_y = by + 4'(prow) + 4'd1; end
-		end
-		S_I16: begin
-			if (ph == 0) begin rr_x = 0; rr_y = 0; end
-			else if (pgrp == 3) begin rr_x = 0; rr_y = prow16 + 4'd1; end
-			else begin rr_x = {pgrp + 2'd1, 2'b00}; rr_y = prow16; end
-		end
-		S_CHR: begin
-			rr_pl = cpl ? 2'd2 : 2'd1;
-			if (ph == 0) begin rr_x = 0; rr_y = 0; end
-			else if (!pgrp[0]) begin rr_x = 4; rr_y = prow16; end
-			else begin rr_x = 0; rr_y = prow16 + 4'd1; end
-		end
-		default: begin rr_pl = mc_px_plane; rr_x = mc_px_x; rr_y = mc_px_y; end
-	endcase
+		px_d[pk * 8 +: 8] = clip8($signed({12'd0, px_pr[pk * 8 +: 8]}) + $signed({{10{res_q[pk * 10 + 9]}}, res_q[pk * 10 +: 10]}));
 end
 
 // reference table (list 0) in block RAM: {slot, lw, lo}, cb, cr
@@ -548,7 +548,7 @@ acc_resid resid
 	.p_y(pcnt < 64 ? pcnt[5:2] : {1'b0, pcnt[3:1]}), .p_px(cmd_data),
 	.w_en(idct_rv), .w_blk(idct_blk), .w_big(idct_big), .w_col(idct_col),
 	.w_vals({idct_res[7], idct_res[6], idct_res[5], idct_res[4], idct_res[3], idct_res[2], idct_res[1], idct_res[0]}),
-	.r_plane(rr_pl), .r_x(rr_x), .r_y(rr_y), .r_vals(res_q)
+	.r_plane(q_pl), .r_x(q_x), .r_y(q_y), .r_vals(res_q)
 );
 
 acc_recon recon
@@ -568,13 +568,13 @@ always @(posedge clk) begin
 
 	resid_clr <= 0;
 
-	// inter prediction: residual read this clock, pixels written next clock
-	mcd_valid <= mc_px_valid;
-	mcd_pl <= mc_px_plane;
-	mcd_x <= mc_px_x;
-	mcd_y <= mc_px_y;
-	mcd_n <= mc_px_n;
-	mcd_px <= mc_px;
+	// pixel groups: residual read this clock, written next clock
+	px_we <= q_we;
+	px_pl <= q_pl;
+	px_x <= q_x;
+	px_y <= q_y;
+	px_n <= q_n;
+	px_pr <= q_pr;
 
 	// intra edges inside the macroblock, from every pixel write
 	if (px_we) begin
@@ -815,11 +815,12 @@ always @(posedge clk) begin
 		end
 
 		// intra 4x4: edge, then 4 rows
-		S_I4: begin
-			if (ph == 0) begin
+		S_I4: if (!(ph == 0 && px_we)) begin
+			if (ph == 2) ph <= 1;            // DC: its sum is registered
+			else if (ph == 0) begin
 				for (i = 0; i < 25; i = i + 1) e[i] <= eraw[i];
 				if (!tr_mask[15 - blk]) for (i = 0; i < 4; i = i + 1) e[13 + i] <= eraw[12];
-				ph <= 1;
+				ph <= blk_dc ? 5'd2 : 5'd1;
 				prow <= 0;
 				pcol <= 0;
 			end
@@ -834,10 +835,11 @@ always @(posedge clk) begin
 		end
 
 		// intra 8x8: edge, filter, then 8 rows of 2 groups
-		S_I8: begin
-			if (ph == 0) begin
+		S_I8: if (!(ph == 0 && px_we)) begin
+			if (ph == 2) ph <= 1;            // DC: its sum is registered
+			else if (ph == 0) begin
 				for (i = 0; i < 25; i = i + 1) e[i] <= efil[i];
-				ph <= 1;
+				ph <= blk_dc ? 5'd2 : 5'd1;
 				prow <= 0;
 				pcol <= 0;
 			end
@@ -854,18 +856,28 @@ always @(posedge clk) begin
 			end
 		end
 
-		// intra 16x16: setup, then 16 rows of 4 groups
+		// intra 16x16: sums, plane parameters, first group, then 16 rows of 4 groups
 		S_I16: begin
 			if (ph == 0) begin
+				hs_r <= hsum;
+				vs_r <= vsum;
+				stop_r <= stop;
+				sleft_r <= sleft;
+				ph <= 2;
+			end
+			else if (ph == 2) begin
 				pa <= 16 * (lefty[15] + topy[15]);
-				pb <= (5 * hsum + 32) >>> 6;
-				pc <= (5 * vsum + 32) >>> 6;
+				pb <= (5 * hs_r + 32) >>> 6;
+				pc <= (5 * vs_r + 32) >>> 6;
 				case (i16mode)
-					4: dc16 <= (sleft + 8) >> 4;
-					5: dc16 <= (stop + 8) >> 4;
+					4: dc16 <= (sleft_r + 8) >> 4;
+					5: dc16 <= (stop_r + 8) >> 4;
 					6: dc16 <= 128;
-					default: dc16 <= (stop + sleft + 16) >> 5;
+					default: dc16 <= (stop_r + sleft_r + 16) >> 5;
 				endcase
+				ph <= 3;
+			end
+			else if (ph == 3) begin
 				ph <= 1;
 				prow16 <= 0;
 				pgrp <= 0;
@@ -879,23 +891,35 @@ always @(posedge clk) begin
 			end
 		end
 
-		// chroma intra: per plane setup, then 8 rows of 2 groups
+		// chroma intra: per plane sums, parameters, first group, then 8 rows of 2 groups
 		S_CHR: begin
 			if (ph == 0) begin
+				hs_r <= hsum;
+				vs_r <= vsum;
+				sqt0_r <= sq_t0;
+				sqt1_r <= sq_t1;
+				sql0_r <= sq_l0;
+				sql1_r <= sq_l1;
+				ph <= 2;
+			end
+			else if (ph == 2) begin
 				pa <= 16 * ((cpl ? leftv[7] : leftu[7]) + (cpl ? topv[7] : topu[7]));
-				pb <= (34 * hsum + 32) >>> 6;
-				pc <= (34 * vsum + 32) >>> 6;
+				pb <= (34 * hs_r + 32) >>> 6;
+				pc <= (34 * vs_r + 32) >>> 6;
 				case (cmode)
-					4: begin dcq[0] <= (sq_l0 + 2) >> 2; dcq[1] <= (sq_l0 + 2) >> 2; dcq[2] <= (sq_l1 + 2) >> 2; dcq[3] <= (sq_l1 + 2) >> 2; end
-					5: begin dcq[0] <= (sq_t0 + 2) >> 2; dcq[1] <= (sq_t1 + 2) >> 2; dcq[2] <= (sq_t0 + 2) >> 2; dcq[3] <= (sq_t1 + 2) >> 2; end
+					4: begin dcq[0] <= (sql0_r + 2) >> 2; dcq[1] <= (sql0_r + 2) >> 2; dcq[2] <= (sql1_r + 2) >> 2; dcq[3] <= (sql1_r + 2) >> 2; end
+					5: begin dcq[0] <= (sqt0_r + 2) >> 2; dcq[1] <= (sqt1_r + 2) >> 2; dcq[2] <= (sqt0_r + 2) >> 2; dcq[3] <= (sqt1_r + 2) >> 2; end
 					6: begin dcq[0] <= 128; dcq[1] <= 128; dcq[2] <= 128; dcq[3] <= 128; end
 					default: begin
-						dcq[0] <= (sq_t0 + sq_l0 + 4) >> 3;
-						dcq[1] <= (sq_t1 + 2) >> 2;
-						dcq[2] <= (sq_l1 + 2) >> 2;
-						dcq[3] <= (sq_t1 + sq_l1 + 4) >> 3;
+						dcq[0] <= (sqt0_r + sql0_r + 4) >> 3;
+						dcq[1] <= (sqt1_r + 2) >> 2;
+						dcq[2] <= (sql1_r + 2) >> 2;
+						dcq[3] <= (sqt1_r + sql1_r + 4) >> 3;
 					end
 				endcase
+				ph <= 3;
+			end
+			else if (ph == 3) begin
 				ph <= 1;
 				prow16 <= 0;
 				pgrp <= 0;
@@ -917,7 +941,7 @@ always @(posedge clk) begin
 
 		// line buffers, left column and corner for the next macroblock, then
 		// the macroblock goes to the writer
-		S_LB: begin
+		S_LB: if (!px_we) begin
 			lby[{mbx, lbk}] <= brow[3][lbk * 32 +: 32];
 			if (lbk < 2) begin
 				lbu[{mbx, lbk[0]}] <= cbot_u[lbk[0] * 32 +: 32];

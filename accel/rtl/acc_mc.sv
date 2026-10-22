@@ -144,28 +144,66 @@ reg [191:0] rowbuf;
 wire [2:0] rk_i = rv_b ? 3'd3 + rv_j : {1'b0, rv_j};
 
 // row being received, with the picture edges repeated: the words shifted to
-// the first pixel, then the pixels outside the picture replaced by the edge
+// the first pixel, then the pixels outside the picture replaced by the edge.
+// Two register stages: r1 (the row's words, first at bit 0, and its
+// parameters), r2 (the finished row, written to the window RAM).
 reg [255:0] rb;
+always @* begin
+	rb = {mem_dout, rowbuf};
+	rb = rb >> ((3 - rv_word) * 64);
+end
+wire        rv_last = mem_dout_ready && rv_word == kK[rk_i] - 1;
+
+reg         r1_v, r1_done, r1_b;
+reg   [1:0] r1_j;
+reg   [4:0] r1_row;
+reg [255:0] r1_rb;
+reg   [4:0] r1_lf, r1_rc;
+reg   [2:0] r1_sh;
+reg signed [6:0] r1_rl;
+always @(posedge clk) begin
+	r1_v <= rv_last;
+	r1_done <= rv_row + 1'd1 == kn[rk_i];
+	r1_b <= rv_b;
+	r1_j <= rv_j;
+	r1_row <= rv_row;
+	r1_rb <= rb;
+	r1_lf <= klf[rk_i];
+	r1_sh <= ksh[rk_i];
+	r1_rl <= krl[rk_i];
+	r1_rc <= krc[rk_i];
+end
+
 reg [255:0] rsh;
 reg [167:0] newrow;
 reg  [7:0] lpix, rpix;
 always @* begin
-	rb = {mem_dout, rowbuf};
-	rb = rb >> ((3 - rv_word) * 64);      // the row's words, first at bit 0
-	rsh = klf[rk_i] != 0 ? rb << (klf[rk_i] * 8) : rb >> (ksh[rk_i] * 8);
-	lpix = rb[7:0];
-	rpix = rb[krc[rk_i] * 8 +: 8];
+	rsh = r1_lf != 0 ? r1_rb << (r1_lf * 8) : r1_rb >> (r1_sh * 8);
+	lpix = r1_rb[7:0];
+	rpix = r1_rb[r1_rc * 8 +: 8];
 	for (i = 0; i < 21; i = i + 1)
-		newrow[i * 8 +: 8] = i < klf[rk_i] ? lpix : ($signed(7'(i)) > krl[rk_i] ? rpix : rsh[i * 8 +: 8]);
+		newrow[i * 8 +: 8] = i < r1_lf ? lpix : ($signed(7'(i)) > r1_rl ? rpix : rsh[i * 8 +: 8]);
+end
+
+reg         r2_v, r2_done, r2_b;
+reg   [1:0] r2_j;
+reg   [4:0] r2_row;
+reg [167:0] r2_d;
+always @(posedge clk) begin
+	r2_v <= r1_v;
+	r2_done <= r1_done;
+	r2_b <= r1_b;
+	r2_j <= r1_j;
+	r2_row <= r1_row;
+	r2_d <= newrow;
 end
 
 // window RAMs: luma rows {buffer, row}, chroma rows {buffer, V, row}
 reg [167:0] winrow[64];
 reg  [71:0] cwin[64];
-wire        rv_last = mem_dout_ready && rv_word == kK[rk_i] - 1;
 always @(posedge clk) begin
-	if (rv_last && rv_j == 0) winrow[{rv_b, rv_row}] <= newrow;
-	if (rv_last && rv_j != 0) cwin[{rv_b, rv_j[1], rv_row[3:0]}] <= newrow[71:0];
+	if (r2_v && r2_j == 0) winrow[{r2_b, r2_row}] <= r2_d;
+	if (r2_v && r2_j != 0) cwin[{r2_b, r2_j[1], r2_row[3:0]}] <= r2_d[71:0];
 end
 
 // ------------------------------------------------------ calculation side
@@ -202,49 +240,6 @@ always @(posedge clk) win_q <= winrow[{c_b, win_addr}];
 
 wire [1:0] xf = mvx[1:0], yf = mvy[1:0];
 
-function integer tap(input integer a, b, c, d, e, f);
-	tap = a - 5 * b + 20 * c + 20 * d - 5 * e + f;
-endfunction
-
-integer p, gr;
-integer b1v[0:5];   // b1 at (X, Y-2 .. Y+3)
-integer bb0, bb1, hh0, hh1, jj, v;
-reg  [7:0] lpx[4];
-// window sample at (dx, dy) from pixel pp of the current group (direct
-// array read, so that the simulator sees lw6[] in the sensitivity)
-`define G(dx, dy, pp) lw6[2 + (dy)][(lg * 4 + (pp) + 2 + (dx)) * 8 +: 8]
-always @* begin
-	for (p = 0; p < 4; p = p + 1) begin
-		for (gr = 0; gr < 6; gr = gr + 1)
-			b1v[gr] = tap(`G(-2, gr - 2, p), `G(-1, gr - 2, p), `G(0, gr - 2, p),
-			              `G(1, gr - 2, p), `G(2, gr - 2, p), `G(3, gr - 2, p));
-		bb0 = clip8((b1v[2] + 16) >>> 5);
-		bb1 = clip8((b1v[3] + 16) >>> 5);
-		hh0 = clip8((tap(`G(0, -2, p), `G(0, -1, p), `G(0, 0, p), `G(0, 1, p), `G(0, 2, p), `G(0, 3, p)) + 16) >>> 5);
-		hh1 = clip8((tap(`G(1, -2, p), `G(1, -1, p), `G(1, 0, p), `G(1, 1, p), `G(1, 2, p), `G(1, 3, p)) + 16) >>> 5);
-		jj  = clip8((tap(b1v[0], b1v[1], b1v[2], b1v[3], b1v[4], b1v[5]) + 512) >>> 10);
-		case ({xf, yf})
-			4'b00_00: v = `G(0, 0, p);
-			4'b00_01: v = (`G(0, 0, p) + hh0 + 1) >> 1;
-			4'b00_10: v = hh0;
-			4'b00_11: v = (`G(0, 1, p) + hh0 + 1) >> 1;
-			4'b01_00: v = (`G(0, 0, p) + bb0 + 1) >> 1;
-			4'b10_00: v = bb0;
-			4'b11_00: v = (`G(1, 0, p) + bb0 + 1) >> 1;
-			4'b10_10: v = jj;
-			4'b01_01: v = (bb0 + hh0 + 1) >> 1;
-			4'b11_01: v = (bb0 + hh1 + 1) >> 1;
-			4'b01_11: v = (hh0 + bb1 + 1) >> 1;
-			4'b11_11: v = (hh1 + bb1 + 1) >> 1;
-			4'b10_01: v = (bb0 + jj + 1) >> 1;
-			4'b10_11: v = (jj + bb1 + 1) >> 1;
-			4'b01_10: v = (hh0 + jj + 1) >> 1;
-			default:  v = (jj + hh1 + 1) >> 1;
-		endcase
-		lpx[p] = v;
-	end
-end
-
 // chroma rows: output row cr from window rows cr, cr + 1 (crow0, crow1),
 // read one row ahead like the luma
 reg  [3:0] cr;                // chroma output row
@@ -252,7 +247,6 @@ reg  [1:0] cg;                // group of 4 pixels
 reg  [1:0] ck;
 wire       cg_last = S == 16 ? cg == 1 : 1'b1;
 wire [2:0] cxf = mvx[2:0], cyf = mvy[2:0];
-reg  [7:0] cpx[4];
 reg [71:0] crow0, crow1, cwin_q;
 reg  [3:0] cwin_addr;
 always @* begin
@@ -261,37 +255,148 @@ always @* begin
 end
 always @(posedge clk) cwin_q <= cwin[{c_b, plane[1], cwin_addr}];
 
-integer A, B, C, D;
-always @* begin
-	for (p = 0; p < 4; p = p + 1) begin
-		A = crow0[(cg * 4 + p) * 8 +: 8];
-		B = crow0[(cg * 4 + p + 1) * 8 +: 8];
-		C = crow1[(cg * 4 + p) * 8 +: 8];
-		D = crow1[(cg * 4 + p + 1) * 8 +: 8];
-		cpx[p] = ((8 - cxf) * (8 - cyf) * A + cxf * (8 - cyf) * B + (8 - cxf) * cyf * C + cxf * cyf * D + 32) >> 6;
-	end
+// ------------------------------------------------------- output pipeline
+// The calculation side hands one group of 4 pixels a clock to stage 0:
+// the window samples it needs (luma: 6 rows x 9, chroma: 2 rows x 5), the
+// fraction of the vector and the weights. Stages 1..6 make the pixels:
+//   1 six-tap sums (horizontal for 6 rows, vertical for 2 columns),
+//     chroma: two pairs of products
+//   2 half samples b, h clipped, raw centre sum j; chroma: sum, round
+//   3 j clipped
+//   4 quarter sample (select, average)
+//   5 weight multiply
+//   6 weight shift, offset, clip -> px
+
+function signed [14:0] tap(input [7:0] a, b, c, d, e, f);
+	tap = $signed({7'd0, a}) + $signed({7'd0, f}) - 15'sd5 * ($signed({7'd0, b}) + $signed({7'd0, e}))
+	      + 15'sd20 * ($signed({7'd0, c}) + $signed({7'd0, d}));
+endfunction
+
+function signed [20:0] tapw(input signed [14:0] a, b, c, d, e, f);
+	tapw = 21'(a) + 21'(f) - 21'sd5 * (21'(b) + 21'(e)) + 21'sd20 * (21'(c) + 21'(d));
+endfunction
+
+function [7:0] clip8s(input signed [21:0] v);
+	clip8s = v < 0 ? 8'd0 : (v > 255 ? 8'd255 : v[7:0]);
+endfunction
+
+// chroma bilinear weights of the current region
+reg  [6:0] ka, kb, kc, kd;
+always @(posedge clk) begin
+	ka <= (7'd8 - cxf) * (7'd8 - cyf);
+	kb <= cxf * (7'd8 - cyf);
+	kc <= (7'd8 - cxf) * cyf;
+	kd <= cxf * cyf;
 end
 
-// ------------------------------------------------------------- weighting
+// stage tags: valid, chroma, plane, x, y, n, fraction, weights (stage 0
+// is written by the calculation side, stages 1..6 here)
+reg        sv0, sc0, suw0;
+reg  [1:0] spl0;
+reg  [3:0] sx0, sy0, sf0, sd0;
+reg  [2:0] sn_0;
+reg signed [8:0] sw0;
+reg signed [7:0] so0;
+reg  [6:0] ska0, skb0, skc0, skd0;
+reg        sv[1:6], sc[1:6], suw[1:6];
+reg  [1:0] spl[1:6];
+reg  [3:0] sx[1:6], sy[1:6], sf[1:6], sd[1:6];
+reg  [2:0] sn_[1:6];
+reg signed [8:0] sw[1:6];
+reg signed [7:0] so[1:6];
 
-function [7:0] wt(input [7:0] pv, input signed [8:0] w, input signed [7:0] o, input [3:0] d);
-	integer t, ip, iw, io, id;
-	begin
-		ip = pv;
-		iw = w;
-		io = o;
-		id = d;
-		if (id != 0) t = ((ip * iw + (1 << (id - 1))) >>> id) + io;
-		else t = ip * iw + io;
-		wt = clip8(t);
+reg  [7:0] nb[6][9];          // stage 0 samples
+
+reg signed [14:0] b1[4][6];   // stage 1
+reg signed [14:0] hv0[4], hv1[4];
+reg  [7:0] s00[2:4][4], s10[2:4][4], s01[2:4][4];   // G(0,0), G(1,0), G(0,1), stages 1..3
+reg [15:0] ct0[4], ct1[4];
+
+reg  [7:0] bb0[2:3][4], bb1[2:3][4], hh0[2:3][4], hh1[2:3][4];   // stage 2, 3
+reg signed [20:0] jr[4];
+reg  [7:0] cv[2:3][4];
+
+reg  [7:0] jj[4];             // stage 3
+reg  [7:0] vq[4];             // stage 4
+reg signed [17:0] mq[4];      // stage 5
+
+wire pipe_busy = sv0 || sv[1] || sv[2] || sv[3] || sv[4] || sv[5] || px_valid;
+
+integer p, r, k;
+always @(posedge clk) begin
+	sv[1] <= sv0; sc[1] <= sc0; spl[1] <= spl0; sx[1] <= sx0; sy[1] <= sy0; sn_[1] <= sn_0;
+	sf[1] <= sf0; suw[1] <= suw0; sw[1] <= sw0; so[1] <= so0; sd[1] <= sd0;
+	for (k = 2; k < 7; k = k + 1) begin
+		sv[k] <= sv[k - 1]; sc[k] <= sc[k - 1]; spl[k] <= spl[k - 1];
+		sx[k] <= sx[k - 1]; sy[k] <= sy[k - 1]; sn_[k] <= sn_[k - 1]; sf[k] <= sf[k - 1];
+		suw[k] <= suw[k - 1]; sw[k] <= sw[k - 1]; so[k] <= so[k - 1]; sd[k] <= sd[k - 1];
 	end
-endfunction
+
+	for (p = 0; p < 4; p = p + 1) begin
+		// 1
+		for (r = 0; r < 6; r = r + 1)
+			b1[p][r] <= tap(nb[r][p], nb[r][p + 1], nb[r][p + 2], nb[r][p + 3], nb[r][p + 4], nb[r][p + 5]);
+		hv0[p] <= tap(nb[0][p + 2], nb[1][p + 2], nb[2][p + 2], nb[3][p + 2], nb[4][p + 2], nb[5][p + 2]);
+		hv1[p] <= tap(nb[0][p + 3], nb[1][p + 3], nb[2][p + 3], nb[3][p + 3], nb[4][p + 3], nb[5][p + 3]);
+		s00[2][p] <= nb[2][p + 2];
+		s10[2][p] <= nb[2][p + 3];
+		s01[2][p] <= nb[3][p + 2];
+		ct0[p] <= ska0 * nb[0][p] + skb0 * nb[0][p + 1];
+		ct1[p] <= skc0 * nb[1][p] + skd0 * nb[1][p + 1];
+		// 2
+		bb0[2][p] <= clip8s((22'(b1[p][2]) + 22'sd16) >>> 5);
+		bb1[2][p] <= clip8s((22'(b1[p][3]) + 22'sd16) >>> 5);
+		hh0[2][p] <= clip8s((22'(hv0[p]) + 22'sd16) >>> 5);
+		hh1[2][p] <= clip8s((22'(hv1[p]) + 22'sd16) >>> 5);
+		jr[p] <= tapw(b1[p][0], b1[p][1], b1[p][2], b1[p][3], b1[p][4], b1[p][5]);
+		cv[2][p] <= 8'((17'(ct0[p]) + 17'(ct1[p]) + 17'd32) >> 6);
+		s00[3][p] <= s00[2][p]; s10[3][p] <= s10[2][p]; s01[3][p] <= s01[2][p];
+		// 3
+		jj[p] <= clip8s((22'(jr[p]) + 22'sd512) >>> 10);
+		bb0[3][p] <= bb0[2][p]; bb1[3][p] <= bb1[2][p]; hh0[3][p] <= hh0[2][p]; hh1[3][p] <= hh1[2][p];
+		cv[3][p] <= cv[2][p];
+		s00[4][p] <= s00[3][p]; s10[4][p] <= s10[3][p]; s01[4][p] <= s01[3][p];
+		// 4
+		if (sc[3]) vq[p] <= cv[3][p];
+		else case (sf[3])
+			4'b00_00: vq[p] <= s00[4][p];
+			4'b00_01: vq[p] <= 8'((9'(s00[4][p]) + hh0[3][p] + 1) >> 1);
+			4'b00_10: vq[p] <= hh0[3][p];
+			4'b00_11: vq[p] <= 8'((9'(s01[4][p]) + hh0[3][p] + 1) >> 1);
+			4'b01_00: vq[p] <= 8'((9'(s00[4][p]) + bb0[3][p] + 1) >> 1);
+			4'b10_00: vq[p] <= bb0[3][p];
+			4'b11_00: vq[p] <= 8'((9'(s10[4][p]) + bb0[3][p] + 1) >> 1);
+			4'b10_10: vq[p] <= jj[p];
+			4'b01_01: vq[p] <= 8'((9'(bb0[3][p]) + hh0[3][p] + 1) >> 1);
+			4'b11_01: vq[p] <= 8'((9'(bb0[3][p]) + hh1[3][p] + 1) >> 1);
+			4'b01_11: vq[p] <= 8'((9'(hh0[3][p]) + bb1[3][p] + 1) >> 1);
+			4'b11_11: vq[p] <= 8'((9'(hh1[3][p]) + bb1[3][p] + 1) >> 1);
+			4'b10_01: vq[p] <= 8'((9'(bb0[3][p]) + jj[p] + 1) >> 1);
+			4'b10_11: vq[p] <= 8'((9'(jj[p]) + bb1[3][p] + 1) >> 1);
+			4'b01_10: vq[p] <= 8'((9'(hh0[3][p]) + jj[p] + 1) >> 1);
+			default:  vq[p] <= 8'((9'(jj[p]) + hh1[3][p] + 1) >> 1);
+		endcase
+		// 5
+		mq[p] <= !suw[4] ? 18'(vq[p]) :
+		         $signed({10'd0, vq[p]}) * 18'(sw[4]) + (sd[4] != 0 ? 18'sd1 <<< (sd[4] - 1'd1) : 18'sd0);
+		// 6
+		px[p * 8 +: 8] <= !suw[5] ? mq[p][7:0] : clip8s(22'(mq[p] >>> sd[5]) + 22'(so[5]));
+	end
+
+	px_valid <= sv[5];
+	px_plane <= spl[5];
+	px_x <= sx[5];
+	px_y <= sy[5];
+	px_n <= sn_[5];
+end
 
 // ---------------------------------------------------------------- control
 
+reg        fin;
 always @(posedge clk) begin
 	done <= 0;
-	px_valid <= 0;
+	sv0 <= 0;
+	if (fin && !pipe_busy) begin fin <= 0; done <= 1; end
 
 	// ---- fetch: regions in order, each on a free buffer
 	if (mem_rd && !mem_busy) mem_rd <= 0;
@@ -368,7 +473,6 @@ always @(posedge clk) begin
 			rv_word <= 0;
 			if (rv_row + 1'd1 == kn[rk_i]) begin
 				rv_row <= 0;
-				got[rv_b][rv_j] <= 1;
 				if (rv_j == 2) begin
 					rv_j <= 0;
 					rv_b <= ~rv_b;
@@ -379,6 +483,9 @@ always @(posedge clk) begin
 		end
 		else rv_word <= rv_word + 1'd1;
 	end
+
+	// a window is complete once its last row is in the RAM
+	if (r2_v && r2_done) got[r2_b][r2_j] <= 1;
 
 	// ---- calculation
 	case (ms)
@@ -425,12 +532,19 @@ always @(posedge clk) begin
 		end
 
 		M_LCALC: begin
-			px_valid <= 1;
-			px_plane <= 0;
-			px_x <= rx + {lg, 2'b00};
-			px_y <= ry + ly;
-			px_n <= 4;
-			for (i = 0; i < 4; i = i + 1) px[i * 8 +: 8] <= use_w ? wt(lpx[i], lw, lo, lden) : lpx[i];
+			sv0 <= 1;
+			sc0 <= 0;
+			spl0 <= 0;
+			sx0 <= rx + {lg, 2'b00};
+			sy0 <= ry + ly;
+			sn_0 <= 4;
+			sf0 <= {xf, yf};
+			suw0 <= use_w;
+			sw0 <= lw;
+			so0 <= lo;
+			sd0 <= lden;
+			for (r = 0; r < 6; r = r + 1)
+				for (k = 0; k < 9; k = k + 1) nb[r][k] <= lw6[r][(lg * 4 + k) * 8 +: 8];
 			if (lg == lg_last) begin
 				lg <= 0;
 				ly <= ly + 1'd1;
@@ -462,14 +576,22 @@ always @(posedge clk) begin
 		end
 
 		M_CCALC: begin
-			px_valid <= 1;
-			px_plane <= plane;
-			px_x <= (rx >> 1) + {cg, 2'b00};
-			px_y <= (ry >> 1) + cr;
-			px_n <= S == 4 ? 3'd2 : 3'd4;
-			for (i = 0; i < 4; i = i + 1)
-				px[i * 8 +: 8] <= !use_wc ? cpx[i] :
-					plane == 1 ? wt(cpx[i], cwu[8:0], cwu[16:9], cden) : wt(cpx[i], cwv[8:0], cwv[16:9], cden);
+			sv0 <= 1;
+			sc0 <= 1;
+			spl0 <= plane;
+			sx0 <= (rx >> 1) + {cg, 2'b00};
+			sy0 <= (ry >> 1) + cr;
+			sn_0 <= S == 4 ? 3'd2 : 3'd4;
+			sf0 <= 0;
+			suw0 <= use_wc;
+			sw0 <= plane == 1 ? cwu[8:0] : cwv[8:0];
+			so0 <= plane == 1 ? cwu[16:9] : cwv[16:9];
+			sd0 <= cden;
+			ska0 <= ka; skb0 <= kb; skc0 <= kc; skd0 <= kd;
+			for (k = 0; k < 5; k = k + 1) begin
+				nb[0][k] <= crow0[(cg * 4 + k) * 8 +: 8];
+				nb[1][k] <= crow1[(cg * 4 + k) * 8 +: 8];
+			end
 			if (!cg_last) cg <= cg + 1'd1;
 			else begin
 				cg <= 0;
@@ -489,11 +611,11 @@ always @(posedge clk) begin
 			got[c_b] <= 0;
 			c_b <= ~c_b;
 			ms <= M_REGION;
-			if (all16) begin done <= 1; ms <= M_IDLE; end
+			if (all16) begin fin <= 1; ms <= M_IDLE; end
 			else if (quad_eq[c_rq] || c_rk == 3) begin
 				c_rk <= 0;
 				c_rq <= c_rq + 1'd1;
-				if (c_rq == 3) begin done <= 1; ms <= M_IDLE; end
+				if (c_rq == 3) begin fin <= 1; ms <= M_IDLE; end
 			end
 			else c_rk <= c_rk + 1'd1;
 		end
@@ -504,6 +626,12 @@ end
 
 initial begin
 	ms = M_IDLE;
+	r1_v = 0;
+	r2_v = 0;
+	fin = 0;
+	sv0 = 0;
+	for (i = 1; i < 7; i = i + 1) sv[i] = 0;
+	px_valid = 0;
 	fs = F_IDLE;
 	mem_rd = 0;
 	f_b = 0;

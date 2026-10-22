@@ -30,23 +30,16 @@ reg        big;
 reg        cols;
 reg  [2:0] k;
 
-// one 1D transform per clock: row k of c, or column k of t
+// one 1D transform per clock, in two stages: the row k of c or the column
+// k of t is picked into d* (stage 1), transformed and stored (stage 2). One
+// empty clock between the row and the column pass lets the last row reach t.
+reg  [2:0] ph;                // 0 idle, 1 rows, 2 gap, 3 columns, 4 last column
+reg        s_v, s_cols;
+reg  [2:0] s_k;
 reg signed [21:0] d0, d1, d2, d3, d4, d5, d6, d7;
 reg signed [21:0] a0, a1, a2, a3, a4, a5, a6, a7, b0, b1, b2, b3, b4, b5, b6, b7;
 reg signed [21:0] o0, o1, o2, o3, o4, o5, o6, o7;
 always @* begin
-	if (cols) begin
-		d0 = t[{3'd0, k}]; d1 = t[{3'd1, k}]; d2 = t[{3'd2, k}]; d3 = t[{3'd3, k}];
-		d4 = t[{3'd4, k}]; d5 = t[{3'd5, k}]; d6 = t[{3'd6, k}]; d7 = t[{3'd7, k}];
-	end
-	else if (big) begin
-		d0 = c[{k, 3'd0}]; d1 = c[{k, 3'd1}]; d2 = c[{k, 3'd2}]; d3 = c[{k, 3'd3}];
-		d4 = c[{k, 3'd4}]; d5 = c[{k, 3'd5}]; d6 = c[{k, 3'd6}]; d7 = c[{k, 3'd7}];
-	end
-	else begin
-		d0 = c[{k[1:0], 2'd0}]; d1 = c[{k[1:0], 2'd1}]; d2 = c[{k[1:0], 2'd2}]; d3 = c[{k[1:0], 2'd3}];
-		d4 = 0; d5 = 0; d6 = 0; d7 = 0;
-	end
 	if (big) begin
 		a0 = d0 + d4;
 		a4 = d0 - d4;
@@ -83,41 +76,76 @@ assign in_ready = !busy || cols;
 
 always @(posedge clk) begin
 	res_valid <= 0;
+	s_v <= 0;
 	if (clr) for (int i = 0; i < 64; i++) c[i] <= 0;
 	if (wr) c[wr_pos] <= wr_val; // clr and wr together: clear, then write
 
 	if (clr) begin
 		busy <= 0;
 		cols <= 0;
+		ph <= 0;
 	end
 	else if (go) begin
 		busy <= 1;
 		big <= t8;
 		cols <= 0;
 		k <= 0;
+		ph <= 1;
 	end
-	else if (busy) begin
-		if (!cols) begin
-			for (int j = 0; j < 8; j++)
-				if (big) c[{k, 3'(j)}] <= 0;
-				else if (j < 4) c[{k[1:0], 2'(j)}] <= 0;
-			t[{k, 3'd0}] <= o0; t[{k, 3'd1}] <= o1; t[{k, 3'd2}] <= o2; t[{k, 3'd3}] <= o3;
-			t[{k, 3'd4}] <= o4; t[{k, 3'd5}] <= o5; t[{k, 3'd6}] <= o6; t[{k, 3'd7}] <= o7;
-			if (k == last) begin
-				cols <= 1;
-				k <= 0;
+	else begin
+		// stage 1: pick
+		case (ph)
+			1: begin
+				if (big) begin
+					d0 <= c[{k, 3'd0}]; d1 <= c[{k, 3'd1}]; d2 <= c[{k, 3'd2}]; d3 <= c[{k, 3'd3}];
+					d4 <= c[{k, 3'd4}]; d5 <= c[{k, 3'd5}]; d6 <= c[{k, 3'd6}]; d7 <= c[{k, 3'd7}];
+				end
+				else begin
+					d0 <= c[{k[1:0], 2'd0}]; d1 <= c[{k[1:0], 2'd1}]; d2 <= c[{k[1:0], 2'd2}]; d3 <= c[{k[1:0], 2'd3}];
+					d4 <= 0; d5 <= 0; d6 <= 0; d7 <= 0;
+				end
+				for (int j = 0; j < 8; j++)
+					if (big) c[{k, 3'(j)}] <= 0;
+					else if (j < 4) c[{k[1:0], 2'(j)}] <= 0;
+				s_v <= 1;
+				s_cols <= 0;
+				s_k <= k;
+				if (k == last) begin
+					cols <= 1;
+					k <= 0;
+					ph <= 2;
+				end
+				else k <= k + 1'd1;
 			end
-			else k <= k + 1'd1;
+			2: ph <= 3;
+			3: begin
+				d0 <= t[{3'd0, k}]; d1 <= t[{3'd1, k}]; d2 <= t[{3'd2, k}]; d3 <= t[{3'd3, k}];
+				d4 <= t[{3'd4, k}]; d5 <= t[{3'd5, k}]; d6 <= t[{3'd6, k}]; d7 <= t[{3'd7, k}];
+				s_v <= 1;
+				s_cols <= 1;
+				s_k <= k;
+				if (k == last) ph <= 4;
+				else k <= k + 1'd1;
+			end
+			default: ;
+		endcase
+
+		// stage 2: transform, store
+		if (s_v && !s_cols) begin
+			t[{s_k, 3'd0}] <= o0; t[{s_k, 3'd1}] <= o1; t[{s_k, 3'd2}] <= o2; t[{s_k, 3'd3}] <= o3;
+			t[{s_k, 3'd4}] <= o4; t[{s_k, 3'd5}] <= o5; t[{s_k, 3'd6}] <= o6; t[{s_k, 3'd7}] <= o7;
 		end
-		else begin
+		if (s_v && s_cols) begin
 			res_valid <= 1;
-			res_col <= k;
+			res_col <= s_k;
 			res[0] <= 16'((o0 + 22'sd32) >>> 6); res[1] <= 16'((o1 + 22'sd32) >>> 6);
 			res[2] <= 16'((o2 + 22'sd32) >>> 6); res[3] <= 16'((o3 + 22'sd32) >>> 6);
 			res[4] <= 16'((o4 + 22'sd32) >>> 6); res[5] <= 16'((o5 + 22'sd32) >>> 6);
 			res[6] <= 16'((o6 + 22'sd32) >>> 6); res[7] <= 16'((o7 + 22'sd32) >>> 6);
-			if (k == last) busy <= 0;
-			else k <= k + 1'd1;
+			if (s_k == last) begin
+				busy <= 0;
+				ph <= 0;
+			end
 		end
 	end
 end
