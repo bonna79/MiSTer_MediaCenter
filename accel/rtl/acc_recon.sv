@@ -8,6 +8,8 @@ module acc_recon
 	input             clk,
 
 	input             w_en,
+	input             w_buf,     // two buffers: one written, the other read
+	input             r_buf,
 	input       [1:0] w_plane,
 	input       [3:0] w_x,       // multiple of 4, or of 2 when w_n = 2 (chroma)
 	input       [3:0] w_y,
@@ -23,20 +25,20 @@ wire       two_hi = w_n == 2 && w_x[1];
 wire [31:0] wd = two_hi ? {w_px[15:0], 16'd0} : w_px;
 wire [3:0] wbe = w_n == 2 ? (w_x[1] ? 4'b1100 : 4'b0011) : 4'b1111;
 
-genvar gb;
+// one RAM per bank and byte lane (block RAM without byte enables)
+genvar gb, gl;
 generate
 	for (gb = 0; gb < 2; gb = gb + 1) begin : bank
-		reg [31:0] mem[64];
-		reg [31:0] q;
-		wire we = w_en && w_x[2] == gb;
-		always @(posedge clk) begin
-			if (we && wbe[0]) mem[wa][7:0]   <= wd[7:0];
-			if (we && wbe[1]) mem[wa][15:8]  <= wd[15:8];
-			if (we && wbe[2]) mem[wa][23:16] <= wd[23:16];
-			if (we && wbe[3]) mem[wa][31:24] <= wd[31:24];
-			q <= mem[r_addr];
+		for (gl = 0; gl < 4; gl = gl + 1) begin : lane
+			reg [7:0] mem[128];
+			reg [7:0] q;
+			wire we = w_en && w_x[2] == gb && wbe[gl];
+			always @(posedge clk) begin
+				if (we) mem[{w_buf, wa}] <= wd[gl * 8 +: 8];
+				q <= mem[{r_buf, r_addr}];
+			end
+			assign r_word[gb * 32 + gl * 8 +: 8] = q;
 		end
-		assign r_word[gb * 32 +: 32] = q;
 	end
 endgenerate
 

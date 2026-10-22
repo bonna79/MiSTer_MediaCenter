@@ -377,32 +377,40 @@ acc_mc #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRID
 	.qslot({q_slot[3], q_slot[2], q_slot[1], q_slot[0]}),
 	.qwt({q_wt[3], q_wt[2], q_wt[1], q_wt[0]}),
 	.use_w(use_w[0]), .use_wc(use_wc), .lden(lden), .cden(cden),
-	.mem_rd(mc_rd), .mem_addr(mc_addr), .mem_burst(mc_burst), .mem_busy(mem_busy),
+	.mem_rd(mc_rd), .mem_addr(mc_addr), .mem_burst(mc_burst), .mem_busy(mem_busy || wb_we),
 	.mem_dout(mem_dout), .mem_dout_ready(mem_dout_ready),
 	.px_valid(mc_px_valid), .px_plane(mc_px_plane), .px_x(mc_px_x), .px_y(mc_px_y), .px_n(mc_px_n), .px(mc_px),
 	.done(mc_done)
 );
 
 // --------------------------------------------------------- write back
+// The writer sends a finished macroblock to memory (48 words) while B
+// already predicts the next one into the other half of acc_recon. It shares
+// the memory port with the MC fetch: it starts a word only when the MC has
+// no request waiting, and the MC sees the port busy while a word is out.
 
+reg        pbuf;              // recon buffer B predicts into
+reg        w_active, w_buf;
+reg  [7:0] w_mbx, w_mby;
 reg  [5:0] wbk;               // 0..31 luma words, 32..39 U, 40..47 V
 reg        wb_we;
 reg [AW-1:0] wb_addr;
 reg [63:0] wb_din;
+reg  [1:0] lbk;
 
 wire [AW-1:0] slot_base = AW'(cur_slot) << SLOT_L2;
 // the RAM is read one word ahead: address of the word to send next clock
-wire        wb_adv = sb == S_WB && (!wb_we || !mem_busy) && wbk != 48;
-wire  [5:0] rc_addr = sb == S_WB ? (wb_adv ? wbk + 1'd1 : wbk) : 6'd0;
+wire        wb_adv = w_active && (!wb_we || !mem_busy) && wbk != 48 && !mc_rd;
+wire  [6:0] rc_addr = w_active ? {w_buf, wb_adv ? wbk + 1'd1 : wbk} : {pbuf, 6'd0};
 wire [63:0] wb_word;
 wire [AW-1:0] wb_word_addr =
-	wbk < 32 ? slot_base + ((AW'({mby, wbk[4:1]})) << YSTRIDE_L2) + {mbx, wbk[0]} :
-	slot_base + (wbk < 40 ? AW'(UOFF) : AW'(VOFF)) + ((AW'({mby, wbk[2:0]})) << CSTRIDE_L2) + mbx;
+	wbk < 32 ? slot_base + ((AW'({w_mby, wbk[4:1]})) << YSTRIDE_L2) + {w_mbx, wbk[0]} :
+	slot_base + (wbk < 40 ? AW'(UOFF) : AW'(VOFF)) + ((AW'({w_mby, wbk[2:0]})) << CSTRIDE_L2) + w_mbx;
 
-assign mem_rd    = sb == S_MC ? mc_rd : 1'b0;
-assign mem_we    = sb == S_MC ? 1'b0 : wb_we;
-assign mem_addr  = sb == S_MC ? mc_addr : wb_addr;
-assign mem_burst = sb == S_MC ? mc_burst : 8'd1;
+assign mem_rd    = wb_we ? 1'b0 : mc_rd;
+assign mem_we    = wb_we;
+assign mem_addr  = wb_we ? wb_addr : mc_addr;
+assign mem_burst = wb_we ? 8'd1 : mc_burst;
 assign mem_din   = wb_din;
 assign mem_be    = 8'hFF;
 
@@ -410,7 +418,8 @@ assign mem_be    = 8'hFF;
 
 wire [7:0] tag = cmd_data[31:24];
 wire coef_blk_change = coef_have && cmd_data[26:22] != coef_blk;
-wire b_idle = sb == S_IDLE;
+wire b_free = sb == S_IDLE;                // B can take the next macroblock
+wire b_idle = b_free && !w_active;         // and all written
 assign cmd_ready = !reset && ((sa == S_CMD && (tag == 8'hA3 || b_idle)) || sa == S_PIC || sa == S_REFS || sa == S_MB1 ||
                    sa == S_INFO || sa == S_NCOEF || sa == S_PCM ||
                    (sa == S_COEF && !coef_blk_change && idct_in && !idct_go));
@@ -545,8 +554,8 @@ acc_resid resid
 acc_recon recon
 (
 	.clk(clk),
-	.w_en(px_we), .w_plane(px_pl), .w_x(px_x), .w_y(px_y), .w_n(px_n), .w_px(px_d),
-	.r_addr(rc_addr), .r_word(wb_word)
+	.w_en(px_we), .w_buf(pbuf), .r_buf(rc_addr[6]), .w_plane(px_pl), .w_x(px_x), .w_y(px_y), .w_n(px_n), .w_px(px_d),
+	.r_addr(rc_addr[5:0]), .r_word(wb_word)
 );
 
 integer i;
@@ -591,7 +600,24 @@ always @(posedge clk) begin
 		end
 	end
 
+	// writer
+	if (w_active && (!wb_we || !mem_busy)) begin
+		if (wbk == 48) begin
+			wb_we <= 0;
+			w_active <= 0;
+		end
+		else if (!mc_rd) begin
+			wb_we <= 1;
+			wb_addr <= wb_word_addr;
+			wb_din <= wb_word;
+			wbk <= wbk + 1'd1;
+		end
+		else wb_we <= 0;
+	end
+
 	if (reset) begin
+		w_active <= 0;
+		pbuf <= 0;
 		sa <= S_CMD;
 		sb <= S_IDLE;
 		abuf <= 0;
@@ -737,7 +763,7 @@ always @(posedge clk) begin
 
 		// macroblock to memory, one word per write
 		// hand the macroblock to B once B is idle and the transform is done
-		S_HAND: if (b_idle && !idct_busy && !idct_go && !idct_rv) begin
+		S_HAND: if (b_free && !idct_busy && !idct_go && !idct_rv) begin
 			mbx <= a_mbx;
 			mby <= a_mby;
 			mtype <= a_mtype;
@@ -881,45 +907,38 @@ always @(posedge clk) begin
 					if (prow16 == 7) begin
 						ph <= 0;
 						cpl <= 1;
-						if (cpl) begin sb <= S_WB; wbk <= 0; end
+						if (cpl) begin sb <= S_LB; lbk <= 0; end
 					end
 				end
 			end
 		end
 
-		S_MC: if (mc_done) begin sb <= S_WB; wbk <= 0; end
+		S_MC: if (mc_done) begin sb <= S_LB; lbk <= 0; end
 
-		S_WB: begin
-			// bottom rows into the line buffers, one word per clock (block RAM)
-			if (wbk < 4) lby[{mbx, wbk[1:0]}] <= brow[3][wbk[1:0] * 32 +: 32];
-			if (wbk < 2) begin
-				lbu[{mbx, wbk[0]}] <= cbot_u[wbk[0] * 32 +: 32];
-				lbv[{mbx, wbk[0]}] <= cbot_v[wbk[0] * 32 +: 32];
-			end
-			if (!wb_we || !mem_busy) begin
-				if (wbk == 48 && (!wb_we || !mem_busy)) begin
-					wb_we <= 0;
-					sb <= S_LB;
-					ctxk <= 0;
-				end
-				else begin
-					wb_we <= 1;
-					wb_addr <= wb_word_addr;
-					wb_din <= wb_word;
-					wbk <= wbk + 1'd1;
-				end
-			end
-		end
-
-		// line buffers, left column and corner for the next macroblock
+		// line buffers, left column and corner for the next macroblock, then
+		// the macroblock goes to the writer
 		S_LB: begin
-			for (i = 0; i < 16; i = i + 1) lefty[i] <= rcol[3][i * 8 +: 8];
-			for (i = 0; i < 8; i = i + 1) begin leftu[i] <= crt_u[i * 8 +: 8]; leftv[i] <= crt_v[i * 8 +: 8]; end
-			cornery <= topy[15];
-			corneru <= topu[7];
-			cornerv <= topv[7];
-			mb_count <= mb_count + 1'd1;
-			sb <= S_IDLE;
+			lby[{mbx, lbk}] <= brow[3][lbk * 32 +: 32];
+			if (lbk < 2) begin
+				lbu[{mbx, lbk[0]}] <= cbot_u[lbk[0] * 32 +: 32];
+				lbv[{mbx, lbk[0]}] <= cbot_v[lbk[0] * 32 +: 32];
+			end
+			if (lbk != 3) lbk <= lbk + 1'd1;
+			else if (!w_active) begin
+				for (i = 0; i < 16; i = i + 1) lefty[i] <= rcol[3][i * 8 +: 8];
+				for (i = 0; i < 8; i = i + 1) begin leftu[i] <= crt_u[i * 8 +: 8]; leftv[i] <= crt_v[i * 8 +: 8]; end
+				cornery <= topy[15];
+				corneru <= topu[7];
+				cornerv <= topv[7];
+				mb_count <= mb_count + 1'd1;
+				w_active <= 1;
+				w_buf <= pbuf;
+				w_mbx <= mbx;
+				w_mby <= mby;
+				wbk <= 0;
+				pbuf <= ~pbuf;
+				sb <= S_IDLE;
+			end
 		end
 
 		S_IDLE: ;                     // started by A (S_HAND)
