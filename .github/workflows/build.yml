@@ -43,7 +43,7 @@ jobs:
         id: ffmpeg-cache
         with:
           path: ffmpeg-arm
-          key: ffmpeg-n6.1.2-${{ hashFiles('tools/mediacenter/build_ffmpeg.sh') }}
+          key: ffmpeg-n6.1.2-${{ hashFiles('tools/mediacenter/build_ffmpeg.sh', 'tools/mediacenter/ffmpeg-*.patch') }}
 
       - name: Build FFmpeg for the MiSTer ARM
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'

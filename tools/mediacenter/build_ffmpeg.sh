@@ -18,6 +18,18 @@ SUB_DECODERS=dvdsub,srt,subrip,ass,ssa,text
 DEMUXERS=mpegps,mpegts,mpegvideo,avi,matroska,mov,ogg,asf,mp3,flac,wav,aac,ac3,dts,srt,ass
 PARSERS=mpegvideo,mpeg4video,h264,mpegaudio,ac3,dca,aac,vorbis,flac,dvdsub
 
+# Our small changes to FFmpeg (measurement only, off unless asked for).
+HERE=$(cd "$(dirname "$0")" && pwd)
+for p in "$HERE"/ffmpeg-*.patch; do
+	[ -f "$p" ] || continue
+	if patch -d "$SRC" -p1 -N --dry-run -s < "$p" >/dev/null 2>&1; then
+		patch -d "$SRC" -p1 -N -s < "$p"
+	elif ! patch -d "$SRC" -p1 -R --dry-run -s < "$p" >/dev/null 2>&1; then
+		echo "build_ffmpeg.sh: $p does not apply" >&2
+		exit 1
+	fi
+done
+
 BUILD=$(mktemp -d)
 cd "$BUILD"
 "$SRC/configure" \

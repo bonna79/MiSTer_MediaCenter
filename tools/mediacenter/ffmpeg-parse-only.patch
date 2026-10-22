@@ -1,0 +1,59 @@
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -2480,6 +2480,20 @@
+     sl->mb_mbaff    = sl->mb_field_decoding_flag = IS_INTERLACED(mb_type) ? 1 : 0;
+ }
+ 
++/* MiSTer MediaCenter, measurement only: with MC_PARSEONLY=1 the decoder reads
++ * the stream (CABAC/CAVLC, macroblock modes, motion vectors, coefficients)
++ * but does not rebuild the pixels, to time what the ARM would still do if an
++ * FPGA rebuilt them. The pictures it outputs are not meant to be shown. */
++static int mc_parse_only(void)
++{
++    static int v = -1;
++    if (v < 0) {
++        const char *e = getenv("MC_PARSEONLY");
++        v = e && *e && *e != '0';
++    }
++    return v;
++}
++
+ /**
+  * Draw edges and report progress for the last MB row.
+  */
+@@ -2586,7 +2600,7 @@
+ 
+             ret = ff_h264_decode_mb_cabac(h, sl);
+ 
+-            if (ret >= 0)
++            if (ret >= 0 && !mc_parse_only())
+                 ff_h264_hl_decode_mb(h, sl);
+ 
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+@@ -2595,7 +2609,7 @@
+ 
+                 ret = ff_h264_decode_mb_cabac(h, sl);
+ 
+-                if (ret >= 0)
++                if (ret >= 0 && !mc_parse_only())
+                     ff_h264_hl_decode_mb(h, sl);
+                 sl->mb_y--;
+             }
+@@ -2657,7 +2671,7 @@
+ 
+             ret = ff_h264_decode_mb_cavlc(h, sl);
+ 
+-            if (ret >= 0)
++            if (ret >= 0 && !mc_parse_only())
+                 ff_h264_hl_decode_mb(h, sl);
+ 
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+@@ -2665,7 +2679,7 @@
+                 sl->mb_y++;
+                 ret = ff_h264_decode_mb_cavlc(h, sl);
+ 
+-                if (ret >= 0)
++                if (ret >= 0 && !mc_parse_only())
+                     ff_h264_hl_decode_mb(h, sl);
+                 sl->mb_y--;
+             }

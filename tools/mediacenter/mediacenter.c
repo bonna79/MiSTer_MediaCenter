@@ -3406,6 +3406,64 @@ static int bench(const char *path)
 	return 0;
 }
 
+// mediacenter --bench-dec <file> [seconds] and --bench-parse <file> [seconds]
+// (FPGA accelerator, phase 0): decode only, with nothing drawn, and time it
+// every 10 s of media. --bench-parse uses the MC_PARSEONLY change in our
+// FFmpeg: the stream is read (CABAC, macroblocks, vectors, coefficients) but
+// no pixel is rebuilt, which is what the ARM would still do if the FPGA
+// rebuilt the pixels. Same decoder setup as playback (light mode, 2 threads).
+static int bench_windows(const char *path, double secs, int parse)
+{
+	setenv("MC_NOZC", "1", 1); // nothing is drawn: leave the core alone
+	if (parse) setenv("MC_PARSEONLY", "1", 1);
+	if (media_open(path)) return 1;
+	if (mc.vstream < 0 || !mc.vdec) { fprintf(stderr, "mediacenter: no video\n"); media_close(); return 1; }
+	double fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
+	double budget = fps > 0 ? 1000 / fps : 0;
+	printf("mediacenter: bench %s, %s, %s\n", parse ? "SOLO LETTURA DEL FLUSSO (MC_PARSEONLY)" : "decodifica normale",
+		avcodec_get_name(mc.vdec->codec_id), path);
+	if (budget > 0) printf("mediacenter: tempo disponibile per immagine %.1f ms\n", budget);
+	int frames = 0, win_frames = 0, win = 0, over = 0, wins = 0;
+	double t0 = now_seconds(), win_t = t0, worst = 0;
+	int worst_win = 0;
+	for (int more = 1; more && !quit_requested;)
+	{
+		more = decode_step();
+		frames += mc.vq_count;
+		win_frames += mc.vq_count;
+		vq_clear();
+		mc.pend_len = 0;
+		double media = !isnan(mc.last_vpts) ? mc.last_vpts : 0;
+		int end = !more || quit_requested || (secs > 0 && media >= secs);
+		if ((media >= (win + 1) * 10.0 || end) && win_frames)
+		{
+			double t = now_seconds(), ms = 1000 * (t - win_t) / win_frames;
+			int a = win * 10, b = (int)media;
+			if (b < a) b = a;
+			printf("mediacenter: %d:%02d-%d:%02d  %4d immagini  %5.1f ms per immagine%s\n",
+				a / 60, a % 60, b / 60, b % 60, win_frames, ms, budget > 0 && ms > budget ? "  oltre" : "");
+			if (ms > worst) { worst = ms; worst_win = a; }
+			if (budget > 0 && ms > budget) over++;
+			wins++;
+			win_t = t;
+			win_frames = 0;
+			while (media >= (win + 1) * 10.0) win++;
+		}
+		if (end) break;
+	}
+	double total = now_seconds() - t0;
+	double media = !isnan(mc.last_vpts) ? mc.last_vpts : 0;
+	if (frames)
+	{
+		printf("mediacenter: RISULTATO %s: %d immagini, %.0f s di video in %.0f s, media %.1f ms per immagine (%.0f%% del tempo reale)\n",
+			parse ? "solo lettura" : "normale", frames, media, total, 1000 * total / frames, total > 0 ? 100 * media / total : 0);
+		printf("mediacenter: finestra peggiore %d:%02d con %.1f ms per immagine; finestre oltre il tempo disponibile: %d su %d\n",
+			worst_win / 60, worst_win % 60, worst, over, wins);
+	}
+	media_close();
+	return 0;
+}
+
 #include "zctest.c"
 
 // Headless test mode for development (no screen, no controller):
@@ -3606,8 +3664,13 @@ int main(int argc, char *argv[])
 
 	const char *arg = argc > 1 ? argv[1] : NULL;
 
+	// Only --bench-parse may switch off the picture rebuilding in FFmpeg.
+	unsetenv("MC_PARSEONLY");
 	// Decoding speed test: decodes the whole file without output.
 	if (arg && !strcmp(arg, "--bench") && argc > 2) return bench(argv[2]);
+	// FPGA accelerator phase 0: decode-only timing, normal or stream-read only.
+	if (arg && (!strcmp(arg, "--bench-dec") || !strcmp(arg, "--bench-parse")) && argc > 2)
+		return bench_windows(argv[2], argc > 3 ? atof(argv[3]) : 0, !strcmp(arg, "--bench-parse"));
 	// Zero-copy feasibility test (zctest.c).
 	if (arg && !strcmp(arg, "--zctest") && argc > 2) return zctest(argv[2]);
 
