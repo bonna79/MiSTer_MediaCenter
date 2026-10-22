@@ -33,7 +33,7 @@ jobs:
             $Q quartus_sta -t paths.tcl > paths.log 2>&1 || true
             cat accel/syn/fmax.txt || true
             echo "--- worst paths"
-            cat accel/syn/paths.txt | cut -c1-220 | head -70 || true
+            python3 accel/syn/paths.py accel/syn/paths.txt || true
           else
             grep -E "Error" fit.log | head -20
             exit 1
