@@ -4,8 +4,10 @@
 //
 // The macroblock is split into regions with one vector each: 16x16 when all
 // 16 vectors and references are equal, else 8x8 quadrants, else 4x4 blocks.
-// For each region the reference window is read once (rows in flight back to
-// back), then the prediction comes out 4 pixels a clock on px_*.
+// For each region the three reference windows (Y, U, V) are requested back
+// to back; the luma prediction starts as soon as its window is in, while
+// the chroma windows are still arriving. Prediction comes out 4 pixels a
+// clock on px_*.
 module acc_mc #(
 	parameter AW         = 28,
 	parameter SLOT_L2    = 19,
@@ -45,14 +47,21 @@ function [7:0] clip8(input integer v);
 	clip8 = v < 0 ? 8'd0 : (v > 255 ? 8'd255 : v[7:0]);
 endfunction
 
+function signed [15:0] clampv(input signed [15:0] v, input signed [15:0] lim);
+	clampv = v < 0 ? 16'sd0 : (v > lim - 1 ? lim - 16'sd1 : v);
+endfunction
+
 // vector of 4x4 block b (a macro, not a function, so that simulators see
 // mvs in the sensitivity)
 `define MVOF(b) mvs[(b) * 32 +: 32]
 
+integer i;
+
 // ----------------------------------------------------------- region plan
 
-localparam M_IDLE = 0, M_REGION = 1, M_FETCH = 2, M_LLOAD = 3, M_LCALC = 4, M_CLOAD = 5, M_CCALC = 6, M_NEXT = 7;
-reg  [2:0] ms;
+localparam M_IDLE = 0, M_REGION = 1, M_SETUP = 2, M_WAITY = 3, M_LLOAD = 4, M_LCALC = 5, M_WAITC = 6,
+           M_CCALC = 7, M_NEXT = 8;
+reg  [3:0] ms;
 
 reg        all16;
 reg  [3:0] quad_eq;
@@ -65,53 +74,77 @@ reg  [7:0] rslot;
 reg  [8:0] lw;
 reg  [7:0] lo;
 reg [16:0] cwu, cwv;
-reg  [1:0] plane;             // 0 luma, 1 U, 2 V
+reg  [1:0] plane;             // chroma plane being predicted: 1 U, 2 V
 
-integer i;
+wire [3:0] rblk = {rq, rk};   // luma4x4BlkIdx of a 4x4 region
+wire [31:0] rmv = all16 || quad_eq[rq] ? `MVOF({rq, 2'b00}) : `MVOF(rblk);
 
 // ----------------------------------------------------------- window fetch
+// Three jobs per region: 0 luma window (S+5 square), 1 U and 2 V windows
+// (S/2+1 square). Rows are requested back to back over all three jobs and
+// come back in order.
 
 wire signed [15:0] W  = {4'd0, wmb, 4'd0};
 wire signed [15:0] H  = {4'd0, hmb, 4'd0};
 wire signed [15:0] Wc = {5'd0, wmb, 3'd0};
 wire signed [15:0] Hc = {5'd0, hmb, 3'd0};
-wire signed [15:0] X  = {4'd0, mbx, 4'd0};
-wire signed [15:0] Y  = {4'd0, mby, 4'd0};
 
-reg signed [15:0] wx, wy;     // window top left (may be outside the picture)
-reg  [4:0] nrows, ncols;      // window size
-reg  [4:0] req_row, rcv_row;
-reg  [1:0] rcv_word;
-reg  [2:0] K;                 // words per row
-reg [15:0] w0;                // first word of each row
-reg [191:0] rowbuf;
+// window of each plane, from the region (all signed integers)
+integer iX, iY, irx, iry, imx, imy, iS;
+reg signed [15:0] swx[3], swy[3];
+reg  [4:0] sn[3];
+always @* begin
+	iX = mbx * 16;
+	iY = mby * 16;
+	irx = rx;
+	iry = ry;
+	imx = mvx;
+	imy = mvy;
+	iS = S;
+	swx[0] = iX + irx + (imx >>> 2) - 2;
+	swy[0] = iY + iry + (imy >>> 2) - 2;
+	sn[0] = iS + 5;
+	swx[1] = ((iX + irx) >>> 1) + (imx >>> 3);
+	swy[1] = ((iY + iry) >>> 1) + (imy >>> 3);
+	sn[1] = (iS >> 1) + 1;
+	swx[2] = swx[1];
+	swy[2] = swy[1];
+	sn[2] = sn[1];
+end
 
-function signed [15:0] clampv(input signed [15:0] v, input signed [15:0] lim);
-	clampv = v < 0 ? 16'sd0 : (v > lim - 1 ? lim - 16'sd1 : v);
-endfunction
-
-wire signed [15:0] pw = plane == 0 ? W : Wc;
-wire signed [15:0] ph = plane == 0 ? H : Hc;
-wire signed [15:0] c0 = clampv(wx, pw);
-wire signed [15:0] c1 = clampv(wx + $signed({11'd0, ncols}) - 16'sd1, pw);
+reg signed [15:0] jwx[3], jwy[3];
+reg  [4:0] jn[3];
+reg [15:0] jw0[3];            // first word of each row
+reg  [2:0] jK[3];             // words per row
+reg [AW-1:0] jbase[3];
 
 wire [AW-1:0] slot_base = AW'(rslot) << SLOT_L2;
-wire signed [15:0] row_y = clampv(wy + $signed({11'd0, req_row}), ph);
-wire [AW-1:0] row_addr = plane == 0 ? slot_base + (AW'(row_y) << YSTRIDE_L2) + w0 :
-                         slot_base + (plane == 1 ? AW'(UOFF) : AW'(VOFF)) + (AW'(row_y) << CSTRIDE_L2) + w0;
 
-// window rows (21 pixels for luma, 9 for chroma)
-reg [167:0] winrow[21];
+reg        rq_on;
+reg  [1:0] rq_j;
+reg  [4:0] rq_row;
+reg  [1:0] rv_j;
+reg  [4:0] rv_row;
+reg  [1:0] rv_word;
+reg  [2:0] got;               // window of each job complete
+reg [191:0] rowbuf;
+
+wire signed [15:0] rq_y = clampv(jwy[rq_j] + $signed({11'd0, rq_row}), rq_j == 0 ? H : Hc);
+wire [AW-1:0] rq_addr = jbase[rq_j] + (AW'(rq_y) << (rq_j == 0 ? YSTRIDE_L2 : CSTRIDE_L2)) + jw0[rq_j];
+
+// row being received, with the picture edges repeated
+reg [167:0] winrow[21];       // luma window rows
+reg  [71:0] cwin_u[9], cwin_v[9];
 reg [255:0] rb;
 reg [167:0] newrow;
 integer col;
 always @* begin
 	rb = {mem_dout, rowbuf};
-	rb = rb >> ((3 - rcv_word) * 64);      // the row's words, first at bit 0
+	rb = rb >> ((3 - rv_word) * 64);      // the row's words, first at bit 0
 	newrow = 0;
 	for (i = 0; i < 21; i = i + 1) begin
-		col = clampv(wx + i, pw) - {w0, 3'b000};
-		if (i < ncols) newrow[i * 8 +: 8] = rb[col * 8 +: 8];
+		col = clampv(jwx[rv_j] + i, rv_j == 0 ? W : Wc) - {jw0[rv_j], 3'b000};
+		if (i < jn[rv_j]) newrow[i * 8 +: 8] = rb[col * 8 +: 8];
 	end
 end
 
@@ -139,31 +172,31 @@ function integer tap(input integer a, b, c, d, e, f);
 	tap = a - 5 * b + 20 * c + 20 * d - 5 * e + f;
 endfunction
 
-integer p, gr, gc;
+integer p, gr;
 integer b1v[0:5];   // b1 at (X, Y-2 .. Y+3)
 integer bb0, bb1, hh0, hh1, jj, v;
 reg  [7:0] lpx[4];
 // window sample at (dx, dy) from pixel pp of the current group (direct
 // array read, so that the simulator sees lw6[] in the sensitivity)
-`define G(dx, dy, pp, rr) lw6[2 + (dy)][(lg * 4 + (pp) + 2 + (dx)) * 8 +: 8]
+`define G(dx, dy, pp) lw6[2 + (dy)][(lg * 4 + (pp) + 2 + (dx)) * 8 +: 8]
 always @* begin
 	for (p = 0; p < 4; p = p + 1) begin
 		for (gr = 0; gr < 6; gr = gr + 1)
-			b1v[gr] = tap(`G(-2, gr - 2, p, lr), `G(-1, gr - 2, p, lr), `G(0, gr - 2, p, lr),
-			              `G(1, gr - 2, p, lr), `G(2, gr - 2, p, lr), `G(3, gr - 2, p, lr));
+			b1v[gr] = tap(`G(-2, gr - 2, p), `G(-1, gr - 2, p), `G(0, gr - 2, p),
+			              `G(1, gr - 2, p), `G(2, gr - 2, p), `G(3, gr - 2, p));
 		bb0 = clip8((b1v[2] + 16) >>> 5);
 		bb1 = clip8((b1v[3] + 16) >>> 5);
-		hh0 = clip8((tap(`G(0, -2, p, lr), `G(0, -1, p, lr), `G(0, 0, p, lr), `G(0, 1, p, lr), `G(0, 2, p, lr), `G(0, 3, p, lr)) + 16) >>> 5);
-		hh1 = clip8((tap(`G(1, -2, p, lr), `G(1, -1, p, lr), `G(1, 0, p, lr), `G(1, 1, p, lr), `G(1, 2, p, lr), `G(1, 3, p, lr)) + 16) >>> 5);
+		hh0 = clip8((tap(`G(0, -2, p), `G(0, -1, p), `G(0, 0, p), `G(0, 1, p), `G(0, 2, p), `G(0, 3, p)) + 16) >>> 5);
+		hh1 = clip8((tap(`G(1, -2, p), `G(1, -1, p), `G(1, 0, p), `G(1, 1, p), `G(1, 2, p), `G(1, 3, p)) + 16) >>> 5);
 		jj  = clip8((tap(b1v[0], b1v[1], b1v[2], b1v[3], b1v[4], b1v[5]) + 512) >>> 10);
 		case ({xf, yf})
-			4'b00_00: v = `G(0, 0, p, lr);
-			4'b00_01: v = (`G(0, 0, p, lr) + hh0 + 1) >> 1;
+			4'b00_00: v = `G(0, 0, p);
+			4'b00_01: v = (`G(0, 0, p) + hh0 + 1) >> 1;
 			4'b00_10: v = hh0;
-			4'b00_11: v = (`G(0, 1, p, lr) + hh0 + 1) >> 1;
-			4'b01_00: v = (`G(0, 0, p, lr) + bb0 + 1) >> 1;
+			4'b00_11: v = (`G(0, 1, p) + hh0 + 1) >> 1;
+			4'b01_00: v = (`G(0, 0, p) + bb0 + 1) >> 1;
 			4'b10_00: v = bb0;
-			4'b11_00: v = (`G(1, 0, p, lr) + bb0 + 1) >> 1;
+			4'b11_00: v = (`G(1, 0, p) + bb0 + 1) >> 1;
 			4'b10_10: v = jj;
 			4'b01_01: v = (bb0 + hh0 + 1) >> 1;
 			4'b11_01: v = (bb0 + hh1 + 1) >> 1;
@@ -184,13 +217,16 @@ reg  [3:0] cr;                // chroma output row
 reg  [1:0] cg;                // group of 4 pixels
 wire [2:0] cxf = mvx[2:0], cyf = mvy[2:0];
 reg  [7:0] cpx[4];
+reg [71:0] crow0, crow1;
 integer A, B, C, D;
 always @* begin
+	crow0 = plane == 1 ? cwin_u[cr] : cwin_v[cr];
+	crow1 = plane == 1 ? cwin_u[cr + 1] : cwin_v[cr + 1];
 	for (p = 0; p < 4; p = p + 1) begin
-		A = winrow[cr][(cg * 4 + p) * 8 +: 8];
-		B = winrow[cr][(cg * 4 + p + 1) * 8 +: 8];
-		C = winrow[cr + 1][(cg * 4 + p) * 8 +: 8];
-		D = winrow[cr + 1][(cg * 4 + p + 1) * 8 +: 8];
+		A = crow0[(cg * 4 + p) * 8 +: 8];
+		B = crow0[(cg * 4 + p + 1) * 8 +: 8];
+		C = crow1[(cg * 4 + p) * 8 +: 8];
+		D = crow1[(cg * 4 + p + 1) * 8 +: 8];
 		cpx[p] = ((8 - cxf) * (8 - cyf) * A + cxf * (8 - cyf) * B + (8 - cxf) * cyf * C + cxf * cyf * D + 32) >> 6;
 	end
 end
@@ -212,24 +248,41 @@ endfunction
 
 // ---------------------------------------------------------------- control
 
-wire [3:0] rblk = {rq, rk};   // luma4x4BlkIdx of a 4x4 region
-wire [31:0] rmv = all16 || quad_eq[rq] ? `MVOF({rq, 2'b00}) : `MVOF(rblk);
-
-// window position of the plane, in integers (all signed)
-integer iX, iY, irx, iry, imx, imy, iS;
-always @* begin
-	iX = mbx * 16;
-	iY = mby * 16;
-	irx = rx;
-	iry = ry;
-	imx = mvx;
-	imy = mvy;
-	iS = S;
-end
-
 always @(posedge clk) begin
 	done <= 0;
 	px_valid <= 0;
+
+	// requests, back to back
+	if (mem_rd && !mem_busy) mem_rd <= 0;
+	if (rq_on && (!mem_rd || !mem_busy)) begin
+		mem_rd <= 1;
+		mem_addr <= rq_addr;
+		mem_burst <= jK[rq_j];
+		if (rq_row + 1'd1 == jn[rq_j]) begin
+			rq_row <= 0;
+			rq_j <= rq_j + 1'd1;
+			if (rq_j == 2) rq_on <= 0;
+		end
+		else rq_row <= rq_row + 1'd1;
+	end
+
+	// data
+	if (mem_dout_ready) begin
+		rowbuf <= {mem_dout, rowbuf[191:64]};
+		if (rv_word == jK[rv_j] - 1) begin
+			rv_word <= 0;
+			if (rv_j == 0) winrow[rv_row] <= newrow;
+			else if (rv_j == 1) cwin_u[rv_row] <= newrow[71:0];
+			else cwin_v[rv_row] <= newrow[71:0];
+			if (rv_row + 1'd1 == jn[rv_j]) begin
+				rv_row <= 0;
+				rv_j <= rv_j + 1'd1;
+				got[rv_j] <= 1;
+			end
+			else rv_row <= rv_row + 1'd1;
+		end
+		else rv_word <= rv_word + 1'd1;
+	end
 
 	case (ms)
 		M_IDLE: if (start) begin
@@ -243,7 +296,7 @@ always @(posedge clk) begin
 			ms <= M_REGION;
 		end
 
-		// next region: vector, reference, window of the luma
+		// next region: vector, reference, weights
 		M_REGION: begin
 			if (all16) begin S <= 16; rx <= 0; ry <= 0; end
 			else if (quad_eq[rq]) begin S <= 8; rx <= {rq[0], 3'd0}; ry <= {rq[1], 3'd0}; end
@@ -252,61 +305,33 @@ always @(posedge clk) begin
 			mvy <= rmv[31:16];
 			rslot <= qslot[rq * 8 +: 8];
 			{lw, lo, cwu, cwv} <= qwt[rq * 51 +: 51];
-			plane <= 0;
-			ms <= M_FETCH;
-			req_row <= 31;    // window set up in the next clock
+			ms <= M_SETUP;
 		end
 
-		M_FETCH: begin
-			if (req_row == 31) begin
-				// window of this plane
-				if (plane == 0) begin
-					wx <= iX + irx + (imx >>> 2) - 2;
-					wy <= iY + iry + (imy >>> 2) - 2;
-					nrows <= S + 5'd5;
-					ncols <= S + 5'd5;
-				end
-				else begin
-					wx <= ((iX + irx) >>> 1) + (imx >>> 3);
-					wy <= ((iY + iry) >>> 1) + (imy >>> 3);
-					nrows <= (S >> 1) + 5'd1;
-					ncols <= (S >> 1) + 5'd1;
-				end
-				req_row <= 30;
+		// the three windows, then their rows are requested
+		M_SETUP: begin
+			for (i = 0; i < 3; i = i + 1) begin
+				jwx[i] <= swx[i];
+				jwy[i] <= swy[i];
+				jn[i] <= sn[i];
+				jw0[i] <= clampv(swx[i], i == 0 ? W : Wc) >>> 3;
+				jK[i] <= 3'((clampv(swx[i] + $signed({11'd0, sn[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
+				            (clampv(swx[i], i == 0 ? W : Wc) >>> 3) + 1);
+				jbase[i] <= slot_base + (i == 0 ? AW'(0) : (i == 1 ? AW'(UOFF) : AW'(VOFF)));
 			end
-			else if (req_row == 30) begin
-				w0 <= c0[15:3];
-				K <= c1[15:3] - c0[15:3] + 1;
-				req_row <= 0;
-				rcv_row <= 0;
-				rcv_word <= 0;
-				mem_rd <= 0;
-			end
-			else begin
-				// rows requested back to back
-				if (mem_rd && !mem_busy) mem_rd <= 0;
-				if ((!mem_rd || !mem_busy) && req_row < nrows) begin
-					mem_rd <= 1;
-					mem_addr <= row_addr;
-					mem_burst <= K;
-					req_row <= req_row + 1'd1;
-				end
-				if (mem_dout_ready) begin
-					rowbuf <= {mem_dout, rowbuf[191:64]};
-					if (rcv_word == K - 1) begin
-						winrow[rcv_row] <= newrow;
-						rcv_word <= 0;
-						rcv_row <= rcv_row + 1'd1;
-						if (rcv_row + 1 == nrows) begin
-							ms <= plane == 0 ? M_LLOAD : M_CCALC;
-							lk <= 0;
-							cr <= 0;
-							cg <= 0;
-						end
-					end
-					else rcv_word <= rcv_word + 1'd1;
-				end
-			end
+			rq_on <= 1;
+			rq_j <= 0;
+			rq_row <= 0;
+			rv_j <= 0;
+			rv_row <= 0;
+			rv_word <= 0;
+			got <= 0;
+			ms <= M_WAITY;
+		end
+
+		M_WAITY: if (got[0]) begin
+			ms <= M_LLOAD;
+			lk <= 0;
 		end
 
 		// first 6 window rows
@@ -333,13 +358,17 @@ always @(posedge clk) begin
 				for (i = 0; i < 5; i = i + 1) lw6[i] <= lw6[i + 1];
 				lw6[5] <= win_q;
 				if (ly == S - 1) begin
-					// luma done: chroma U
 					plane <= 1;
-					ms <= M_FETCH;
-					req_row <= 31;
+					ms <= M_WAITC;
 				end
 			end
 			else lg <= lg + 1'd1;
+		end
+
+		M_WAITC: if (got[plane]) begin
+			ms <= M_CCALC;
+			cr <= 0;
+			cg <= 0;
 		end
 
 		M_CCALC: begin
@@ -356,7 +385,7 @@ always @(posedge clk) begin
 				cg <= 0;
 				cr <= cr + 1'd1;
 				if (cr == (S >> 1) - 1) begin
-					if (plane == 1) begin plane <= 2; ms <= M_FETCH; req_row <= 31; end
+					if (plane == 1) begin plane <= 2; ms <= M_WAITC; end
 					else ms <= M_NEXT;
 				end
 			end
@@ -377,6 +406,10 @@ always @(posedge clk) begin
 	endcase
 end
 
-initial ms = M_IDLE;
+initial begin
+	ms = M_IDLE;
+	rq_on = 0;
+	mem_rd = 0;
+end
 
 endmodule
