@@ -30,14 +30,11 @@ genvar gb, gl;
 generate
 	for (gb = 0; gb < 2; gb = gb + 1) begin : bank
 		for (gl = 0; gl < 4; gl = gl + 1) begin : lane
-			reg [7:0] mem[128];
-			reg [7:0] q;
-			wire we = w_en && w_x[2] == gb && wbe[gl];
-			always @(posedge clk) begin
-				if (we) mem[{w_buf, wa}] <= wd[gl * 8 +: 8];
-				q <= mem[{r_buf, r_addr}];
-			end
-			assign r_word[gb * 32 + gl * 8 +: 8] = q;
+			acc_ram #(.W(8), .A(7)) ram
+			(
+				.clk(clk), .we(w_en && w_x[2] == gb && wbe[gl]), .wa({w_buf, wa}), .wd(wd[gl * 8 +: 8]),
+				.ra({r_buf, r_addr}), .q(r_word[gb * 32 + gl * 8 +: 8])
+			);
 		end
 	end
 endgenerate

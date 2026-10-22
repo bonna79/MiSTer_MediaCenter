@@ -18,5 +18,5 @@ for line in open(sys.argv[1]):
     key = base(f[3])
     if key not in worst or slack < worst[key][0]:
         worst[key] = (slack, base(f[2]))
-for k, (s, frm) in sorted(worst.items(), key=lambda x: x[1][0])[:45]:
+for k, (s, frm) in sorted(worst.items(), key=lambda x: x[1][0])[:70]:
     print('%8.3f  %-70s <- %s' % (s, k[-70:], frm[-60:]))

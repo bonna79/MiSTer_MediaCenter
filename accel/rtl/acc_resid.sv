@@ -119,13 +119,10 @@ wire [79:0] bq;
 genvar gb;
 generate
 	for (gb = 0; gb < 8; gb = gb + 1) begin : bank
-		reg [9:0] mem[128];
-		reg [9:0] q;
-		always @(posedge clk) begin
-			if (bwe[gb]) mem[bwa[gb]] <= bwd[gb];
-			q <= mem[bra[gb]];
-		end
-		assign bq[gb * 10 +: 10] = q;
+		acc_ram #(.W(10), .A(7)) ram
+		(
+			.clk(clk), .we(bwe[gb]), .wa(bwa[gb]), .wd(bwd[gb]), .ra(bra[gb]), .q(bq[gb * 10 +: 10])
+		);
 	end
 endgenerate
 
