@@ -47,14 +47,32 @@ module acc_engine #(
 
 localparam S_CMD = 0, S_PIC = 1, S_REFS = 2, S_MB1 = 3, S_INFO = 4, S_NCOEF = 5, S_COEF = 6,
            S_IDCTW = 7, S_CTX = 8, S_I4 = 9, S_I8 = 10, S_I16 = 11, S_CHR = 12, S_MC = 13,
-           S_WB = 14, S_LB = 15, S_PCM = 16, S_DONE = 17;
+           S_WB = 14, S_LB = 15, S_PCM = 16, S_DONE = 17, S_HAND = 18, S_IDLE = 19;
 
-reg  [4:0] st;
+// Two stages working on consecutive macroblocks:
+//  A (sa): reads the commands, transforms the coefficients into the residual
+//    buffer, then hands the macroblock to B;
+//  B (sb): context, prediction + residual, write back.
+// Picture and slice commands wait until B is idle.
+reg  [4:0] sa, sb;
+reg        abuf, bbuf;        // residual buffer of A and of B
+
+// macroblock being read by A
+reg  [7:0] a_mbx, a_mby;
+reg  [2:0] a_mtype;
+reg  [3:0] a_imode[16];
+reg [15:0] a_tr, a_tl;
+reg  [3:0] a_cmode, a_i16mode;
+reg  [6:0] a_qref[4];
+reg [31:0] a_mv[16];
+reg  [7:0] a_q_slot[4];
+reg [50:0] a_q_wt[4];
 
 reg  [7:0] wmb, hmb;          // picture size in macroblocks
 reg  [7:0] cur_slot;
 reg  [7:0] mbx, mby;
 reg  [2:0] mtype;             // 0 inter, 1 I4x4, 2 I8x8, 3 I16x16, 4 PCM
+wire       pcm = mtype == 4;  // done as 16x16 + chroma with prediction 0
 reg [23:0] cmask;
 reg        t8;
 reg  [3:0] imode[16];
@@ -263,7 +281,7 @@ integer q;
 always @* begin
 	hsum = 0;
 	vsum = 0;
-	if (st == S_I16) begin
+	if (sb == S_I16) begin
 		for (q = 0; q < 8; q = q + 1) begin
 			hsum = hsum + (q + 1) * ($signed({1'b0, topy[8 + q]}) - $signed({1'b0, (q == 7 ? cornery : topy[6 - q])}));
 			vsum = vsum + (q + 1) * ($signed({1'b0, lefty[8 + q]}) - $signed({1'b0, (q == 7 ? cornery : lefty[6 - q])}));
@@ -300,9 +318,10 @@ always @* begin
 	byy = prow16;
 	for (pp = 0; pp < 4; pp = pp + 1) begin
 		bxx = pgrp * 4 + pp;
-		if (st == S_I16) begin
+		if (sb == S_I16) begin
 			pv = (pa + pb * (bxx - 7) + pc * (byy - 7) + 16) >>> 5;
-			case (i16mode)
+			if (pcm) bpred[pp] = 0;
+			else case (i16mode)
 				1: bpred[pp] = lefty[prow16];
 				2: bpred[pp] = topy[bxx];
 				3: bpred[pp] = clip8(pv);
@@ -311,7 +330,8 @@ always @* begin
 		end
 		else begin
 			pv = (pa + pb * (bxx - 3) + pc * (byy - 3) + 16) >>> 5;
-			case (cmode)
+			if (pcm) bpred[pp] = 0;
+			else case (cmode)
 				1: bpred[pp] = cpl ? leftv[prow16] : leftu[prow16];
 				2: bpred[pp] = cpl ? topv[bxx] : topu[bxx];
 				3: bpred[pp] = clip8(pv);
@@ -372,17 +392,17 @@ reg [63:0] wb_din;
 
 wire [AW-1:0] slot_base = AW'(cur_slot) << SLOT_L2;
 // the RAM is read one word ahead: address of the word to send next clock
-wire        wb_adv = st == S_WB && (!wb_we || !mem_busy) && wbk != 48;
-wire  [5:0] rc_addr = st == S_WB ? (wb_adv ? wbk + 1'd1 : wbk) : 6'd0;
+wire        wb_adv = sb == S_WB && (!wb_we || !mem_busy) && wbk != 48;
+wire  [5:0] rc_addr = sb == S_WB ? (wb_adv ? wbk + 1'd1 : wbk) : 6'd0;
 wire [63:0] wb_word;
 wire [AW-1:0] wb_word_addr =
 	wbk < 32 ? slot_base + ((AW'({mby, wbk[4:1]})) << YSTRIDE_L2) + {mbx, wbk[0]} :
 	slot_base + (wbk < 40 ? AW'(UOFF) : AW'(VOFF)) + ((AW'({mby, wbk[2:0]})) << CSTRIDE_L2) + mbx;
 
-assign mem_rd    = st == S_MC ? mc_rd : 1'b0;
-assign mem_we    = st == S_MC ? 1'b0 : wb_we;
-assign mem_addr  = st == S_MC ? mc_addr : wb_addr;
-assign mem_burst = st == S_MC ? mc_burst : 8'd1;
+assign mem_rd    = sb == S_MC ? mc_rd : 1'b0;
+assign mem_we    = sb == S_MC ? 1'b0 : wb_we;
+assign mem_addr  = sb == S_MC ? mc_addr : wb_addr;
+assign mem_burst = sb == S_MC ? mc_burst : 8'd1;
 assign mem_din   = wb_din;
 assign mem_be    = 8'hFF;
 
@@ -390,8 +410,10 @@ assign mem_be    = 8'hFF;
 
 wire [7:0] tag = cmd_data[31:24];
 wire coef_blk_change = coef_have && cmd_data[26:22] != coef_blk;
-assign cmd_ready = !reset && (st == S_CMD || st == S_PIC || st == S_REFS || st == S_MB1 || st == S_INFO ||
-                   st == S_NCOEF || st == S_PCM || (st == S_COEF && !coef_blk_change && idct_in && !idct_go));
+wire b_idle = sb == S_IDLE;
+assign cmd_ready = !reset && ((sa == S_CMD && (tag == 8'hA3 || b_idle)) || sa == S_PIC || sa == S_REFS || sa == S_MB1 ||
+                   sa == S_INFO || sa == S_NCOEF || sa == S_PCM ||
+                   (sa == S_COEF && !coef_blk_change && idct_in && !idct_go));
 wire take = cmd_valid && cmd_ready;
 
 wire [15:0] X16 = {mbx, 4'd0};
@@ -424,7 +446,7 @@ always @* begin
 	px_y = 0;
 	px_n = 4;
 	px_pr = {dpred[3], dpred[2], dpred[1], dpred[0]};
-	case (st)
+	case (sb)
 		S_I4:  if (ph != 0) begin px_we = 1; px_x = bx; px_y = by + 4'(prow); end
 		S_I8:  if (ph != 0) begin px_we = 1; px_x = bx + 4'(pcol); px_y = by + 4'(prow); end
 		S_I16: if (ph != 0) begin
@@ -439,13 +461,6 @@ always @* begin
 			px_x = {1'b0, pgrp[0], 2'b00};
 			px_y = prow16;
 			px_pr = {bpred[3], bpred[2], bpred[1], bpred[0]};
-		end
-		S_PCM: if (take) begin
-			px_we = 1;
-			px_res = 0;
-			px_pr = cmd_data;
-			if (pcnt < 64) begin px_x = {pcnt[1:0], 2'b00}; px_y = pcnt[5:2]; end
-			else begin px_pl = pcnt < 80 ? 2'd1 : 2'd2; px_x = {1'b0, pcnt[0], 2'b00}; px_y = {1'b0, pcnt[3:1]}; end
 		end
 		default: ;
 	endcase
@@ -469,7 +484,7 @@ always @* begin
 	rr_pl = 0;
 	rr_x = 0;
 	rr_y = 0;
-	case (st)
+	case (sb)
 		S_I4: begin rr_x = bx; rr_y = by + (ph == 0 ? 4'd0 : 4'(prow) + 4'd1); end
 		S_I8: begin
 			if (ph == 0) begin rr_x = bx; rr_y = by; end
@@ -492,7 +507,7 @@ always @* begin
 end
 
 // reference table (list 0) in block RAM: {slot, lw, lo}, cb, cr
-wire       rt_we = st == S_REFS && take && !rlist;
+wire       rt_we = sa == S_REFS && take && !rlist;
 reg [24:0] rt_a[32];
 reg [16:0] rt_b[32], rt_c[32];
 reg [24:0] rt_aq;
@@ -508,17 +523,20 @@ end
 reg        rt_cap;
 reg  [1:0] rt_k;
 always @(posedge clk) begin
-	rt_cap <= st == S_INFO && take && mtype == 0 && icnt < 4;
+	rt_cap <= sa == S_INFO && take && a_mtype == 0 && icnt < 4;
 	rt_k <= icnt[1:0];
 	if (rt_cap) begin
-		q_slot[rt_k] <= rt_aq[7:0];
-		q_wt[rt_k] <= {rt_aq[16:8], rt_aq[24:17], rt_bq, rt_cq};
+		a_q_slot[rt_k] <= rt_aq[7:0];
+		a_q_wt[rt_k] <= {rt_aq[16:8], rt_aq[24:17], rt_bq, rt_cq};
 	end
 end
 
 acc_resid resid
 (
-	.clk(clk), .clr(resid_clr),
+	.clk(clk), .clr(resid_clr), .w_buf(abuf), .r_buf(bbuf),
+	.p_en(sa == S_PCM && take), .p_plane(pcnt < 64 ? 2'd0 : (pcnt < 80 ? 2'd1 : 2'd2)),
+	.p_x(pcnt < 64 ? {pcnt[1:0], 2'b00} : {1'b0, pcnt[0], 2'b00}),
+	.p_y(pcnt < 64 ? pcnt[5:2] : {1'b0, pcnt[3:1]}), .p_px(cmd_data),
 	.w_en(idct_rv), .w_blk(idct_blk), .w_big(idct_big), .w_col(idct_col),
 	.w_vals({idct_res[7], idct_res[6], idct_res[5], idct_res[4], idct_res[3], idct_res[2], idct_res[1], idct_res[0]}),
 	.r_plane(rr_pl), .r_x(rr_x), .r_y(rr_y), .r_vals(res_q)
@@ -574,15 +592,18 @@ always @(posedge clk) begin
 	end
 
 	if (reset) begin
-		st <= S_CMD;
+		sa <= S_CMD;
+		sb <= S_IDLE;
+		abuf <= 0;
 		error <= 0;
 		mb_count <= 0;
 		wb_we <= 0;
 	end
-	else case (st)
+	else begin
+		case (sa)
 		S_CMD: if (take) begin
 			case (tag)
-				8'hA1: begin cur_slot <= cmd_data[7:0]; st <= S_PIC; end
+				8'hA1: begin cur_slot <= cmd_data[7:0]; sa <= S_PIC; end
 				8'hA2: begin
 					n0 <= cmd_data[5:0];
 					n1 <= cmd_data[11:6];
@@ -595,16 +616,16 @@ always @(posedge clk) begin
 					rword <= 0;
 					ridx <= 0;
 					rlist <= 0;
-					if (cmd_data[5:0] != 0 || (cmd_data[12] && cmd_data[11:6] != 0)) st <= S_REFS;
+					if (cmd_data[5:0] != 0 || (cmd_data[12] && cmd_data[11:6] != 0)) sa <= S_REFS;
 				end
 				8'hA3: begin
-					mbx <= cmd_data[7:0];
-					mby <= cmd_data[15:8];
-					mtype <= cmd_data[18:16];
+					a_mbx <= cmd_data[7:0];
+					a_mby <= cmd_data[15:8];
+					a_mtype <= cmd_data[18:16];
 					resid_clr <= 1;
 					icnt <= 0;
 					pcnt <= 0;
-					st <= cmd_data[18:16] == 4 ? S_PCM : S_MB1;
+					sa <= cmd_data[18:16] == 4 ? S_PCM : S_MB1;
 				end
 				8'hA4: begin
 					pic_done <= 1;
@@ -617,7 +638,7 @@ always @(posedge clk) begin
 		S_PIC: if (take) begin
 			wmb <= cmd_data[7:0];
 			hmb <= cmd_data[15:8];
-			st <= S_CMD;
+			sa <= S_CMD;
 		end
 
 		S_REFS: if (take) begin
@@ -630,37 +651,37 @@ always @(posedge clk) begin
 			end
 			else rword <= rword + 1'd1;
 			rcnt <= rcnt - 1'd1;
-			if (rcnt == 1) st <= S_CMD;
+			if (rcnt == 1) sa <= S_CMD;
 		end
 
 		S_MB1: if (take) begin
 			cmask <= cmd_data[23:0];
 			t8 <= cmd_data[24];
-			st <= S_INFO;
+			sa <= S_INFO;
 		end
 
 		S_INFO: if (take) begin
 			icnt <= icnt + 1'd1;
-			if (mtype != 0) begin
+			if (a_mtype != 0) begin
 				case (icnt)
-					0: for (i = 0; i < 8; i = i + 1) imode[i] <= cmd_data[i * 4 +: 4];
-					1: for (i = 0; i < 8; i = i + 1) imode[8 + i] <= cmd_data[i * 4 +: 4];
-					2: begin tr_mask <= cmd_data[15:0]; tl_mask <= cmd_data[31:16]; end
-					default: begin cmode <= cmd_data[3:0]; i16mode <= cmd_data[7:4]; end
+					0: for (i = 0; i < 8; i = i + 1) a_imode[i] <= cmd_data[i * 4 +: 4];
+					1: for (i = 0; i < 8; i = i + 1) a_imode[8 + i] <= cmd_data[i * 4 +: 4];
+					2: begin a_tr <= cmd_data[15:0]; a_tl <= cmd_data[31:16]; end
+					default: begin a_cmode <= cmd_data[3:0]; a_i16mode <= cmd_data[7:4]; end
 				endcase
-				if (icnt == 3) st <= S_NCOEF;
+				if (icnt == 3) sa <= S_NCOEF;
 			end
 			else begin
-				if (icnt < 4) qref[icnt[1:0]] <= cmd_data[6:0];
-				else if (icnt < 20) mv[icnt - 4] <= cmd_data;
-				if (icnt == 35) st <= S_NCOEF;
+				if (icnt < 4) a_qref[icnt[1:0]] <= cmd_data[6:0];
+				else if (icnt < 20) a_mv[icnt - 4] <= cmd_data;
+				if (icnt == 35) sa <= S_NCOEF;
 			end
 		end
 
 		S_NCOEF: if (take) begin
 			ncoef <= cmd_data[15:0];
 			coef_have <= 0;
-			st <= cmd_data[15:0] == 0 ? S_CTX : S_COEF;
+			sa <= cmd_data[15:0] == 0 ? S_HAND : S_COEF;
 			ctxk <= 0;
 		end
 
@@ -684,7 +705,7 @@ always @(posedge clk) begin
 				coef_blk <= cmd_data[26:22];
 				ncoef <= ncoef - 1'd1;
 				if (ncoef == 1) begin
-					st <= S_IDCTW;
+					sa <= S_IDCTW;
 					coef_last <= 1;
 					go_pending <= 1;
 				end
@@ -703,12 +724,45 @@ always @(posedge clk) begin
 			end
 			else if (!idct_go && !idct_busy && !idct_rv) begin
 				coef_have <= 0;
-				st <= coef_last ? S_CTX : S_COEF;
+				sa <= coef_last ? S_HAND : S_COEF;
 				ctxk <= 0;
 			end
 		end
 
 		// row above and corner from the line buffers
+		S_PCM: if (take) begin
+			pcnt <= pcnt + 1'd1;
+			if (pcnt == 95) begin sa <= S_HAND; ctxk <= 0; end
+		end
+
+		// macroblock to memory, one word per write
+		// hand the macroblock to B once B is idle and the transform is done
+		S_HAND: if (b_idle && !idct_busy && !idct_go && !idct_rv) begin
+			mbx <= a_mbx;
+			mby <= a_mby;
+			mtype <= a_mtype;
+			for (i = 0; i < 16; i = i + 1) imode[i] <= a_imode[i];
+			tr_mask <= a_tr;
+			tl_mask <= a_tl;
+			cmode <= a_cmode;
+			i16mode <= a_i16mode;
+			for (i = 0; i < 4; i = i + 1) begin
+				qref[i] <= a_qref[i];
+				q_slot[i] <= a_q_slot[i];
+				q_wt[i] <= a_q_wt[i];
+			end
+			for (i = 0; i < 16; i = i + 1) mv[i] <= a_mv[i];
+			bbuf <= abuf;
+			abuf <= ~abuf;
+			sb <= S_CTX;
+			ctxk <= 0;
+			sa <= S_CMD;
+		end
+
+		default: sa <= S_CMD;
+		endcase
+
+		case (sb)
 		S_CTX: begin
 			ctxk <= ctxk + 1'd1;
 			lby_ra <= {mbx, 2'b00} + ctxk;
@@ -725,11 +779,11 @@ always @(posedge clk) begin
 				blk <= 0;
 				ph <= 0;
 				case (mtype)
-					0: begin st <= S_MC; mc_start <= 1; end
-					1: st <= S_I4;
-					2: st <= S_I8;
-					3: begin st <= S_I16; ph <= 0; end
-					default: begin st <= S_WB; wbk <= 0; end
+					0: begin sb <= S_MC; mc_start <= 1; end
+					1: sb <= S_I4;
+					2: sb <= S_I8;
+					3: begin sb <= S_I16; ph <= 0; end
+					default: begin sb <= S_I16; ph <= 0; end
 				endcase
 			end
 		end
@@ -748,7 +802,7 @@ always @(posedge clk) begin
 				if (prow == 3) begin
 					ph <= 0;
 					blk <= blk + 1'd1;
-					if (blk == 15) begin st <= S_CHR; cpl <= 0; ph <= 0; end
+					if (blk == 15) begin sb <= S_CHR; cpl <= 0; ph <= 0; end
 				end
 			end
 		end
@@ -768,7 +822,7 @@ always @(posedge clk) begin
 					if (prow == 7) begin
 						ph <= 0;
 						blk <= blk + 4'd4;
-						if (blk == 12) begin st <= S_CHR; cpl <= 0; ph <= 0; end
+						if (blk == 12) begin sb <= S_CHR; cpl <= 0; ph <= 0; end
 					end
 				end
 			end
@@ -794,7 +848,7 @@ always @(posedge clk) begin
 				pgrp <= pgrp + 1'd1;
 				if (pgrp == 3) begin
 					prow16 <= prow16 + 1'd1;
-					if (prow16 == 15) begin st <= S_CHR; cpl <= 0; ph <= 0; end
+					if (prow16 == 15) begin sb <= S_CHR; cpl <= 0; ph <= 0; end
 				end
 			end
 		end
@@ -827,20 +881,14 @@ always @(posedge clk) begin
 					if (prow16 == 7) begin
 						ph <= 0;
 						cpl <= 1;
-						if (cpl) begin st <= S_WB; wbk <= 0; end
+						if (cpl) begin sb <= S_WB; wbk <= 0; end
 					end
 				end
 			end
 		end
 
-		S_MC: if (mc_done) begin st <= S_WB; wbk <= 0; end
+		S_MC: if (mc_done) begin sb <= S_WB; wbk <= 0; end
 
-		S_PCM: if (take) begin
-			pcnt <= pcnt + 1'd1;
-			if (pcnt == 95) begin st <= S_CTX; ctxk <= 0; end
-		end
-
-		// macroblock to memory, one word per write
 		S_WB: begin
 			// bottom rows into the line buffers, one word per clock (block RAM)
 			if (wbk < 4) lby[{mbx, wbk[1:0]}] <= brow[3][wbk[1:0] * 32 +: 32];
@@ -851,7 +899,7 @@ always @(posedge clk) begin
 			if (!wb_we || !mem_busy) begin
 				if (wbk == 48 && (!wb_we || !mem_busy)) begin
 					wb_we <= 0;
-					st <= S_LB;
+					sb <= S_LB;
 					ctxk <= 0;
 				end
 				else begin
@@ -871,11 +919,13 @@ always @(posedge clk) begin
 			corneru <= topu[7];
 			cornerv <= topv[7];
 			mb_count <= mb_count + 1'd1;
-			st <= S_CMD;
+			sb <= S_IDLE;
 		end
 
-		default: st <= S_CMD;
-	endcase
+		S_IDLE: ;                     // started by A (S_HAND)
+		default: sb <= S_IDLE;
+		endcase
+	end
 end
 
 endmodule
