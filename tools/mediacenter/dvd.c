@@ -812,7 +812,7 @@ static int dvd_step(void)
 				ev->new_vtsN, ev->old_vtsN, aspect == 3 ? "16:9" : "4:3");
 			dgv_watch = 1;
 		}
-		fb_aspect = aspect == 3 ? 16.0 / 9.0 : 4.0 / 3.0;
+		video_aspect = fb_aspect = aspect == 3 ? 16.0 / 9.0 : 4.0 / 3.0;
 		dvd.title = -1;
 		break;
 	}
@@ -1271,7 +1271,7 @@ static int dvd_open(const char *device)
 	dvd.vm_spu_phys = -1;
 	dvd.spu_phys = -1;
 	dvd.title = -1;
-	fb_aspect = 4.0 / 3.0;
+	video_aspect = fb_aspect = 4.0 / 3.0;
 
 	const char *title = NULL;
 	dvdnav_get_title_string(dvd.nav, &title);

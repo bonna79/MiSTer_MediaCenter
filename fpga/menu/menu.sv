@@ -411,6 +411,13 @@ wire FB  = status[5];
 wire [2:0] led = status[8:6];
 // MiSTer MediaCenter: the picture is 16:9 (letterbox it on the 4:3 screen)
 wire WIDE = status[9];
+// MiSTer MediaCenter: share of the 4:3 screen's height the picture takes
+// (1/1024, 0 = not sent), or of its width when PILLAR (narrower than 4:3)
+wire [9:0] RATIO = status[45:36];
+wire PILLAR = status[46];
+// MiSTer MediaCenter: pan & scan, the picture fills the height and its sides
+// are cut; RATIO is then half its width in pixels of the 15 kHz output
+wire CROP = status[47];
 // MiSTer MediaCenter: the picture is interlaced (DVD video): its two fields
 // go to the two fields of the 15 kHz output
 wire FIELDS = status[10];
@@ -573,6 +580,9 @@ mc_out mc_out
 	.show(FB),
 	.scaled(SCALED),
 	.wide(WIDE),
+	.ratio(RATIO),
+	.pillar(PILLAR),
+	.crop(CROP),
 	.ilace(ILACE),
 	.fields(FIELDS),
 	.vfilter(VFILTER),

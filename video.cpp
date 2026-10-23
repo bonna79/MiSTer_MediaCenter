@@ -4383,6 +4383,50 @@ static void fb_set_page(int n)
 // (fb_cmd3 idle 0): meanwhile the Main rests between its rounds.
 static int mc_idle = 0;
 
+// MiSTer MediaCenter: the shape of the video picture on the menu core's
+// 15 kHz output (a 4:3 screen), from its display aspect aw:ah. A wider
+// picture is letterboxed: RATIO ([45:36]) is the share of the height it
+// takes, in 1/1024. A narrower one gets bars at the sides: PILLAR ([46]),
+// RATIO the share of the width. A picture within 1% of 4:3 fills the screen.
+// The player's choice (fb_cmd3 crtfit): 0 that, 1 always fill the screen
+// (stretched), 2 pan & scan: a wider picture fills the height and its sides
+// are cut, CROP ([47]), RATIO half its width in output pixels (720 is the
+// screen). [9] is for an older core, which only letterboxes at 16:9.
+static int mc_crt_aw = 0, mc_crt_ah = 0, mc_crt_fit = 0;
+static void mc_crt_shape()
+{
+	if (!is_menu()) return;
+	int64_t a3 = (int64_t)mc_crt_aw * 3, h4 = (int64_t)mc_crt_ah * 4;
+	uint32_t ratio = 0, pillar = 0, crop = 0, wide = 0;
+	if (mc_crt_aw > 0 && mc_crt_ah > 0 && mc_crt_fit != 1)
+	{
+		if (a3 * 100 > h4 * 101)
+		{
+			if (mc_crt_fit == 2)
+			{
+				ratio = (uint32_t)(a3 * 360 / h4);
+				crop = 1;
+			}
+			else
+			{
+				ratio = (uint32_t)(h4 * 1024 / a3);
+				wide = mc_crt_aw * 2 > mc_crt_ah * 3;
+			}
+		}
+		else if (a3 * 101 < h4 * 100)
+		{
+			ratio = (uint32_t)(a3 * 1024 / h4);
+			pillar = 1;
+		}
+		if (ratio > 1023) ratio = 1023;
+	}
+	user_io_status_set("[9]", wide);
+	user_io_status_set("[43:36]", ratio & 0xFF); // at most 8 bits per call
+	user_io_status_set("[45:44]", ratio >> 8);
+	user_io_status_set("[46]", pillar);
+	user_io_status_set("[47]", crop);
+}
+
 int video_mc_idle()
 {
 	return mc_idle && is_menu();
@@ -4420,6 +4464,21 @@ void video_cmd(char *cmd)
 			user_io_status_set("[26:22]", (uint32_t)vs & 0x1F);
 			user_io_status_set("[31:27]", (uint32_t)vp & 0x1F);
 		}
+	}
+
+	// fb_cmd3 crtfit <0|1|2>: how MiSTer MediaCenter's video picture fits the
+	// 4:3 screen of the 15 kHz output: bars, filling it, pan & scan
+	// (mc_crt_shape). Can come together with other commands.
+	const char *crtf = strstr(cmd, "fb_cmd3 crtfit ");
+	if (crtf)
+	{
+		int fit;
+		if (sscanf(crtf, "fb_cmd3 crtfit %d", &fit) == 1 && fit >= 0 && fit <= 2 && fit != mc_crt_fit)
+		{
+			mc_crt_fit = fit;
+			if (menu_is_mediacenter()) mc_crt_shape();
+		}
+		if (crtf == cmd && !strchr(cmd, '\n')) return;
 	}
 
 	// fb_cmd3 crtmode <mode> <filter>: the mode of the menu core's 15 kHz
@@ -4491,7 +4550,8 @@ void video_cmd(char *cmd)
 			mc_idle = 0;
 			fb_set_fields(0);
 			fb_paged.on = 0;
-			if (is_menu()) user_io_status_set("[9]", 0);
+			mc_crt_aw = mc_crt_ah = 0;
+			mc_crt_shape();
 			video_fb_enable(1, 0);
 			return;
 		}
@@ -4515,8 +4575,10 @@ void video_cmd(char *cmd)
 				vmax = vmin + win_h - 1;
 				accept = 1;
 				paged = 1;
-				// the menu core letterboxes a wide picture on its 15 kHz output
-				if (is_menu()) user_io_status_set("[9]", aw * 2 > ah * 3);
+				// the picture's shape on the menu core's 15 kHz output
+				mc_crt_aw = aw;
+				mc_crt_ah = ah;
+				mc_crt_shape();
 			}
 		}
 

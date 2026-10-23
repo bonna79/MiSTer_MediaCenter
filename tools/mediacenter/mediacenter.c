@@ -15,6 +15,10 @@
 
 #define main vcd_main
 #include "../vcd_player/vcd_player.c"
+
+// The display aspect of the video playing (fb_aspect is the one drawn: this
+// one, or the format fixed in Regola CRT).
+static double video_aspect = 4.0 / 3.0;
 #undef main
 
 #include <dirent.h>
@@ -393,9 +397,9 @@ static int media_open(const char *path)
 		AVRational sar = av_guess_sample_aspect_ratio(mc.fmt, st, NULL);
 		double w = mc.vdec->width, h = mc.vdec->height;
 		if (sar.num > 0 && sar.den > 0) w *= av_q2d(sar);
-		fb_aspect = (h > 0 && w > 0) ? w / h : 4.0 / 3.0;
+		video_aspect = fb_aspect = (h > 0 && w > 0) ? w / h : 4.0 / 3.0;
 		printf("mediacenter: %s, video %s %dx%d aspect %.3f, audio %s, %.0f s\n", path,
-			avcodec_get_name(st->codecpar->codec_id), mc.vdec->width, mc.vdec->height, fb_aspect,
+			avcodec_get_name(st->codecpar->codec_id), mc.vdec->width, mc.vdec->height, video_aspect,
 			mc.adec ? avcodec_get_name(mc.adec->codec_id) : "none", mc.duration);
 	}
 	else
@@ -1034,6 +1038,7 @@ static void screen_rebuild(void)
 static int yuv_ok = 1;
 
 static void fb_native_fmt(int w, int h, double aspect, int yuv);
+static double aspect_used(int sw, int sh);
 static void crt_fb_changed(void);
 static void crt_video_std(const AVFrame *f);
 
@@ -1401,6 +1406,8 @@ static void yuv_draw(void)
 // Converts and draws a decoded picture.
 static void draw_video_frame(AVFrame *f)
 {
+	// the video's own aspect, or the format fixed in Regola CRT
+	fb_aspect = aspect_used(native_w ? def_w : fb_w, native_w ? def_h : fb_h);
 	// Light mode: every other line, as a picture of half the height.
 	int h = f->height;
 	int linesize[AV_NUM_DATA_POINTERS];
@@ -2844,17 +2851,25 @@ static int browse(const char *root)
 // mediacenter.ini as MC_CRT_HSIZE, MC_CRT_HPOS, MC_CRT_VSIZE, MC_CRT_VPOS.
 //
 // The same screen chooses the mode of the 15 kHz output (MC_CRT_MODE) and its
-// flicker filter (MC_CRT_FILTER), both done by the menu core:
+// flicker filter (MC_CRT_FILTER), both done by the menu core, the picture's
+// format (MC_CRT_ASPECT, also on HDMI) and pan & scan (MC_CRT_PANSCAN):
 // - mode Auto: 576i for a PAL DVD, 480i for an NTSC one and for the lists,
 //   or the forced 576i, 288p, 480i or 240p;
 // - filter Auto: on for the lists and screens of the player (white text one
 //   line tall would flicker on an interlaced output), off for the video,
-//   whose subtitles and controls are already smoothed here.
+//   whose subtitles and controls are already smoothed here;
+// - format Auto: the video's own aspect (the DVD's 4:3 or 16:9 flag, the
+//   file's display aspect); or fixed: Pieno fills the screen (stretched),
+//   4:3, 16:9, 21:9;
+// - pan & scan (CRT only): a picture wider than 4:3 fills the CRT's height
+//   and its sides are cut, instead of black bars above and below.
 // ---------------------------------------------------------------------------
 
-#define CRT_ITEMS 6
+#define CRT_ITEMS 8
 #define CRT_MODE 4
 #define CRT_FILTER 5
+#define CRT_ASPECT 6
+#define CRT_PANSCAN 7
 static const struct { const char *key, *label; int min, max; } crt_items[CRT_ITEMS] = {
 	{ "MC_CRT_HSIZE", "Larghezza", -16, 15 },
 	{ "MC_CRT_HPOS", "Pos. orizzontale", -32, 31 },
@@ -2862,12 +2877,29 @@ static const struct { const char *key, *label; int min, max; } crt_items[CRT_ITE
 	{ "MC_CRT_VPOS", "Pos. verticale", -16, 15 },
 	{ "MC_CRT_MODE", "Modo 15 kHz", 0, 4 },
 	{ "MC_CRT_FILTER", "Filtro tremolio", 0, 2 },
+	{ "MC_CRT_ASPECT", "Formato", 0, 4 },
+	{ "MC_CRT_PANSCAN", "Pan & scan", 0, 1 },
 };
 static const char *const crt_mode_names[5] = { "Auto", "576i PAL", "288p PAL", "480i NTSC", "240p NTSC" };
 static const char *const crt_filter_names[3] = { "Auto", "Spento", "Acceso" };
+static const char *const crt_aspect_names[5] = { "Auto", "Pieno", "4:3", "16:9", "21:9" };
 static int crt_val[CRT_ITEMS];
 static int crt_sent_mode = -1, crt_sent_filter = -1;
 static int crt_std = -1; // standard of the video on screen: 1 PAL, 0 NTSC, -1 unknown
+
+// The video's display aspect, or the format fixed in Regola CRT (on the
+// screen of sw x sh pixels: Pieno fills it).
+static double aspect_used(int sw, int sh)
+{
+	switch (crt_val[CRT_ASPECT])
+	{
+	case 1: return sw > 0 && sh > 0 ? (double)sw / sh : video_aspect;
+	case 2: return 4.0 / 3.0;
+	case 3: return 16.0 / 9.0;
+	case 4: return 64.0 / 27.0; // 21:9 as the cinema screens (2.37)
+	default: return video_aspect;
+	}
+}
 
 // The mode sent to the core. A fixed mode chosen in Regola CRT always wins.
 // In Auto, while a video is on screen, its frame rate chooses the standard:
@@ -2928,6 +2960,9 @@ static void crt_send(void)
 	char cmd[64];
 	snprintf(cmd, sizeof(cmd), "fb_cmd3 crt %d %d %d %d\n", crt_val[0], crt_val[1], crt_val[2], crt_val[3]);
 	if (crt_write(cmd)) fprintf(stderr, "mediacenter: CRT adjust not sent\n");
+	// how the picture fits the CRT's 4:3 screen: bars, filled (Pieno), pan & scan
+	snprintf(cmd, sizeof(cmd), "fb_cmd3 crtfit %d\n", crt_val[CRT_ASPECT] == 1 ? 1 : crt_val[CRT_PANSCAN] ? 2 : 0);
+	crt_write(cmd);
 	int flt = crt_filter_on();
 	int mode = crt_mode_now();
 	if (mode != crt_sent_mode || flt != crt_sent_filter)
@@ -3128,7 +3163,7 @@ static void crt_draw(int sel, const char *message)
 	fb_fill_rect(fb_w - 2 * sx, 0, 2 * sx, fb_h, red);
 
 	int row_h = 11 * sy;
-	int bw = 38 * gw, bh = 25 * row_h / 2 + 8 * sy;
+	int bw = 38 * gw, bh = 29 * row_h / 2 + 8 * sy;
 	if (bw > fb_w - 8 * sx) bw = fb_w - 8 * sx;
 	int bx = (fb_w - bw) / 2, by = (fb_h - bh) / 2;
 	fb_fill_rect(bx, by, bw, bh, fb_rgb(0, 0, 0));
@@ -3142,6 +3177,8 @@ static void crt_draw(int sel, const char *message)
 		char line[64];
 		if (i == CRT_MODE) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_mode_names[crt_val[i]]);
 		else if (i == CRT_FILTER) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_filter_names[crt_val[i]]);
+		else if (i == CRT_ASPECT) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_aspect_names[crt_val[i]]);
+		else if (i == CRT_PANSCAN) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_val[i] ? "Acceso" : "Spento");
 		else snprintf(line, sizeof(line), "%-17s %+d", crt_items[i].label, crt_val[i]);
 		if (i == sel) fb_fill_rect(bx + sx, y - 2 * sy, bw - 2 * sx, row_h, accent);
 		fb_text_xy(bx + gw, y, sx, sy, 1, line, white);
@@ -3210,8 +3247,9 @@ static void crt_adjust_screen(void)
 				crt_draw(sel, message);
 				continue;
 			}
-			fprintf(stderr, "mediacenter: CRT salvato: %d %d %d %d, modo %s, filtro %s\n", crt_val[0], crt_val[1], crt_val[2],
-				crt_val[3], crt_mode_names[crt_val[CRT_MODE]], crt_filter_names[crt_val[CRT_FILTER]]);
+			fprintf(stderr, "mediacenter: CRT salvato: %d %d %d %d, modo %s, filtro %s, formato %s, pan & scan %s\n", crt_val[0],
+				crt_val[1], crt_val[2], crt_val[3], crt_mode_names[crt_val[CRT_MODE]], crt_filter_names[crt_val[CRT_FILTER]],
+				crt_aspect_names[crt_val[CRT_ASPECT]], crt_val[CRT_PANSCAN] ? "acceso" : "spento");
 			return;
 		case KEY_ESC: case KEY_TAB: case KEY_STOP: case KEY_STOPCD:
 			memcpy(crt_val, saved, sizeof(saved));

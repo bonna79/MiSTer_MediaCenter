@@ -8,7 +8,13 @@
 // a narrower or wider picture is spread or narrowed evenly, without doubled or
 // lost columns). Down, the source line is picked by nearest neighbour, so an
 // interlaced output (480i/576i) gets the frame buffer's own lines in each
-// field. With "wide" a 16:9 picture is letterboxed on the 4:3 screen.
+// field. A picture wider than 4:3 is letterboxed on the 4:3 screen, one
+// narrower than 4:3 gets black bars at the sides: "ratio" is the share of the
+// height (or of the width, with "pillar") the picture takes, in 1/1024, from
+// its display aspect (16:9: 768, 2.35:1: 581). With ratio 0, "wide" letterboxes
+// at 16:9 (a Main that does not send the ratio). With "crop" (pan & scan) a
+// wide picture fills the height instead and its sides are cut: ratio is then
+// half its width in output pixels (more than 360).
 //
 // MiSTer MediaCenter's lists (32 bits per pixel, 640 wide) keep their pixels
 // 1:1 across, centered: the text stays sharp.
@@ -49,7 +55,10 @@ module mc_out
 	input             ce_pix,
 	input             show,
 	input             scaled,   // fill the output instead of 1:1
-	input             wide,     // 16:9 picture: letterbox
+	input             wide,     // 16:9 picture: letterbox (when ratio is 0)
+	input       [9:0] ratio,    // share of the height (width with pillar) the picture takes, 1/1024; 0 full
+	input             pillar,   // picture narrower than 4:3: bars at the sides
+	input             crop,     // pan & scan: full height, ratio = half the width (sides cut)
 	input             ilace,    // interlaced output: two fields per frame
 	input             fields,   // the picture is interlaced: keep its fields apart
 	input             vfilter,  // blend each line with the next (flicker filter)
@@ -74,14 +83,26 @@ reg        lst;
 reg        flt;
 reg  [9:0] out_h, cols, lines, left, top;
 reg  [1:0] show_s = 0;
-reg        scale, ilc, wd, fld;
+reg        scale, ilc, wd, fld, pil, crp;
+reg  [9:0] rto;
 wire       yuv = fmt[5] && fmt[2:0] == 3'b100;
 
 // lines of the whole output picture (both fields when interlaced)
 wire [10:0] pic_h  = ilc ? {out_h, 1'b0} : {1'b0, out_h};
-// lines used by the picture: 3/4 of them for a letterboxed 16:9 picture
-wire [10:0] act_h  = wd ? (pic_h - (pic_h >> 2)) : pic_h;
-wire [10:0] act_y0 = wd ? (pic_h >> 3) : 11'd0;
+// lines used by the picture (fewer for a letterboxed wide picture, an even
+// number) and the first one (even, so the fields keep their order); pixels
+// used across (fewer with bars at the sides)
+reg  [10:0] act_h = 0, act_y0 = 0;
+reg  [20:0] lb_h;
+reg  [19:0] pb_w;
+reg  [10:0] act_w = 720;
+always @(posedge clk_vid) begin
+	lb_h   <= pic_h * rto;
+	pb_w   <= 10'd720 * rto;
+	act_h  <= (rto != 0 && !pil && !crp) ? {lb_h[20:11], 1'b0} : (wd && rto == 0) ? (pic_h - (pic_h >> 2)) : pic_h;
+	act_y0 <= 11'(((pic_h - act_h) >> 2) << 1);
+	act_w  <= (rto != 0 && crp) ? {rto, 1'b0} : (rto != 0 && pil) ? {1'b0, pb_w[19:11], 1'b0} : 11'd720;
+end
 
 // The picture's rectangle after CRT Adjust: width and left edge in output
 // pixels, height and top in lines of the whole picture (both fields). The top
@@ -90,7 +111,7 @@ wire [10:0] act_y0 = wd ? (pic_h >> 3) : 11'd0;
 // other pictures fill the 720 pixels.
 reg signed [11:0] pic_w = 720, pic_x0 = 0, pic_hh = 0, pic_y0 = 0;
 always @(posedge clk_vid) begin
-	pic_w  <= (lst ? 12'sd640 : 12'sd720) + $signed({{4{adj_hsize[4]}}, adj_hsize, 3'b000});
+	pic_w  <= (lst ? 12'sd640 : $signed({1'b0, act_w})) + $signed({{4{adj_hsize[4]}}, adj_hsize, 3'b000});
 	pic_x0 <= ((12'sd720 - pic_w) >>> 1) + $signed({{5{adj_hpos[5]}}, adj_hpos, 1'b0});
 	pic_hh <= $signed({1'b0, act_h}) + (ilc ? $signed({{4{adj_vsize[4]}}, adj_vsize, 3'b000})
 	                                        : $signed({{5{adj_vsize[4]}}, adj_vsize, 2'b00}));
@@ -106,6 +127,9 @@ always @(posedge clk_vid) begin
 	scale  <= scaled;
 	ilc    <= ilace;
 	wd     <= wide;
+	rto    <= ratio;
+	pil    <= pillar;
+	crp    <= crop;
 	fld    <= fields;
 	flt    <= vfilter;
 	lst    <= fmt[2:0] == 3'b110 && !fmt[5] && w == 12'd640;
