@@ -352,13 +352,19 @@ reg [10:0] sqt0_r, sqt1_r, sql0_r, sql1_r;
 reg  [3:0] nrow;
 reg  [1:0] ngrp;
 integer bxx, byy;
+wire signed [5:0] prow_o = $signed({2'b00, prow16}) - (sb == S_I16 ? 6'sd7 : 6'sd3);
 always @(posedge clk) begin
 	if (ph != 1) begin nrow = 0; ngrp = 0; end
 	else if (sb == S_I16 ? pgrp == 3 : pgrp[0]) begin nrow = prow16 + 1'd1; ngrp = 0; end
 	else begin nrow = prow16; ngrp = pgrp + 1'd1; end
 	byy = nrow;
 	bp_pl <= !pcm && (sb == S_I16 ? i16mode == 3 : cmode == 3);
-	bp_y <= sb == S_I16 ? pa + pc * (byy - 7) + 16 : pa + pc * (byy - 3) + 16;
+	// plane row term pa + pc * (nrow - 7 or 3) + 16, with nrow = 0, prow16 or
+	// prow16 + 1: the three values are made apart and nrow only picks one
+	// (keeps nrow's logic out of the multiplier)
+	if (ph != 1) bp_y <= pa + 20'sd16 - (sb == S_I16 ? (pc <<< 3) - pc : (pc <<< 2) - pc);
+	else if (sb == S_I16 ? pgrp == 3 : pgrp[0]) bp_y <= pa + pc * (prow_o + 1) + 20'sd16;
+	else bp_y <= pa + pc * prow_o + 20'sd16;
 	for (pp = 0; pp < 4; pp = pp + 1) begin
 		bxx = ngrp * 4 + pp;
 		bp_x[pp] <= sb == S_I16 ? pb * (bxx - 7) : pb * (bxx - 3);
