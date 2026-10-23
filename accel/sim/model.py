@@ -354,6 +354,12 @@ def chroma_pel(ref, W, H, x0, y0, mvx, mvy, w, h):
     return out
 
 
+def biweight(A, B, w0, w1, o, d):
+    # FFmpeg biweight: ((a w0 + b w1 + ((o + 1) | 1) << d) >> (d + 1)), clipped
+    off = ((o + 1) | 1) << d
+    return [[clip((a * w0 + b * w1 + off) >> (d + 1)) for a, b in zip(ra, rb)] for ra, rb in zip(A, B)]
+
+
 def weight(P, w, o, d):
     for row in P:
         for i, v in enumerate(row):
@@ -439,7 +445,7 @@ class Engine:
             k = 6
         else:
             refw = words[2:6]
-            mvs = [words[6 + i] for i in range(32)]
+            mvs = [words[6 + i] for i in range(32)]   # list 0, then list 1
             k = 38
         n = words[k]
         coef = {}
@@ -490,22 +496,47 @@ class Engine:
             for b in range(16):
                 bx, by = blk4_pos(b)
                 q = (by >> 3) * 2 + (bx >> 3)
-                r0 = refw[q] & 0x7F
-                if r0 & 0x40:
-                    raise ValueError('B or no list 0 in phase 1')
-                rs, lw, lo, cw = self.refs[0][r0]
-                ref = self.frames[rs]
-                mvx = s16(mvs[b])
-                mvy = s16(mvs[b] >> 16)
-                P = luma_qpel(ref[0], self.W, self.H, X + bx, Y + by, mvx, mvy, 4, 4)
-                if self.use_w:
-                    weight(P, lw, lo, self.ld)
+                rr = (refw[q] & 0x7F, (refw[q] >> 7) & 0x7F)
+                iw0 = s9(refw[q] >> 16)            # implicit weight of list 0
+                preds = []
+                for l in (0, 1):
+                    if rr[l] & 0x40:
+                        continue
+                    rs, lw, lo, cw = self.refs[l][rr[l]]
+                    ref = self.frames[rs]
+                    mv = mvs[l * 16 + b]
+                    mvx = s16(mv)
+                    mvy = s16(mv >> 16)
+                    P = luma_qpel(ref[0], self.W, self.H, X + bx, Y + by, mvx, mvy, 4, 4)
+                    C = [chroma_pel(ref[p], self.W // 2, self.H // 2, (X + bx) // 2, (Y + by) // 2, mvx, mvy, 2, 2)
+                         for p in (1, 2)]
+                    preds.append((P, C, lw, lo, cw))
+                if not preds:
+                    raise ValueError('inter block without a list')
+                if len(preds) == 1:
+                    P, C, lw, lo, cw = preds[0]
+                    if self.use_w == 1:
+                        weight(P, lw, lo, self.ld)
+                    if self.use_w == 1 and self.use_wc:
+                        for p in (1, 2):
+                            weight(C[p - 1], cw[p - 1][0], cw[p - 1][1], self.cd)
+                else:
+                    self.count('bi')
+                    (P0, C0, lw0, lo0, cw0), (P1, C1, lw1, lo1, cw1) = preds
+                    if self.use_w == 2:
+                        pl = (iw0, 64 - iw0, 0, 5)
+                        pc = [pl, pl]
+                    elif self.use_w == 1:
+                        pl = (lw0, lw1, lo0 + lo1, self.ld)
+                        pc = [(cw0[k][0], cw1[k][0], cw0[k][1] + cw1[k][1], self.cd) for k in (0, 1)]
+                    else:
+                        pl = (1, 1, 0, 0)
+                        pc = [pl, pl]
+                    P = biweight(P0, P1, *pl)
+                    C = [biweight(C0[k], C1[k], *pc[k]) for k in (0, 1)]
                 self.put(0, X + bx, Y + by, P)
                 for p in (1, 2):
-                    C = chroma_pel(ref[p], self.W // 2, self.H // 2, (X + bx) // 2, (Y + by) // 2, mvx, mvy, 2, 2)
-                    if self.use_wc:
-                        weight(C, cw[p - 1][0], cw[p - 1][1], self.cd)
-                    self.put(p, (X + bx) // 2, (Y + by) // 2, C)
+                    self.put(p, (X + bx) // 2, (Y + by) // 2, C[p - 1])
             if t8:
                 for b in (0, 4, 8, 12):
                     if b in coef:

@@ -1,7 +1,7 @@
 diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_accdump.c ffmpeg-host-src/libavcodec/h264_accdump.c
 --- a/libavcodec/h264_accdump.c
 +++ b/libavcodec/h264_accdump.c
-@@ -0,0 +1,164 @@
+@@ -0,0 +1,169 @@
 +/* MiSTer MediaCenter FPGA accelerator, phase 1 test bench only (host build):
 + * with MC_ACCDUMP=<prefix> the H.264 decoder writes, for every picture, the
 + * commands the ARM would send to the FPGA (<prefix>.cmd, 32-bit words, see
@@ -136,6 +136,11 @@ diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_accdump.c ffmpeg-host-src/lib
 +            int r0 = USES_LIST(mb_type, 0) ? sl->ref_cache[0][scan8[i * 4]] : -1;
 +            int r1 = sl->list_count > 1 && USES_LIST(mb_type, 1) ? sl->ref_cache[1][scan8[i * 4]] : -1;
 +            refs |= ((r0 & 0x3F) | (r0 < 0) << 6 | (uint32_t)((r1 & 0x3F) | (r1 < 0) << 6) << 7) << 0;
++            // both lists with implicit weights: weight of list 0 (list 1 is 64 - it)
++            if (r0 >= 0 && r1 >= 0 && sl->pwt.use_weight == 2)
++                refs |= (uint32_t)(sl->pwt.implicit_weight[r0][r1][sl->mb_y & 1] & 0x1FF) << 16;
++            else
++                refs |= 32u << 16;
 +            acc_w(refs), refs = 0;
 +        }
 +        for (int l = 0; l < 2; l++)
