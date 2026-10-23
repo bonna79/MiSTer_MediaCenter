@@ -247,16 +247,23 @@ wire [31:0] c_mv = c_l ? `MV1OF(c_bi) : `MVOF(c_bi);
 wire       c_two = use0[c_rq] && use1[c_rq];
 
 // Weighting of the pass, per plane (0 Y, 1 U, 2 V), worked out from the
-// weights of quadrant c_rq (two clocks after c_rq, c_l change; used from
+// weights of quadrant c_rq (three clocks after c_rq, c_l change; used from
 // the first group of the pass on, several clocks later):
 //   px = clip(((pred * wA + p0 * wB + K) >>> sh) + o)
 // with p0 the list 0 prediction kept by the first pass (second pass only).
+reg  [1:0] wq;                // c_rq a clock later (its own copy, few loads)
+reg        wl, wl2, wtwo, wtwo2;
 reg [50:0] wsel0, wsel1;      // weights of the two references of quadrant c_rq
 reg signed [8:0] iwsel;
 always @(posedge clk) begin
-	wsel0 <= qwt[c_rq * 51 +: 51];
-	wsel1 <= qwt1[c_rq * 51 +: 51];
-	iwsel <= iw[c_rq * 9 +: 9];
+	wq <= c_rq;
+	wl <= c_l;
+	wtwo <= c_two;
+	wl2 <= wl;
+	wtwo2 <= wtwo;
+	wsel0 <= qwt[wq * 51 +: 51];
+	wsel1 <= qwt1[wq * 51 +: 51];
+	iwsel <= iw[wq * 9 +: 9];
 end
 
 function signed [8:0] wof(input [50:0] ws, input [1:0] j);   // weight of plane j
@@ -276,15 +283,15 @@ always @(posedge clk) begin
 	for (j = 0; j < 3; j = j + 1) begin
 		jd = j == 0 ? lden : cden;
 		pwA[j] <= 9'sd1; pwB[j] <= 9'sd0; pK[j] <= 19'sd0; psh[j] <= 0; po[j] <= 8'sd0;
-		if (!c_two) begin
+		if (!wtwo2) begin
 			if (use_w == 1 && (j == 0 || use_wc)) begin
-				pwA[j] <= c_l ? wof(wsel1, 2'(j)) : wof(wsel0, 2'(j));
+				pwA[j] <= wl2 ? wof(wsel1, 2'(j)) : wof(wsel0, 2'(j));
 				pK[j] <= jd != 0 ? 19'sd1 <<< (jd - 1'd1) : 19'sd0;
 				psh[j] <= jd;
-				po[j] <= c_l ? oof(wsel1, 2'(j)) : oof(wsel0, 2'(j));
+				po[j] <= wl2 ? oof(wsel1, 2'(j)) : oof(wsel0, 2'(j));
 			end
 		end
-		else if (c_l) begin
+		else if (wl2) begin
 			if (use_w == 2) begin
 				pwA[j] <= 9'sd64 - iwsel; pwB[j] <= iwsel; pK[j] <= 19'sd32; psh[j] <= 6;
 			end
@@ -342,8 +349,10 @@ always @(posedge clk) cwin_q <= cwin[{c_b, plane[1], cwin_addr}];
 //   2 half samples b, h clipped, raw centre sum j; chroma: sum, round
 //   3 j clipped
 //   4 quarter sample (select, average)
-//   5 weight multiply (with the list 0 prediction from p0 in a second pass)
-//   6 weight shift, offset, clip -> px (or into p0 in a first pass)
+//   5 weight multiplies (also the list 0 prediction from p0 in a second pass)
+//   6 sum of the products and the rounding
+//   7 weight shift
+//   8 offset, clip -> px (or into p0 in a first pass)
 
 function signed [14:0] tap(input [7:0] a, b, c, d, e, f);
 	tap = $signed({7'd0, a}) + $signed({7'd0, f}) - 15'sd5 * ($signed({7'd0, b}) + $signed({7'd0, e}))
@@ -378,13 +387,13 @@ reg signed [8:0] swa0, swb0;
 reg signed [18:0] sk0;
 reg signed [7:0] so0;
 reg  [6:0] ska0, skb0, skc0, skd0;
-reg        sv[1:6], sc[1:6], sfst[1:6], ssec[1:6];
-reg  [1:0] spl[1:6];
-reg  [3:0] sx[1:6], sy[1:6], sf[1:6], ssh[1:6];
-reg  [2:0] sn_[1:6];
-reg signed [8:0] swa[1:6], swb[1:6];
-reg signed [18:0] sk[1:6];
-reg signed [7:0] so[1:6];
+reg        sv[1:8], sc[1:8], sfst[1:8], ssec[1:8];
+reg  [1:0] spl[1:8];
+reg  [3:0] sx[1:8], sy[1:8], sf[1:8], ssh[1:8];
+reg  [2:0] sn_[1:8];
+reg signed [8:0] swa[1:8], swb[1:8];
+reg signed [18:0] sk[1:8];
+reg signed [7:0] so[1:8];
 
 reg  [7:0] nb[6][9];          // stage 0 samples
 
@@ -399,7 +408,9 @@ reg  [7:0] cv[2:3][4];
 
 reg  [7:0] jj[4];             // stage 3
 reg  [7:0] vq[4];             // stage 4
-reg signed [19:0] mq[4];      // stage 5
+reg signed [17:0] pa[4], pb[4];   // stage 5
+reg signed [19:0] mq[4];      // stage 6
+reg signed [19:0] ms_[4];     // stage 7
 
 // list 0 prediction of a two-list region, kept by the first pass: one word
 // per group of 4 pixels, written as it comes out of stage 6, read for the
@@ -415,14 +426,14 @@ acc_ram #(.W(32), .A(7)) p0ram
 	.ra(p0a(spl[3], sx[3], sy[3])), .q(p0q)
 );
 
-wire pipe_busy = sv0 || sv[1] || sv[2] || sv[3] || sv[4] || sv[5] || px_valid || p0_we;
+wire pipe_busy = sv0 || sv[1] || sv[2] || sv[3] || sv[4] || sv[5] || sv[6] || sv[7] || px_valid || p0_we;
 
 integer p, r, k;
 always @(posedge clk) begin
 	sv[1] <= sv0; sc[1] <= sc0; spl[1] <= spl0; sx[1] <= sx0; sy[1] <= sy0; sn_[1] <= sn_0;
 	sf[1] <= sf0; sfst[1] <= sfst0; ssec[1] <= ssec0; swa[1] <= swa0; swb[1] <= swb0;
 	sk[1] <= sk0; ssh[1] <= ssh0; so[1] <= so0;
-	for (k = 2; k < 7; k = k + 1) begin
+	for (k = 2; k < 9; k = k + 1) begin
 		sv[k] <= sv[k - 1]; sc[k] <= sc[k - 1]; spl[k] <= spl[k - 1];
 		sx[k] <= sx[k - 1]; sy[k] <= sy[k - 1]; sn_[k] <= sn_[k - 1]; sf[k] <= sf[k - 1];
 		sfst[k] <= sfst[k - 1]; ssec[k] <= ssec[k - 1]; swa[k] <= swa[k - 1]; swb[k] <= swb[k - 1];
@@ -474,18 +485,22 @@ always @(posedge clk) begin
 			default:  vq[p] <= 8'((9'(jj[p]) + hh1[3][p] + 1) >> 1);
 		endcase
 		// 5
-		mq[p] <= $signed({12'd0, vq[p]}) * 20'(swa[4]) +
-		         (ssec[4] ? $signed({12'd0, p0q[p * 8 +: 8]}) * 20'(swb[4]) : 20'sd0) + 20'(sk[4]);
+		pa[p] <= $signed({10'd0, vq[p]}) * 18'(swa[4]);
+		pb[p] <= ssec[4] ? $signed({10'd0, p0q[p * 8 +: 8]}) * 18'(swb[4]) : 18'sd0;
 		// 6
-		px[p * 8 +: 8] <= clip8s(22'(mq[p] >>> ssh[5]) + 22'(so[5]));
+		mq[p] <= 20'(pa[p]) + 20'(pb[p]) + 20'(sk[5]);
+		// 7
+		ms_[p] <= mq[p] >>> ssh[6];
+		// 8
+		px[p * 8 +: 8] <= clip8s(22'(ms_[p]) + 22'(so[7]));
 	end
 
-	px_valid <= sv[5] && !sfst[5];
-	p0_we <= sv[5] && sfst[5];
-	px_plane <= spl[5];
-	px_x <= sx[5];
-	px_y <= sy[5];
-	px_n <= sn_[5];
+	px_valid <= sv[7] && !sfst[7];
+	p0_we <= sv[7] && sfst[7];
+	px_plane <= spl[7];
+	px_x <= sx[7];
+	px_y <= sy[7];
+	px_n <= sn_[7];
 end
 
 // ---------------------------------------------------------------- control
@@ -756,7 +771,7 @@ initial begin
 	r2_v = 0;
 	fin = 0;
 	sv0 = 0;
-	for (i = 1; i < 7; i = i + 1) sv[i] = 0;
+	for (i = 1; i < 9; i = i + 1) sv[i] = 0;
 	px_valid = 0;
 	p0_we = 0;
 	fs = F_IDLE;
