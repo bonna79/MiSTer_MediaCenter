@@ -63,10 +63,11 @@ reg  [2:0] a_mtype;
 reg  [3:0] a_imode[16];
 reg [15:0] a_tr, a_tl;
 reg  [3:0] a_cmode, a_i16mode;
-reg  [6:0] a_qref[4];
-reg [31:0] a_mv[16];
-reg  [7:0] a_q_slot[4];
-reg [50:0] a_q_wt[4];
+reg [13:0] a_qref[4];
+reg  [8:0] a_iw[4];
+reg [31:0] a_mv[16], a_mv1[16];
+reg  [7:0] a_q_slot[4], a_q_slot1[4];
+reg [50:0] a_q_wt[4], a_q_wt1[4];
 
 reg  [7:0] wmb, hmb;          // picture size in macroblocks
 reg  [7:0] cur_slot;
@@ -78,10 +79,11 @@ reg        t8;
 reg  [3:0] imode[16];
 reg [15:0] tr_mask, tl_mask;
 reg  [3:0] cmode, i16mode;
-reg  [6:0] qref[4];           // reference of each 8x8 (list 0), bit 6 = unused
-reg [31:0] mv[16];
+reg [13:0] qref[4];           // reference of each 8x8: list 0 bits 0-5, list 1 bits 7-12, bits 6 and 13 = list unused
+reg  [8:0] iw[4];             // implicit weight of list 0 of each 8x8
+reg [31:0] mv[16], mv1[16];
 
-// reference list 0 (list 1 kept for B pictures, phase 2)
+// reference lists
 reg  [5:0] n0, n1;
 reg        two_lists;
 reg  [1:0] use_w;
@@ -394,14 +396,15 @@ wire [7:0] mc_burst;
 
 // per 8x8 quadrant: slot and weights of its reference (read from the
 // reference table as the reference indexes arrive)
-reg  [7:0] q_slot[4];
-reg [50:0] q_wt[4];
+reg  [7:0] q_slot[4], q_slot1[4];
+reg [50:0] q_wt[4], q_wt1[4];
 genvar gq;
 
-wire [511:0] mv_flat;
+wire [511:0] mv_flat, mv1_flat;
 generate
 	for (gq = 0; gq < 16; gq = gq + 1) begin : mvf
 		assign mv_flat[gq * 32 +: 32] = mv[gq];
+		assign mv1_flat[gq * 32 +: 32] = mv1[gq];
 	end
 endgenerate
 
@@ -410,11 +413,14 @@ acc_mc #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRID
 	.clk(clk),
 	.start(mc_start),
 	.mbx(mbx), .mby(mby), .wmb(wmb), .hmb(hmb),
-	.mvs(mv_flat),
-	.qref({qref[3][5:0], qref[2][5:0], qref[1][5:0], qref[0][5:0]}),
+	.mvs(mv_flat), .mvs1(mv1_flat),
+	.qref({qref[3], qref[2], qref[1], qref[0]}),
+	.iw({iw[3], iw[2], iw[1], iw[0]}),
 	.qslot({q_slot[3], q_slot[2], q_slot[1], q_slot[0]}),
+	.qslot1({q_slot1[3], q_slot1[2], q_slot1[1], q_slot1[0]}),
 	.qwt({q_wt[3], q_wt[2], q_wt[1], q_wt[0]}),
-	.use_w(use_w[0]), .use_wc(use_wc), .lden(lden), .cden(cden),
+	.qwt1({q_wt1[3], q_wt1[2], q_wt1[1], q_wt1[0]}),
+	.use_w(use_w), .use_wc(use_wc), .lden(lden), .cden(cden),
 	.mem_rd(mc_rd), .mem_addr(mc_addr), .mem_burst(mc_burst), .mem_busy(mem_busy || wb_we),
 	.mem_dout(mem_dout), .mem_dout_ready(mem_dout_ready),
 	.px_valid(mc_px_valid), .px_plane(mc_px_plane), .px_x(mc_px_x), .px_y(mc_px_y), .px_n(mc_px_n), .px(mc_px),
@@ -555,19 +561,27 @@ always @* begin
 		px_d[pk * 8 +: 8] = clip8($signed({12'd0, px_pr[pk * 8 +: 8]}) + $signed({{10{res_q[pk * 10 + 9]}}, res_q[pk * 10 +: 10]}));
 end
 
-// reference table (list 0) in block RAM: {slot, lw, lo}, cb, cr
-wire       rt_we = sa == S_REFS && cmd_valid && !rlist;
-reg [24:0] rt_a[32];
-reg [16:0] rt_b[32], rt_c[32];
-reg [24:0] rt_aq;
-reg [16:0] rt_bq, rt_cq;
+// reference tables (list 0, list 1) in block RAM: {slot, lw, lo}, cb, cr
+wire       rt_we = sa == S_REFS && cmd_valid;
+reg [24:0] rt_a[32], rt1_a[32];
+reg [16:0] rt_b[32], rt_c[32], rt1_b[32], rt1_c[32];
+reg [24:0] rt_aq, rt1_aq;
+reg [16:0] rt_bq, rt_cq, rt1_bq, rt1_cq;
 always @(posedge clk) begin
-	if (rt_we && rword == 0) rt_a[ridx[4:0]] <= cmd_data[24:0];
-	if (rt_we && rword == 1) rt_b[ridx[4:0]] <= cmd_data[16:0];
-	if (rt_we && rword == 2) rt_c[ridx[4:0]] <= cmd_data[16:0];
+	if (rt_we && !rlist && rword == 0) rt_a[ridx[4:0]] <= cmd_data[24:0];
+	if (rt_we && !rlist && rword == 1) rt_b[ridx[4:0]] <= cmd_data[16:0];
+	if (rt_we && !rlist && rword == 2) rt_c[ridx[4:0]] <= cmd_data[16:0];
 	rt_aq <= rt_a[cmd_data[4:0]];
 	rt_bq <= rt_b[cmd_data[4:0]];
 	rt_cq <= rt_c[cmd_data[4:0]];
+end
+always @(posedge clk) begin
+	if (rt_we && rlist && rword == 0) rt1_a[ridx[4:0]] <= cmd_data[24:0];
+	if (rt_we && rlist && rword == 1) rt1_b[ridx[4:0]] <= cmd_data[16:0];
+	if (rt_we && rlist && rword == 2) rt1_c[ridx[4:0]] <= cmd_data[16:0];
+	rt1_aq <= rt1_a[cmd_data[11:7]];
+	rt1_bq <= rt1_b[cmd_data[11:7]];
+	rt1_cq <= rt1_c[cmd_data[11:7]];
 end
 reg        rt_cap;
 reg  [1:0] rt_k;
@@ -577,6 +591,8 @@ always @(posedge clk) begin
 	if (rt_cap) begin
 		a_q_slot[rt_k] <= rt_aq[7:0];
 		a_q_wt[rt_k] <= {rt_aq[16:8], rt_aq[24:17], rt_bq, rt_cq};
+		a_q_slot1[rt_k] <= rt1_aq[7:0];
+		a_q_wt1[rt_k] <= {rt1_aq[16:8], rt1_aq[24:17], rt1_bq, rt1_cq};
 	end
 end
 
@@ -749,8 +765,12 @@ always @(posedge clk) begin
 				if (icnt == 3) sa <= S_NCOEF;
 			end
 			else begin
-				if (icnt < 4) a_qref[icnt[1:0]] <= cmd_data[6:0];
+				if (icnt < 4) begin
+					a_qref[icnt[1:0]] <= cmd_data[13:0];
+					a_iw[icnt[1:0]] <= cmd_data[24:16];
+				end
 				else if (icnt < 20) a_mv[icnt - 4] <= cmd_data;
+				else a_mv1[icnt - 20] <= cmd_data;
 				if (icnt == 35) sa <= S_NCOEF;
 			end
 		end
@@ -825,10 +845,16 @@ always @(posedge clk) begin
 			i16mode <= a_i16mode;
 			for (i = 0; i < 4; i = i + 1) begin
 				qref[i] <= a_qref[i];
+				iw[i] <= a_iw[i];
 				q_slot[i] <= a_q_slot[i];
 				q_wt[i] <= a_q_wt[i];
+				q_slot1[i] <= a_q_slot1[i];
+				q_wt1[i] <= a_q_wt1[i];
 			end
-			for (i = 0; i < 16; i = i + 1) mv[i] <= a_mv[i];
+			for (i = 0; i < 16; i = i + 1) begin
+				mv[i] <= a_mv[i];
+				mv1[i] <= a_mv1[i];
+			end
 			bbuf <= abuf;
 			abuf <= ~abuf;
 			sb <= S_CTX;

@@ -1,14 +1,18 @@
-// Inter prediction of one P macroblock for acc_engine: quarter-sample luma
-// (6-tap filter), eighth-sample chroma (bilinear), explicit weighting, with
-// the reference picture read from DDR and its edges repeated (clamping).
+// Inter prediction of one P or B macroblock for acc_engine: quarter-sample
+// luma (6-tap filter), eighth-sample chroma (bilinear), explicit and
+// implicit weighting, bi-prediction, with the reference picture read from
+// DDR and its edges repeated (clamping).
 //
-// The macroblock is split into regions with one vector each: 16x16 when all
-// 16 vectors and references are equal, else 8x8 quadrants, else 4x4 blocks.
-// Fetch and calculation run apart on two window buffers: while the
-// prediction of one region is calculated, the reference windows (Y, U, V)
-// of the next region are already being read. The luma prediction of a
-// region starts as soon as its luma window is in. Prediction comes out 4
-// pixels a clock on px_*.
+// The macroblock is split into regions with one vector per list: 16x16 when
+// all 16 vectors and references are equal, else 8x8 quadrants, else 4x4
+// blocks. Each region is done once per list it uses (a pass). With two
+// lists, the first pass (list 0) keeps its raw prediction in a small RAM
+// (p0) and the second pass (list 1) combines it with its own: weighted
+// average as FFmpeg's biweight. Fetch and calculation run apart on two
+// window buffers: while the prediction of one pass is calculated, the
+// reference windows (Y, U, V) of the next pass are already being read. The
+// luma prediction of a pass starts as soon as its luma window is in.
+// Prediction comes out 4 pixels a clock on px_*.
 module acc_mc #(
 	parameter AW         = 28,
 	parameter SLOT_L2    = 19,
@@ -21,11 +25,15 @@ module acc_mc #(
 	input              clk,
 	input              start,
 	input        [7:0] mbx, mby, wmb, hmb,
-	input      [511:0] mvs,      // 16 x {y, x}, quarter samples, luma4x4BlkIdx order
-	input       [23:0] qref,     // reference index of each 8x8
-	input       [31:0] qslot,    // picture slot of each 8x8
-	input      [203:0] qwt,      // weights of each 8x8: lw 9, lo 8, cb {o 8, w 9}, cr {o 8, w 9}
-	input              use_w,
+	input      [511:0] mvs,      // list 0: 16 x {y, x}, quarter samples, luma4x4BlkIdx order
+	input      [511:0] mvs1,     // list 1
+	input       [55:0] qref,     // each 8x8: list 0 index (bit 6 = unused), list 1 index << 7 (bit 13 = unused)
+	input       [35:0] iw,       // implicit weight of list 0, each 8x8
+	input       [31:0] qslot,    // picture slot of each 8x8, list 0
+	input       [31:0] qslot1,   // list 1
+	input      [203:0] qwt,      // weights of each 8x8, list 0: lw 9, lo 8, cb {o 8, w 9}, cr {o 8, w 9}
+	input      [203:0] qwt1,     // list 1
+	input        [1:0] use_w,    // 0 none, 1 explicit, 2 implicit
 	input              use_wc,
 	input        [3:0] lden, cden,
 
@@ -55,12 +63,18 @@ endfunction
 // vector of 4x4 block b (a macro, not a function, so that simulators see
 // mvs in the sensitivity)
 `define MVOF(b) mvs[(b) * 32 +: 32]
+`define MV1OF(b) mvs1[(b) * 32 +: 32]
 
 integer i;
 
+// lists used by each 8x8
+wire [3:0] use0 = ~{qref[48], qref[34], qref[20], qref[6]};
+wire [3:0] use1 = ~{qref[55], qref[41], qref[27], qref[13]};
+
 // ----------------------------------------------------------- region plan
-// Regions in order: quadrant rq, 4x4 block rk inside it. The fetch side (f_)
-// and the calculation side (c_) each walk the same list.
+// Passes in order: quadrant rq, 4x4 block rk inside it, list l (0 then 1,
+// the ones used). The fetch side (f_) and the calculation side (c_) each
+// walk the same list.
 
 reg        all16;
 reg  [3:0] quad_eq;
@@ -74,12 +88,14 @@ endfunction
 localparam F_IDLE = 0, F_REGION = 1, F_SETUP = 2, F_REQ = 3, F_NEXT = 4, F_SW = 5, F_REQ0 = 6;
 reg  [2:0] fs;
 reg  [1:0] f_rq, f_rk;
+reg        f_l;
 reg        f_b;               // window buffer being filled
 reg  [4:0] f_S;
 reg  [3:0] f_rx, f_ry;
 reg signed [15:0] f_mvx, f_mvy;
 reg  [7:0] f_slot;
-wire [31:0] f_mv = all16 || quad_eq[f_rq] ? `MVOF({f_rq, 2'b00}) : `MVOF({f_rq, f_rk});
+wire [3:0] f_bi = all16 || quad_eq[f_rq] ? {f_rq, 2'b00} : {f_rq, f_rk};
+wire [31:0] f_mv = f_l ? `MV1OF(f_bi) : `MVOF(f_bi);
 
 reg        bused[2];          // buffer holds a region not yet calculated
 
@@ -220,17 +236,69 @@ localparam M_IDLE = 0, M_REGION = 1, M_WAITY = 3, M_LLOAD = 4, M_LCALC = 5, M_WA
            M_CCALC = 7, M_NEXT = 8, M_CLOAD = 9;
 reg  [3:0] ms;
 reg  [1:0] c_rq, c_rk;
+reg        c_l;
 reg        c_b;
 reg  [4:0] S;                 // region size 16, 8, 4
 reg  [3:0] rx, ry;            // region position in the macroblock
 reg signed [15:0] mvx, mvy;
-reg  [8:0] lw;
-reg  [7:0] lo;
-reg [16:0] cwu, cwv;
 reg  [1:0] plane;             // chroma plane being predicted: 1 U, 2 V
-reg [50:0] wsel;              // weights of quadrant c_rq
-always @(posedge clk) wsel <= qwt[c_rq * 51 +: 51];
-wire [31:0] c_mv = all16 || quad_eq[c_rq] ? `MVOF({c_rq, 2'b00}) : `MVOF({c_rq, c_rk});
+wire [3:0] c_bi = all16 || quad_eq[c_rq] ? {c_rq, 2'b00} : {c_rq, c_rk};
+wire [31:0] c_mv = c_l ? `MV1OF(c_bi) : `MVOF(c_bi);
+wire       c_two = use0[c_rq] && use1[c_rq];
+
+// Weighting of the pass, per plane (0 Y, 1 U, 2 V), worked out from the
+// weights of quadrant c_rq (two clocks after c_rq, c_l change; used from
+// the first group of the pass on, several clocks later):
+//   px = clip(((pred * wA + p0 * wB + K) >>> sh) + o)
+// with p0 the list 0 prediction kept by the first pass (second pass only).
+reg [50:0] wsel0, wsel1;      // weights of the two references of quadrant c_rq
+reg signed [8:0] iwsel;
+always @(posedge clk) begin
+	wsel0 <= qwt[c_rq * 51 +: 51];
+	wsel1 <= qwt1[c_rq * 51 +: 51];
+	iwsel <= iw[c_rq * 9 +: 9];
+end
+
+function signed [8:0] wof(input [50:0] ws, input [1:0] j);   // weight of plane j
+	wof = j == 0 ? ws[50:42] : (j == 1 ? ws[25:17] : ws[8:0]);
+endfunction
+function signed [7:0] oof(input [50:0] ws, input [1:0] j);   // offset of plane j
+	oof = j == 0 ? ws[41:34] : (j == 1 ? ws[33:26] : ws[16:9]);
+endfunction
+
+reg signed [8:0] pwA[3], pwB[3];
+reg signed [18:0] pK[3];
+reg  [3:0] psh[3];
+reg signed [7:0] po[3];
+integer j;
+reg  [3:0] jd;
+always @(posedge clk) begin
+	for (j = 0; j < 3; j = j + 1) begin
+		jd = j == 0 ? lden : cden;
+		pwA[j] <= 9'sd1; pwB[j] <= 9'sd0; pK[j] <= 19'sd0; psh[j] <= 0; po[j] <= 8'sd0;
+		if (!c_two) begin
+			if (use_w == 1 && (j == 0 || use_wc)) begin
+				pwA[j] <= c_l ? wof(wsel1, 2'(j)) : wof(wsel0, 2'(j));
+				pK[j] <= jd != 0 ? 19'sd1 <<< (jd - 1'd1) : 19'sd0;
+				psh[j] <= jd;
+				po[j] <= c_l ? oof(wsel1, 2'(j)) : oof(wsel0, 2'(j));
+			end
+		end
+		else if (c_l) begin
+			if (use_w == 2) begin
+				pwA[j] <= 9'sd64 - iwsel; pwB[j] <= iwsel; pK[j] <= 19'sd32; psh[j] <= 6;
+			end
+			else if (use_w == 1) begin
+				pwA[j] <= wof(wsel1, 2'(j)); pwB[j] <= wof(wsel0, 2'(j));
+				pK[j] <= ((19'(oof(wsel0, 2'(j))) + 19'(oof(wsel1, 2'(j))) + 19'sd1) | 19'sd1) <<< jd;
+				psh[j] <= jd + 1'd1;
+			end
+			else begin
+				pwB[j] <= 9'sd1; pK[j] <= 19'sd1; psh[j] <= 1;
+			end
+		end
+	end
+end
 
 // luma rows: output row ly comes from window rows ly .. ly + 5, kept in
 // lw6; groups of 4 pixels (lg) are done one a clock, then the rows move up
@@ -274,8 +342,8 @@ always @(posedge clk) cwin_q <= cwin[{c_b, plane[1], cwin_addr}];
 //   2 half samples b, h clipped, raw centre sum j; chroma: sum, round
 //   3 j clipped
 //   4 quarter sample (select, average)
-//   5 weight multiply
-//   6 weight shift, offset, clip -> px
+//   5 weight multiply (with the list 0 prediction from p0 in a second pass)
+//   6 weight shift, offset, clip -> px (or into p0 in a first pass)
 
 function signed [14:0] tap(input [7:0] a, b, c, d, e, f);
 	tap = $signed({7'd0, a}) + $signed({7'd0, f}) - 15'sd5 * ($signed({7'd0, b}) + $signed({7'd0, e}))
@@ -299,20 +367,23 @@ always @(posedge clk) begin
 	kd <= cxf * cyf;
 end
 
-// stage tags: valid, chroma, plane, x, y, n, fraction, weights (stage 0
-// is written by the calculation side, stages 1..6 here)
-reg        sv0, sc0, suw0;
+// stage tags: valid, chroma, plane, x, y, n, fraction, pass (first of two,
+// second of two), weighting (stage 0 is written by the calculation side,
+// stages 1..6 here)
+reg        sv0, sc0, sfst0, ssec0;
 reg  [1:0] spl0;
-reg  [3:0] sx0, sy0, sf0, sd0;
+reg  [3:0] sx0, sy0, sf0, ssh0;
 reg  [2:0] sn_0;
-reg signed [8:0] sw0;
+reg signed [8:0] swa0, swb0;
+reg signed [18:0] sk0;
 reg signed [7:0] so0;
 reg  [6:0] ska0, skb0, skc0, skd0;
-reg        sv[1:6], sc[1:6], suw[1:6];
+reg        sv[1:6], sc[1:6], sfst[1:6], ssec[1:6];
 reg  [1:0] spl[1:6];
-reg  [3:0] sx[1:6], sy[1:6], sf[1:6], sd[1:6];
+reg  [3:0] sx[1:6], sy[1:6], sf[1:6], ssh[1:6];
 reg  [2:0] sn_[1:6];
-reg signed [8:0] sw[1:6];
+reg signed [8:0] swa[1:6], swb[1:6];
+reg signed [18:0] sk[1:6];
 reg signed [7:0] so[1:6];
 
 reg  [7:0] nb[6][9];          // stage 0 samples
@@ -328,18 +399,34 @@ reg  [7:0] cv[2:3][4];
 
 reg  [7:0] jj[4];             // stage 3
 reg  [7:0] vq[4];             // stage 4
-reg signed [17:0] mq[4];      // stage 5
+reg signed [19:0] mq[4];      // stage 5
 
-wire pipe_busy = sv0 || sv[1] || sv[2] || sv[3] || sv[4] || sv[5] || px_valid;
+// list 0 prediction of a two-list region, kept by the first pass: one word
+// per group of 4 pixels, written as it comes out of stage 6, read for the
+// same group of the second pass at stage 3 (data with stage 4)
+function [6:0] p0a(input [1:0] pl, input [3:0] x, input [3:0] y);
+	p0a = pl == 0 ? {1'b0, y, x[3:2]} : {1'b1, pl[1], y[2:0], x[2:1]};
+endfunction
+reg         p0_we;
+wire [31:0] p0q;
+acc_ram #(.W(32), .A(7)) p0ram
+(
+	.clk(clk), .we(p0_we), .wa(p0a(px_plane, px_x, px_y)), .wd(px),
+	.ra(p0a(spl[3], sx[3], sy[3])), .q(p0q)
+);
+
+wire pipe_busy = sv0 || sv[1] || sv[2] || sv[3] || sv[4] || sv[5] || px_valid || p0_we;
 
 integer p, r, k;
 always @(posedge clk) begin
 	sv[1] <= sv0; sc[1] <= sc0; spl[1] <= spl0; sx[1] <= sx0; sy[1] <= sy0; sn_[1] <= sn_0;
-	sf[1] <= sf0; suw[1] <= suw0; sw[1] <= sw0; so[1] <= so0; sd[1] <= sd0;
+	sf[1] <= sf0; sfst[1] <= sfst0; ssec[1] <= ssec0; swa[1] <= swa0; swb[1] <= swb0;
+	sk[1] <= sk0; ssh[1] <= ssh0; so[1] <= so0;
 	for (k = 2; k < 7; k = k + 1) begin
 		sv[k] <= sv[k - 1]; sc[k] <= sc[k - 1]; spl[k] <= spl[k - 1];
 		sx[k] <= sx[k - 1]; sy[k] <= sy[k - 1]; sn_[k] <= sn_[k - 1]; sf[k] <= sf[k - 1];
-		suw[k] <= suw[k - 1]; sw[k] <= sw[k - 1]; so[k] <= so[k - 1]; sd[k] <= sd[k - 1];
+		sfst[k] <= sfst[k - 1]; ssec[k] <= ssec[k - 1]; swa[k] <= swa[k - 1]; swb[k] <= swb[k - 1];
+		sk[k] <= sk[k - 1]; ssh[k] <= ssh[k - 1]; so[k] <= so[k - 1];
 	end
 
 	for (p = 0; p < 4; p = p + 1) begin
@@ -387,13 +474,14 @@ always @(posedge clk) begin
 			default:  vq[p] <= 8'((9'(jj[p]) + hh1[3][p] + 1) >> 1);
 		endcase
 		// 5
-		mq[p] <= !suw[4] ? 18'(vq[p]) :
-		         $signed({10'd0, vq[p]}) * 18'(sw[4]) + (sd[4] != 0 ? 18'sd1 <<< (sd[4] - 1'd1) : 18'sd0);
+		mq[p] <= $signed({12'd0, vq[p]}) * 20'(swa[4]) +
+		         (ssec[4] ? $signed({12'd0, p0q[p * 8 +: 8]}) * 20'(swb[4]) : 20'sd0) + 20'(sk[4]);
 		// 6
-		px[p * 8 +: 8] <= !suw[5] ? mq[p][7:0] : clip8s(22'(mq[p] >>> sd[5]) + 22'(so[5]));
+		px[p * 8 +: 8] <= clip8s(22'(mq[p] >>> ssh[5]) + 22'(so[5]));
 	end
 
-	px_valid <= sv[5];
+	px_valid <= sv[5] && !sfst[5];
+	p0_we <= sv[5] && sfst[5];
 	px_plane <= spl[5];
 	px_x <= sx[5];
 	px_y <= sy[5];
@@ -420,7 +508,7 @@ always @(posedge clk) begin
 			else begin f_rx <= {f_rq[0], f_rk[0], 2'd0}; f_ry <= {f_rq[1], f_rk[1], 2'd0}; end
 			f_mvx <= f_mv[15:0];
 			f_mvy <= f_mv[31:16];
-			f_slot <= qslot[f_rq * 8 +: 8];
+			f_slot <= f_l ? qslot1[f_rq * 8 +: 8] : qslot[f_rq * 8 +: 8];
 			fs <= F_SW;
 		end
 
@@ -477,13 +565,18 @@ always @(posedge clk) begin
 		F_NEXT: begin
 			f_b <= ~f_b;
 			fs <= F_REGION;
-			if (all16) fs <= F_IDLE;
+			if (!f_l && use1[f_rq]) f_l <= 1;
+			else if (all16) fs <= F_IDLE;
 			else if (quad_eq[f_rq] || f_rk == 3) begin
 				f_rk <= 0;
 				f_rq <= f_rq + 1'd1;
+				f_l <= !use0[f_rq + 1'd1];
 				if (f_rq == 3) fs <= F_IDLE;
 			end
-			else f_rk <= f_rk + 1'd1;
+			else begin
+				f_rk <= f_rk + 1'd1;
+				f_l <= !use0[f_rq];
+			end
 		end
 
 		default: fs <= F_IDLE;
@@ -514,14 +607,22 @@ always @(posedge clk) begin
 	case (ms)
 		M_IDLE: if (start) begin
 			all16 <= 1;
-			for (i = 1; i < 16; i = i + 1) if (`MVOF(i) != `MVOF(0)) all16 <= 0;
-			if (qref[5:0] != qref[11:6] || qref[5:0] != qref[17:12] || qref[5:0] != qref[23:18]) all16 <= 0;
+			for (i = 1; i < 16; i = i + 1) begin
+				if (use0[0] && `MVOF(i) != `MVOF(0)) all16 <= 0;
+				if (use1[0] && `MV1OF(i) != `MV1OF(0)) all16 <= 0;
+			end
+			if (qref[13:0] != qref[27:14] || qref[13:0] != qref[41:28] || qref[13:0] != qref[55:42]) all16 <= 0;
 			for (i = 0; i < 4; i = i + 1)
-				quad_eq[i] <= `MVOF(i * 4) == `MVOF(i * 4 + 1) && `MVOF(i * 4) == `MVOF(i * 4 + 2) && `MVOF(i * 4) == `MVOF(i * 4 + 3);
+				quad_eq[i] <= (!use0[i] || (`MVOF(i * 4) == `MVOF(i * 4 + 1) && `MVOF(i * 4) == `MVOF(i * 4 + 2) &&
+				                            `MVOF(i * 4) == `MVOF(i * 4 + 3))) &&
+				              (!use1[i] || (`MV1OF(i * 4) == `MV1OF(i * 4 + 1) && `MV1OF(i * 4) == `MV1OF(i * 4 + 2) &&
+				                            `MV1OF(i * 4) == `MV1OF(i * 4 + 3)));
 			c_rq <= 0;
 			c_rk <= 0;
+			c_l <= !use0[0];
 			f_rq <= 0;
 			f_rk <= 0;
+			f_l <= !use0[0];
 			fs <= F_REGION;
 			ms <= M_REGION;
 		end
@@ -538,7 +639,6 @@ always @(posedge clk) begin
 		end
 
 		M_WAITY: if (got[c_b][0]) begin
-			{lw, lo, cwu, cwv} <= wsel;
 			ms <= M_LLOAD;
 			lk <= 0;
 		end
@@ -562,10 +662,9 @@ always @(posedge clk) begin
 			sy0 <= ry + ly;
 			sn_0 <= 4;
 			sf0 <= {xf, yf};
-			suw0 <= use_w;
-			sw0 <= lw;
-			so0 <= lo;
-			sd0 <= lden;
+			sfst0 <= c_two && !c_l;
+			ssec0 <= c_two && c_l;
+			swa0 <= pwA[0]; swb0 <= pwB[0]; sk0 <= pK[0]; ssh0 <= psh[0]; so0 <= po[0];
 			for (r = 0; r < 6; r = r + 1)
 				for (k = 0; k < 9; k = k + 1) nb[r][k] <= lw6[r][(lg * 4 + k) * 8 +: 8];
 			if (lg == lg_last) begin
@@ -606,10 +705,9 @@ always @(posedge clk) begin
 			sy0 <= (ry >> 1) + cr;
 			sn_0 <= S == 4 ? 3'd2 : 3'd4;
 			sf0 <= 0;
-			suw0 <= use_wc;
-			sw0 <= plane == 1 ? cwu[8:0] : cwv[8:0];
-			so0 <= plane == 1 ? cwu[16:9] : cwv[16:9];
-			sd0 <= cden;
+			sfst0 <= c_two && !c_l;
+			ssec0 <= c_two && c_l;
+			swa0 <= pwA[plane]; swb0 <= pwB[plane]; sk0 <= pK[plane]; ssh0 <= psh[plane]; so0 <= po[plane];
 			ska0 <= ka; skb0 <= kb; skc0 <= kc; skd0 <= kd;
 			for (k = 0; k < 5; k = k + 1) begin
 				nb[0][k] <= crow0[(cg * 4 + k) * 8 +: 8];
@@ -634,13 +732,18 @@ always @(posedge clk) begin
 			got[c_b] <= 0;
 			c_b <= ~c_b;
 			ms <= M_REGION;
-			if (all16) begin fin <= 1; ms <= M_IDLE; end
+			if (!c_l && use1[c_rq]) c_l <= 1;
+			else if (all16) begin fin <= 1; ms <= M_IDLE; end
 			else if (quad_eq[c_rq] || c_rk == 3) begin
 				c_rk <= 0;
 				c_rq <= c_rq + 1'd1;
+				c_l <= !use0[c_rq + 1'd1];
 				if (c_rq == 3) begin fin <= 1; ms <= M_IDLE; end
 			end
-			else c_rk <= c_rk + 1'd1;
+			else begin
+				c_rk <= c_rk + 1'd1;
+				c_l <= !use0[c_rq];
+			end
 		end
 
 		default: ms <= M_IDLE;
@@ -655,6 +758,7 @@ initial begin
 	sv0 = 0;
 	for (i = 1; i < 7; i = i + 1) sv[i] = 0;
 	px_valid = 0;
+	p0_we = 0;
 	fs = F_IDLE;
 	mem_rd = 0;
 	f_b = 0;
