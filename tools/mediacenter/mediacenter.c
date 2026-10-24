@@ -196,7 +196,23 @@ static void zcp_mark(const AVFrame *f);
 static int zcp_get_buffer(AVCodecContext *s, AVFrame *f, int flags);
 
 // FPGA accelerator (accel.c, accel_link.c)
-static int acc_file_off;  // it gave up on this file: the normal decoder
+// it gave up on this file (1), or only while the picture format is one the
+// core cannot draw (2: it comes back when the format can be drawn again)
+static int acc_file_off;
+static int acc_by_layout;      // the failure is the picture format's
+static int acc_layout_ok;      // the format drawn last can be drawn by the core
+static double acc_layout_t;    // since when
+static void acc_layout_note(int ok)
+{
+	if (ok && !acc_layout_ok) acc_layout_t = now_seconds();
+	acc_layout_ok = ok;
+}
+// the accelerator stops because of the picture format (the Start key)
+static void acc_fail_layout(const char *why)
+{
+	if (!acc.failed) acc_by_layout = 1;
+	acc_fail(NULL, why);
+}
 static void acc_try(AVCodecContext *ctx, const AVStream *st);
 static void acc_close(void);
 static void acc_seek(void);
@@ -342,6 +358,8 @@ static int media_open(const char *path)
 	half_lines = 0;
 	media_close();
 	acc_file_off = 0;
+	acc_by_layout = 0;
+	acc_layout_ok = 0;
 	if (media_io)
 	{
 		mc.fmt = avformat_alloc_context();
@@ -1408,12 +1426,13 @@ static void yuv_draw(void)
 	// a picture of the FPGA accelerator is only in the FPGA's memory: the
 	// core draws all of it and the controls are blended over it here
 	int accf = have_frame && f && acc.on && acc_buf_of(f);
+	if (have_frame && f) acc_layout_note(narrow32 && yuv_half && w == fb_w && !(fb_w & 31));
 	if (narrow32 && yuv_half && have_frame && f && f->data[0] && w == fb_w)
 	{
 		int rows = (ovl_shown && ovl_a && ovl_y < fb_h && !accf) ? (ovl_y > 0 ? ovl_y : 0) : fb_h;
 		if (zcp_draw(f, rows)) core_rows = rows;
 	}
-	else if (accf) acc_fail(NULL, "the picture is not drawn by the core");
+	else if (accf) acc_fail_layout("the picture format is not drawn by the core");
 	if (accf)
 	{
 		if (!core_rows) fb_blank(fb_mem, (size_t)fb_stride * fb_h);
@@ -1539,10 +1558,11 @@ static void draw_video_frame(AVFrame *f)
 		}
 	}
 	else pic_fields = 0;
+	acc_layout_note(0);
 	if (acc.on && acc_buf_of(f))
 	{
 		// only the core can draw the accelerator's pictures
-		acc_fail(NULL, "the picture is not drawn by the core");
+		acc_fail_layout("the picture format is not drawn by the core");
 		return;
 	}
 	if (!fb_mem) return;
@@ -1645,7 +1665,12 @@ static void media_seek(double t)
 static void acc_fallback(void)
 {
 	if (!acc.on || !acc.failed) return;
-	printf("mediacenter: diag acceleratore: spento per questo video a %.1f s (%s), riprende il decoder normale\n", mc.clock, acc.why);
+	int layout = acc_by_layout;
+	acc_by_layout = 0;
+	if (layout)
+		printf("mediacenter: diag acceleratore: spento a %.1f s (%s), decoder normale finche' il formato non torna disegnabile\n", mc.clock, acc.why);
+	else
+		printf("mediacenter: diag acceleratore: spento per questo video a %.1f s (%s), riprende il decoder normale\n", mc.clock, acc.why);
 	double t = mc.clock;
 	int was_on = vt.on;
 	vt_end();
@@ -1654,7 +1679,30 @@ static void acc_fallback(void)
 	if (mc.vdec) avcodec_free_context(&mc.vdec);
 	acc_close();
 	zcp_close();
-	acc_file_off = 1;
+	acc_file_off = layout ? 2 : 1;
+	acc_layout_ok = 0;
+	mc.vdec = open_decoder(mc.vstream);
+	if (!mc.vdec) mc.vstream = -1;
+	else if (was_on) vt_start();
+	media_seek(t);
+}
+
+// The accelerator stopped only for the picture format: once the format can
+// be drawn by the core again (for a second, so a quick run through the
+// formats with Start does not reopen it each time) it comes back.
+static void acc_resume(void)
+{
+	if (acc_file_off != 2 || !acc_layout_ok || now_seconds() - acc_layout_t < 1.0 || mc.vstream < 0 || !mc.vdec) return;
+	double t = mc.clock;
+	printf("mediacenter: diag acceleratore: il formato si puo' di nuovo disegnare dal core, riacceso a %.1f s\n", t);
+	int was_on = vt.on;
+	vt_end();
+	vq_clear();
+	if (yuv_last) av_frame_unref(yuv_last);
+	avcodec_free_context(&mc.vdec);
+	zcp_close();
+	acc_file_off = 0;
+	acc_layout_ok = 0;
 	mc.vdec = open_decoder(mc.vstream);
 	if (!mc.vdec) mc.vstream = -1;
 	else if (was_on) vt_start();
@@ -1897,6 +1945,7 @@ static int media_play(int in_playlist)
 		if (result != END_DONE) break;
 
 		acc_fallback();
+		acc_resume();
 		AVFrame *show = NULL;
 		if (p.state == ST_PLAY)
 		{

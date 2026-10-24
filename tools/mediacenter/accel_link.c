@@ -511,9 +511,14 @@ static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows)
 {
 	double t0 = now_seconds();
 	acc_diag(t0);
-	if (!zcp_mb || zcp_broken || !fb_phys || fb_w * 3 != f->width * 2 || (fb_w & 31) || rows <= 0 || f->height < 2 * rows)
+	if (!zcp_mb || zcp_broken || !fb_phys)
 	{
 		acc_fail(NULL, "the picture cannot be drawn by the core");
+		return 0;
+	}
+	if (fb_w * 3 != f->width * 2 || (fb_w & 31) || rows <= 0 || f->height < 2 * rows)
+	{
+		acc_fail_layout("the picture format is not drawn by the core");
 		return 0;
 	}
 	int r = al_wait(b);
