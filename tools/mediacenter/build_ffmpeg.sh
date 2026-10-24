@@ -18,7 +18,7 @@ SUB_DECODERS=dvdsub,srt,subrip,ass,ssa,text
 DEMUXERS=mpegps,mpegts,mpegvideo,avi,matroska,mov,ogg,asf,mp3,flac,wav,aac,ac3,dts,srt,ass
 PARSERS=mpegvideo,mpeg4video,h264,mpegaudio,ac3,dca,aac,vorbis,flac,dvdsub
 
-# Our small changes to FFmpeg (measurement only, off unless asked for).
+# Our changes to FFmpeg (ffmpeg-mediacenter.patch): off unless the player asks.
 HERE=$(cd "$(dirname "$0")" && pwd)
 for p in "$HERE"/ffmpeg-*.patch; do
 	[ -f "$p" ] || continue

@@ -240,12 +240,14 @@ always @(posedge clk_sys) begin
 end
 
 // While the frame buffer owns the bus, mc_out (the CRT output) shares it with
-// mc_zc (MiSTer MediaCenter's zero-copy), mc_out first.
-wire [28:0] zc_addr, bus_addr;
-wire  [7:0] zc_burst, bus_burst;
-wire [63:0] zc_din;
+// mc_zc (MiSTer MediaCenter's zero-copy) and mc_acc (its FPGA accelerator),
+// mc_out first.
+wire [28:0] zc_addr, acc_addr, bus_addr;
+wire  [7:0] zc_burst, acc_burst, bus_burst;
+wire [63:0] zc_din, acc_din, bus_din;
 wire        zc_rd, zc_we, zc_want, zc_idle, zc_grant, zc_ready;
-wire        fb_grant, fb_ready, bus_rd, bus_we, zc_sel;
+wire        acc_rd, acc_we, acc_want, acc_idle, acc_grant, acc_ready;
+wire        fb_grant, fb_ready, bus_rd, bus_we;
 
 mc_zc mc_zc
 (
@@ -264,6 +266,24 @@ mc_zc mc_zc
 	.idle(zc_idle)
 );
 
+// the accelerator works only in FB mode (MiSTer MediaCenter's player)
+mc_acc mc_acc
+(
+	.clk(clk_sys),
+	.enable(fb_own & FB),
+	.ddr_addr(acc_addr),
+	.ddr_burst(acc_burst),
+	.ddr_rd(acc_rd),
+	.ddr_we(acc_we),
+	.ddr_din(acc_din),
+	.ddr_busy(DDRAM_BUSY),
+	.ddr_dout(DDRAM_DOUT),
+	.ddr_dout_ready(acc_ready),
+	.grant(acc_grant & FB),
+	.want(acc_want),
+	.idle(acc_idle)
+);
+
 mc_bus mc_bus
 (
 	.clk(clk_sys),
@@ -278,16 +298,27 @@ mc_bus mc_bus
 	.z_burst(zc_burst),
 	.z_rd(zc_rd),
 	.z_we(zc_we),
+	.z_din(zc_din),
 	.z_want(zc_want),
 	.z_idle(zc_idle),
 	.z_grant(zc_grant),
 	.z_ready(zc_ready),
+	.a_addr(acc_addr),
+	.a_burst(acc_burst),
+	.a_rd(acc_rd),
+	.a_we(acc_we),
+	.a_din(acc_din),
+	.a_want(acc_want & FB),
+	.a_idle(acc_idle),
+	.a_grant(acc_grant),
+	.a_ready(acc_ready),
+	.busy(DDRAM_BUSY),
 	.ready(DDRAM_DOUT_READY),
 	.addr(bus_addr),
 	.burst(bus_burst),
 	.rd(bus_rd),
 	.we(bus_we),
-	.zsel_o(zc_sel),
+	.din(bus_din),
 	.idle(bus_idle)
 );
 
@@ -296,7 +327,7 @@ assign DDRAM_BURSTCNT = fb_own ? bus_burst : clr_burst;
 assign DDRAM_RD       = fb_own ? bus_rd    : clr_rd;
 assign DDRAM_WE       = fb_own ? bus_we    : clr_we;
 assign DDRAM_BE       = fb_own ? 8'hFF     : clr_be;
-assign DDRAM_DIN      = fb_own ? zc_din    : clr_din;
+assign DDRAM_DIN      = fb_own ? bus_din   : clr_din;
 
 ////////////////////////////  MT32pi  ////////////////////////////////// 
 

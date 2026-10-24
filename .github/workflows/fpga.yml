@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'fpga/**'
+      - 'accel/rtl/**'
       - '.github/workflows/fpga.yml'
 
 jobs:
@@ -14,14 +15,15 @@ jobs:
       - uses: actions/checkout@v4
 
       # The Quartus image is too old to run the actions themselves, so only
-      # the compile runs in it.
+      # the compile runs in it. The whole repository is mounted: the menu core
+      # uses the accelerator engine in accel/rtl.
       - name: Compile with Quartus
         run: |
-          docker run --rm -v "$PWD/fpga/menu:/build" -w /build theypsilon/quartus-lite-c5:17.0.2 \
+          docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
             quartus_sh --flow compile menu.qpf
           cat fpga/menu/output_files/menu.fit.summary
           # the slowest paths, to see what misses timing
-          docker run --rm -v "$PWD/fpga/menu:/build" -w /build theypsilon/quartus-lite-c5:17.0.2 \
+          docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
             quartus_sta -t timing.tcl 2>&1 | grep -v "^Info (332" | tail -120 || true
           cp fpga/menu/output_files/menu.rbf menu_mediacenter.rbf
 

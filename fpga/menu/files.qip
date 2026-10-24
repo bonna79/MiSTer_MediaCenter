@@ -2,6 +2,14 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/sdram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/ddram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mc_out.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/mc_zc.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mc_bus.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mc_acc.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/rtl/acc_engine.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/rtl/acc_mc.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/rtl/acc_idct.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/rtl/acc_resid.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/rtl/acc_recon.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/rtl/acc_ram.sv
 set_global_assignment -name VERILOG_FILE rtl/lfsr.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cos.sv
 set_global_assignment -name SYSTEMVERILOG_FILE menu.sv

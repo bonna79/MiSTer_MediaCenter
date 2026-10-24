@@ -593,6 +593,8 @@ def run(prefix, out=None):
                                         ((s9(b), s8(b >> 9)), (s9(c), s8(c >> 9)))))
         elif tag == 0xA3:
             i += eng.mb([int(v) for v in cmd[i:i + 600]])
+        elif tag == 0xA0:     # padding
+            i += 1
         elif tag == 0xA4:
             i += 1
             hdr = struct.unpack('<3I', rec.read(12))

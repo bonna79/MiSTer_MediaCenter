@@ -23,6 +23,7 @@ module acc_mc #(
 )
 (
 	input              clk,
+	input              reset,    // back to idle (the engine's session reset)
 	input              start,
 	input        [7:0] mbx, mby, wmb, hmb,
 	input      [511:0] mvs,      // list 0: 16 x {y, x}, quarter samples, luma4x4BlkIdx order
@@ -763,6 +764,24 @@ always @(posedge clk) begin
 
 		default: ms <= M_IDLE;
 	endcase
+
+	if (reset) begin
+		ms <= M_IDLE;
+		fs <= F_IDLE;
+		mem_rd <= 0;
+		fin <= 0;
+		done <= 0;
+		f_b <= 0;
+		c_b <= 0;
+		rv_b <= 0;
+		rv_j <= 0;
+		rv_row <= 0;
+		rv_word <= 0;
+		bused[0] <= 0;
+		bused[1] <= 0;
+		got[0] <= 0;
+		got[1] <= 0;
+	end
 end
 
 initial begin

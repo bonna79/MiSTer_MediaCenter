@@ -1,0 +1,360 @@
+# MiSTer MediaCenter changes to FFmpeg 6.1.2 (applied by build_ffmpeg.sh):
+# - MC_PARSEONLY=1: the H.264 decoder reads the stream but does not rebuild
+#   the pixels (measurement, mediacenter --bench-parse)
+# - h264_mcacc.c: the FPGA accelerator, commands for the menu core (accel.c)
+diff --git a/libavcodec/h264_mcacc.c b/libavcodec/h264_mcacc.c
+new file mode 100644
+index 0000000..bcdddd1
+--- /dev/null
++++ b/libavcodec/h264_mcacc.c
+@@ -0,0 +1,219 @@
++/* MiSTer MediaCenter FPGA accelerator (included by h264_slice.c).
++ *
++ * When the player sets mc_acc_hooks (and gives its own decoder context as
++ * hooks->opaque), the H.264 decoder only reads the stream: for every picture
++ * it writes the commands of the MediaCenter FPGA engine (accel/doc/comandi.md
++ * in the MiSTer MediaCenter repository) into a buffer the player gives it,
++ * and does not rebuild the pixels; the FPGA does. Progressive 8-bit 4:2:0
++ * frames only: anything else calls hooks->fail and the player goes back to
++ * the normal decoder.
++ *
++ * The coefficients are taken from sl->mb and the blocks are cleared here, as
++ * the pixel rebuild would do. */
++
++struct mc_acc_pic {
++    uint32_t *p, *end;           // where the next word goes, end of the buffer
++};
++
++struct mc_acc_hooks {
++    void *opaque;                // the player's AVCodecContext->opaque
++    // a picture starts (decode order): its buffer, with the picture command written
++    struct mc_acc_pic *(*begin)(void *opaque, const AVFrame *f, int mb_w, int mb_h);
++    // at least `words` free words in the buffer
++    void (*grow)(void *opaque, struct mc_acc_pic *pic, int words);
++    // the picture's commands are all written (the last is the end of picture)
++    void (*end)(void *opaque, struct mc_acc_pic *pic);
++    // the slot of a reference picture
++    int (*slot)(void *opaque, const AVFrame *f);
++    // the stream cannot be done by the FPGA
++    void (*fail)(void *opaque, const char *why);
++};
++
++struct mc_acc_hooks *mc_acc_hooks;
++
++static int mcacc_for(const H264Context *h)
++{
++    return mc_acc_hooks && h->avctx->opaque && h->avctx->opaque == mc_acc_hooks->opaque;
++}
++
++static av_always_inline void mcacc_w(struct mc_acc_pic *pic, uint32_t w)
++{
++    *pic->p++ = w;
++}
++
++static void mcacc_room(struct mc_acc_pic *pic, int words)
++{
++    if (pic->end - pic->p < words)
++        mc_acc_hooks->grow(mc_acc_hooks->opaque, pic, words);
++}
++
++void ff_h264_mcacc_end(H264Context *h);
++
++static void mcacc_begin(H264Context *h)
++{
++    // a picture never ended (a missing frame made up by the decoder): end it
++    ff_h264_mcacc_end(h);
++    h->mcacc_on = mcacc_for(h);
++    if (!h->mcacc_on)
++        return;
++    if (h->picture_structure != PICT_FRAME || FRAME_MBAFF(h) || h->pixel_shift ||
++        h->ps.sps->chroma_format_idc != 1) {
++        mc_acc_hooks->fail(mc_acc_hooks->opaque, "interlaced, 4:2:2/4:4:4 or more than 8 bits");
++        return;
++    }
++    h->mcacc = mc_acc_hooks->begin(mc_acc_hooks->opaque, h->cur_pic_ptr->f, h->mb_width, h->mb_height);
++}
++
++void ff_h264_mcacc_end(H264Context *h)
++{
++    struct mc_acc_pic *pic = h->mcacc;
++    if (!pic)
++        return;
++    h->mcacc = NULL;
++    if (!mc_acc_hooks)
++        return;
++    mcacc_room(pic, 2);
++    mcacc_w(pic, 0xA4000000u);
++    mc_acc_hooks->end(mc_acc_hooks->opaque, pic);
++}
++
++static void mcacc_slice(const H264Context *h, const H264SliceContext *sl)
++{
++    struct mc_acc_pic *pic = h->mcacc;
++    if (!pic)
++        return;
++    mcacc_room(pic, 1 + 3 * 64);
++    mcacc_w(pic, 0xA2000000u | sl->ref_count[0] | sl->ref_count[1] << 6 |
++            (sl->list_count > 1) << 12 | sl->pwt.use_weight << 13 | sl->pwt.use_weight_chroma << 15 |
++            sl->pwt.luma_log2_weight_denom << 16 | sl->pwt.chroma_log2_weight_denom << 20);
++    for (int l = 0; l < sl->list_count; l++)
++        for (unsigned i = 0; i < sl->ref_count[l]; i++) {
++            const H264Ref *r = &sl->ref_list[l][i];
++            int slot = r->parent ? mc_acc_hooks->slot(mc_acc_hooks->opaque, r->parent->f) : 255;
++            // weights are 9 bits (the default 1 << denom can be 128), offsets 8
++            mcacc_w(pic, (slot & 0xFF) | (sl->pwt.luma_weight[i][l][0] & 0x1FF) << 8 |
++                    (sl->pwt.luma_weight[i][l][1] & 0xFF) << 17);
++            mcacc_w(pic, (sl->pwt.chroma_weight[i][l][0][0] & 0x1FF) | (sl->pwt.chroma_weight[i][l][0][1] & 0xFF) << 9);
++            mcacc_w(pic, (sl->pwt.chroma_weight[i][l][1][0] & 0x1FF) | (sl->pwt.chroma_weight[i][l][1][1] & 0xFF) << 9);
++        }
++}
++
++// the non-zero coefficients of a 4x4 block (FFmpeg keeps it transposed),
++// in raster order; the block is cleared
++static av_always_inline int mcacc_blk4(uint32_t *out, int16_t *c, int b)
++{
++    uint64_t a = AV_RN64A(c), b1 = AV_RN64A(c + 4), b2 = AV_RN64A(c + 8), b3 = AV_RN64A(c + 12);
++    int n = 0;
++    if (!(a | b1 | b2 | b3))
++        return 0;
++    for (int p = 0; p < 16; p++) {
++        int v = c[(p & 3) << 2 | p >> 2];
++        if (v)
++            out[n++] = (v & 0xFFFF) | p << 16 | b << 22;
++    }
++    AV_ZERO128(c);
++    AV_ZERO128(c + 8);
++    return n;
++}
++
++static void mcacc_mb(const H264Context *h, H264SliceContext *sl)
++{
++    struct mc_acc_pic *pic = h->mcacc;
++    if (!pic)
++        return;
++    const int mb_type = h->cur_pic.mb_type[sl->mb_xy];
++    int16_t *mb = (int16_t *)sl->mb;
++    int type, i, n = 0;
++    uint32_t mask = 0, *coef, *head;
++
++    if (IS_INTRA_PCM(mb_type)) type = 4;
++    else if (IS_INTRA16x16(mb_type)) type = 3;
++    else if (IS_INTRA4x4(mb_type)) type = IS_8x8DCT(mb_type) ? 2 : 1;
++    else type = 0;
++
++    // at most: 38 words, the count, 384 coefficients
++    mcacc_room(pic, 424);
++    mcacc_w(pic, 0xA3000000u | type << 16 | sl->mb_y << 8 | sl->mb_x);
++    if (type == 4) {
++        for (i = 0; i < 384; i += 4)
++            mcacc_w(pic, AV_RL32(sl->intra_pcm_ptr + i));
++        return;
++    }
++    head = pic->p;                     // the mask goes here
++    pic->p += type ? 5 : 37;           // the mask, then the modes or vectors
++    coef = pic->p + 1;                 // then the count and the coefficients
++
++    // the DC transforms FFmpeg does while rebuilding (cheap, done by the ARM),
++    // in place as FFmpeg does
++    if (type == 3 && sl->non_zero_count_cache[scan8[LUMA_DC_BLOCK_INDEX]])
++        h->h264dsp.h264_luma_dc_dequant_idct(mb, sl->mb_luma_dc[0],
++                                             h->ps.pps->dequant4_coeff[0][sl->qscale][0]);
++    if (sl->cbp & 0x30) {
++        if (sl->non_zero_count_cache[scan8[CHROMA_DC_BLOCK_INDEX + 0]])
++            h->h264dsp.h264_chroma_dc_dequant_idct(mb + 256, h->ps.pps->dequant4_coeff[IS_INTRA(mb_type) ? 1 : 4][sl->chroma_qp[0]][0]);
++        if (sl->non_zero_count_cache[scan8[CHROMA_DC_BLOCK_INDEX + 1]])
++            h->h264dsp.h264_chroma_dc_dequant_idct(mb + 512, h->ps.pps->dequant4_coeff[IS_INTRA(mb_type) ? 2 : 5][sl->chroma_qp[1]][0]);
++    }
++
++    // luma: only the 8x8 quarters with coefficients (all four for intra 16x16)
++    if (IS_8x8DCT(mb_type)) {
++        for (int q = 0; q < 4; q++) {
++            int16_t *c = mb + q * 64;
++            int m = 0;
++            if (!(sl->cbp & (1 << q)))
++                continue;
++            for (int p = 0; p < 64; p++) {
++                int v = c[(p & 7) << 3 | p >> 3];
++                if (v) { coef[n++] = (v & 0xFFFF) | p << 16 | (q * 4) << 22; m = 1; }
++            }
++            mask |= m << (q * 4);
++            memset(c, 0, 128);
++        }
++    } else {
++        int q8 = type == 3 ? 15 : sl->cbp & 15;
++        for (int b = 0; b < 16; b++) {
++            int k;
++            if (!(q8 & (1 << (b >> 2))))
++                continue;
++            k = mcacc_blk4(coef + n, mb + b * 16, b);
++            if (k) { n += k; mask |= 1 << b; }
++        }
++    }
++    // chroma
++    if (sl->cbp & 0x30)
++        for (int b = 16; b < 24; b++) {
++            int k = mcacc_blk4(coef + n, mb + 256 + (b - 16) * 16 + (b >= 20 ? 192 : 0), b);
++            if (k) { n += k; mask |= 1 << b; }
++        }
++
++    head[0] = mask | (IS_8x8DCT(mb_type) ? 1u : 0u) << 24;
++    if (type) {
++        uint32_t m0 = 0, m1 = 0;
++        for (i = 0; i < 8; i++) m0 |= (sl->intra4x4_pred_mode_cache[scan8[i]] & 15) << (4 * i);
++        for (i = 0; i < 8; i++) m1 |= (sl->intra4x4_pred_mode_cache[scan8[i + 8]] & 15) << (4 * i);
++        if (type == 3) m0 = m1 = 0;
++        head[1] = m0;
++        head[2] = m1;
++        head[3] = (sl->topright_samples_available & 0xFFFF) | (sl->topleft_samples_available & 0xFFFF) << 16;
++        head[4] = sl->chroma_pred_mode | (type == 3 ? sl->intra16x16_pred_mode : 0) << 4;
++    } else {
++        for (i = 0; i < 4; i++) {
++            int r0 = USES_LIST(mb_type, 0) ? sl->ref_cache[0][scan8[i * 4]] : -1;
++            int r1 = sl->list_count > 1 && USES_LIST(mb_type, 1) ? sl->ref_cache[1][scan8[i * 4]] : -1;
++            uint32_t refs = (r0 & 0x3F) | (r0 < 0) << 6 | (uint32_t)((r1 & 0x3F) | (r1 < 0) << 6) << 7;
++            // both lists with implicit weights: weight of list 0 (list 1 is 64 - it)
++            if (r0 >= 0 && r1 >= 0 && sl->pwt.use_weight == 2)
++                refs |= (uint32_t)(sl->pwt.implicit_weight[r0][r1][sl->mb_y & 1] & 0x1FF) << 16;
++            else
++                refs |= 32u << 16;
++            head[1 + i] = refs;
++        }
++        for (int l = 0; l < 2; l++) {
++            int ok = l < sl->list_count && USES_LIST(mb_type, l);
++            for (i = 0; i < 16; i++)
++                head[5 + l * 16 + i] = ok ? (sl->mv_cache[l][scan8[i]][0] & 0xFFFF) | (uint32_t)sl->mv_cache[l][scan8[i]][1] << 16 : 0;
++        }
++    }
++    coef[-1] = n;
++    pic->p = coef + n;
++}
+diff --git a/libavcodec/h264_picture.c b/libavcodec/h264_picture.c
+index 46925e0..3d3baaa 100644
+--- a/libavcodec/h264_picture.c
++++ b/libavcodec/h264_picture.c
+@@ -224,6 +224,8 @@ int ff_h264_field_end(H264Context *h, H264SliceContext *sl, int in_setup)
+     int err = 0;
+     h->mb_y = 0;
+ 
++    ff_h264_mcacc_end(h);
++
+     if (in_setup || !(avctx->active_thread_type & FF_THREAD_FRAME)) {
+         if (!h->droppable) {
+             err = ff_h264_execute_ref_pic_marking(h);
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index aac6f26..76f955b 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -475,6 +475,8 @@ int ff_h264_update_thread_context_for_user(AVCodecContext *dst,
+     return 0;
+ }
+ 
++#include "h264_mcacc.c"
++
+ static int h264_frame_start(H264Context *h)
+ {
+     H264Picture *pic;
+@@ -529,6 +531,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
+         return ret;
+ 
+     h->cur_pic_ptr = pic;
++    mcacc_begin(h);
+     ff_h264_unref_picture(&h->cur_pic);
+     if (CONFIG_ERROR_RESILIENCE) {
+         ff_h264_set_erpic(&h->er.cur_pic, NULL);
+@@ -2480,6 +2483,20 @@ static void predict_field_decoding_flag(const H264Context *h, H264SliceContext *
+     sl->mb_mbaff    = sl->mb_field_decoding_flag = IS_INTERLACED(mb_type) ? 1 : 0;
+ }
+ 
++/* MiSTer MediaCenter, measurement only: with MC_PARSEONLY=1 the decoder reads
++ * the stream (CABAC/CAVLC, macroblock modes, motion vectors, coefficients)
++ * but does not rebuild the pixels, to time what the ARM would still do if an
++ * FPGA rebuilt them. The pictures it outputs are not meant to be shown. */
++static int mc_parse_only(void)
++{
++    static int v = -1;
++    if (v < 0) {
++        const char *e = getenv("MC_PARSEONLY");
++        v = e && *e && *e != '0';
++    }
++    return v;
++}
++
+ /**
+  * Draw edges and report progress for the last MB row.
+  */
+@@ -2561,6 +2578,8 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+         }
+     }
+ 
++    mcacc_slice(h, sl);
++
+     if (h->ps.pps->cabac) {
+         /* realign */
+         align_get_bits(&sl->gb);
+@@ -2586,7 +2605,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+ 
+             ret = ff_h264_decode_mb_cabac(h, sl);
+ 
+-            if (ret >= 0)
++            if (ret >= 0 && h->mcacc_on)
++                mcacc_mb(h, sl);
++            else if (ret >= 0 && !mc_parse_only())
+                 ff_h264_hl_decode_mb(h, sl);
+ 
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+@@ -2595,7 +2616,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+ 
+                 ret = ff_h264_decode_mb_cabac(h, sl);
+ 
+-                if (ret >= 0)
++                if (ret >= 0 && h->mcacc_on)
++                    mcacc_mb(h, sl);
++                else if (ret >= 0 && !mc_parse_only())
+                     ff_h264_hl_decode_mb(h, sl);
+                 sl->mb_y--;
+             }
+@@ -2657,7 +2680,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+ 
+             ret = ff_h264_decode_mb_cavlc(h, sl);
+ 
+-            if (ret >= 0)
++            if (ret >= 0 && h->mcacc_on)
++                mcacc_mb(h, sl);
++            else if (ret >= 0 && !mc_parse_only())
+                 ff_h264_hl_decode_mb(h, sl);
+ 
+             // FIXME optimal? or let mb_decode decode 16x32 ?
+@@ -2665,7 +2690,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+                 sl->mb_y++;
+                 ret = ff_h264_decode_mb_cavlc(h, sl);
+ 
+-                if (ret >= 0)
++                if (ret >= 0 && h->mcacc_on)
++                    mcacc_mb(h, sl);
++                else if (ret >= 0 && !mc_parse_only())
+                     ff_h264_hl_decode_mb(h, sl);
+                 sl->mb_y--;
+             }
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index 675be9b..18ab6b8 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -554,6 +554,10 @@ typedef struct H264Context {
+     AVBufferPool *ref_index_pool;
+     AVBufferPool *decode_error_flags_pool;
+     int ref2frm[MAX_SLICES][2][64];     ///< reference to frame number lists, used in the loop filter, the first 2 are for -2,-1
++
++    /* MiSTer MediaCenter FPGA accelerator (h264_mcacc.c) */
++    struct mc_acc_pic *mcacc;           ///< commands of the picture being read, NULL if none
++    int mcacc_on;                       ///< the FPGA rebuilds the pixels of this picture
+ } H264Context;
+ 
+ extern const uint16_t ff_h264_mb_sizes[4];
+@@ -652,6 +656,7 @@ static av_always_inline int get_chroma_qp(const PPS *pps, int t, int qscale)
+ }
+ 
+ int ff_h264_field_end(H264Context *h, H264SliceContext *sl, int in_setup);
++void ff_h264_mcacc_end(H264Context *h);
+ 
+ int ff_h264_ref_picture(H264Picture *dst, const H264Picture *src);
+ int ff_h264_replace_picture(H264Picture *dst, const H264Picture *src);

@@ -50,3 +50,6 @@ da questi comandi si ottengono immagini identiche a FFmpeg (video di prova di
 
 ## Fine immagine `A4`
 - p0: `0xA4` << 24
+
+## Riempimento `A0`
+- p0: `0xA0` << 24, nessun effetto. Fuori da un macroblocco porta i comandi a un numero pari di parole: il core li legge dalla memoria a parole da 64 bit.

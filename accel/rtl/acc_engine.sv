@@ -416,7 +416,7 @@ endgenerate
 
 acc_mc #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRIDE_L2), .UOFF(UOFF), .VOFF(VOFF)) mc
 (
-	.clk(clk),
+	.clk(clk), .reset(reset),
 	.start(mc_start),
 	.mbx(mbx), .mby(mby), .wmb(wmb), .hmb(hmb),
 	.mvs(mv_flat), .mvs1(mv1_flat),
@@ -470,7 +470,7 @@ wire [7:0] tag = cmd_data[31:24];
 wire coef_blk_change = coef_have && cmd_data[26:22] != coef_blk;
 wire b_free = sb == S_IDLE;                // B can take the next macroblock
 wire b_idle = b_free && !w_active;         // and all written
-assign cmd_ready = !reset && ((sa == S_CMD && (tag == 8'hA3 || b_idle)) || sa == S_PIC || sa == S_REFS || sa == S_MB1 ||
+assign cmd_ready = !reset && ((sa == S_CMD && (tag == 8'hA3 || tag == 8'hA0 || b_idle)) || sa == S_PIC || sa == S_REFS || sa == S_MB1 ||
                    sa == S_INFO || sa == S_NCOEF || sa == S_PCM ||
                    (sa == S_COEF && !coef_blk_change && idct_in && !idct_go));
 wire take = cmd_valid && cmd_ready;
@@ -730,6 +730,7 @@ always @(posedge clk) begin
 					pic_done <= 1;
 					pic_slot <= cur_slot;
 				end
+				8'hA0: ;                     // padding to a 64-bit word: nothing
 				default: error <= 1;
 			endcase
 		end
