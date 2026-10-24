@@ -12,11 +12,12 @@
 - **Quando si usa:** solo per i video H.264 a 8 bit, 4:2:0, progressivi, larghi 1920 punti. DVD, Video CD, DivX, 720p e gli altri video vanno come nella 2.8. Se l'acceleratore trova un problema torna da solo al decoder normale dallo stesso punto del film. `MC_NOACC=1` in `mediacenter.ini` lo spegne.
 - **Diagnosi nel log:** ogni 10 secondi una riga `diag acceleratore` con immagini mandate e disegnate, tempi dell'ARM e dell'FPGA, immagini in ritardo o perse.
 - **Chiavetta USB elencata una volta sola** anche quando il sistema la monta su `/media/usb0` e `/media/usb1`.
+- **Video CD giusto sul CRT:** immagine 4:3 a tutto schermo senza bande nere ai lati, 576i per i dischi PAL e riquadro Formato con Start (ora i Video CD li riproduce lo stesso lettore dei Super Video CD).
 - **Nuova immagine** Ver. 3.0 1080 P, mostrata solo quando si avvia lo script mediacenter a mano (non quando parte un DVD, un Super Video CD o un Video CD), come nella 2.8.
 
 Il motore non ha ancora il filtro anti-blocchi (deblocking) dell'H.264: è il prossimo passo.
 
-Provata su un MiSTer vero il 24 ottobre 2026 su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme, con One Piece Episodio 940 1080p H.264: 238 s di riproduzione continua con 5724 immagini disegnate dall'FPGA e nessuna persa; 449 s con salti avanti e indietro, 240 su 240 ogni 10 secondi nei tratti senza salti; cambi di formato Auto, 16:9, 4:3 fluidi con l'acceleratore sempre acceso; scene pesanti con l'FPGA al lavoro circa 30 ms su 41,7; DVD e DivX come nella 2.8. Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-30).
+Provata su un MiSTer vero il 24 ottobre 2026 su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme, con One Piece Episodio 940 1080p H.264: 238 s di riproduzione continua con 5724 immagini disegnate dall'FPGA e nessuna persa; 449 s con salti avanti e indietro, 240 su 240 ogni 10 secondi nei tratti senza salti; cambi di formato Auto, 16:9, 4:3 fluidi con l'acceleratore sempre acceso; scene pesanti con l'FPGA al lavoro circa 30 ms su 41,7; DVD e DivX come nella 2.8; Video CD PAL a tutto schermo sul CRT. Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-30).
 
 Le novità della 2.8 (formato giusto per ogni film sul CRT, riquadro Formato con Start) e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-28).
 
@@ -53,11 +54,12 @@ Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0
 - **When it is used:** only for 8-bit, 4:2:0, progressive H.264 video 1920 pixels wide. DVD, Video CD, DivX, 720p and other video play as in 2.8. If the accelerator meets a problem it goes back to the normal decoder by itself from the same point of the film. `MC_NOACC=1` in `mediacenter.ini` turns it off.
 - **Diagnostics in the log:** every 10 seconds a `diag acceleratore` line with pictures sent and drawn, ARM and FPGA times, pictures late or lost.
 - **USB stick listed once** even when the system mounts it on both `/media/usb0` and `/media/usb1`.
+- **Video CD right on the CRT:** full-screen 4:3 picture without black bars at the sides, 576i for PAL discs and the format box with Start (Video CDs are now played by the same player as Super Video CDs).
 - **New picture** Ver. 3.0 1080 P, shown only when the mediacenter script is started by hand (not when a DVD, Super Video CD or Video CD starts it), as in 2.8.
 
 The engine does not have H.264's deblocking filter yet: that is the next step.
 
-Tested on a real MiSTer on 24 October 2026 on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together, with One Piece Episode 940 1080p H.264: 238 s of continuous playback with 5724 pictures drawn by the FPGA and none lost; 449 s with seeks forward and back, 240 of 240 every 10 seconds in stretches without seeks; format changes Auto, 16:9, 4:3 smooth with the accelerator always on; heavy scenes with the FPGA working about 30 ms of 41.7; DVD and DivX as in 2.8. Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-30).
+Tested on a real MiSTer on 24 October 2026 on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together, with One Piece Episode 940 1080p H.264: 238 s of continuous playback with 5724 pictures drawn by the FPGA and none lost; 449 s with seeks forward and back, 240 of 240 every 10 seconds in stretches without seeks; format changes Auto, 16:9, 4:3 smooth with the accelerator always on; heavy scenes with the FPGA working about 30 ms of 41.7; DVD and DivX as in 2.8; PAL Video CD full screen on the CRT. Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-30).
 
 What's new in 2.8 (the right shape for every film on the CRT, format box with Start) and in earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-28).
 

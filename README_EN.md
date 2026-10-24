@@ -46,6 +46,7 @@ The player's on-screen texts are in Italian.
 - **When it is used:** only for 8-bit, 4:2:0, progressive H.264 video 1920 pixels wide. Everything else (DVD, Video CD, DivX, 720p, interlaced or 10-bit H.264, HEVC) plays as in 2.8, with the ARM decoder. If the accelerator meets a problem it goes back to the normal decoder by itself from the same point of the film, and says so in the log. `MC_NOACC=1` in `mediacenter.ini` turns it off.
 - **Diagnostics in the log:** every 10 seconds a `diag acceleratore` line gives the pictures sent and drawn, the ARM and FPGA times, the memory wait and the pictures late or lost.
 - **USB stick listed once:** if the system mounts the same stick on two folders (`/media/usb0` and `/media/usb1`), the source list shows it only once.
+- **Video CD right on the CRT:** Video CDs from the drive are now played by the same player as Super Video CDs (FFmpeg). On the CRT the 4:3 picture fills the screen, without the black bars at the sides that appeared before, PAL discs run at 576i 50 Hz and Start opens the format box. Disc menus and chapters work as before. `MC_VCD_OLD=1` in `mediacenter.ini` brings back the old player.
 - **New picture** reading Ver. 3.0 1080 P, shown for 3 seconds only when the mediacenter script is started by hand (not when a DVD, Super Video CD or Video CD starts it).
 
 The engine does not have H.264's deblocking filter yet: as already in 2.8 for 1080p, the picture is the light-mode one. The filter is the next step.
@@ -60,6 +61,7 @@ Tested on a real MiSTer on 24 October 2026, on a Sony Trinitron CRT (SCART RGB, 
 | Heavy scenes (pans, explosions) | FPGA working about 30 ms per picture of 41.7, no picture late |
 | DVD and DivX after the update | As in 2.8 (the accelerator does not start) |
 | USB stick mounted twice | Listed once |
+| PAL Video CD from the drive on the CRT | Full-screen 4:3 picture without side bars, format box with Start working |
 
 On the first playback after power-on the first seconds may stutter a little (the file is read from the SD card for the first time); from the second time on they do not.
 
@@ -470,6 +472,7 @@ MC_CRT_VPOS=2
 | `MC_FIELDS=1` | Interlaced DVDs and videos: the player does not blend the two fields. The CRT gets them whole, as from a real DVD player (sharper and smoother in motion); on HDMI the Main's scaler blends them, with no combing. Recommended with a CRT. Without this line the player blends the lines for both outputs |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
 | `MC_NOACC=1` | Turns off the 3.0 H.264 accelerator: 1080p videos are decoded by the ARM as in 2.8 |
+| `MC_VCD_OLD=1` | Video CDs from the drive with the old Video CD player, as in 2.8 (side bars on the CRT) |
 | `MC_NOZC=1` | 1080p videos without the accelerator: the ARM copies the picture instead of the menu core (zero-copy off) |
 | `MC_MENU_HD=1` | Lists at 1280x720 as in version 2.1, instead of drawn for the CRT |
 | `MC_DIAG=0` | Turns off the `mediacenter: diag` diagnosis lines in the log |

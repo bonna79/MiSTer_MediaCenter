@@ -44,6 +44,7 @@ La 3.0 riproduce i video **1080p H.264** fluidi, su HDMI e su CRT: l'FPGA del Mi
 - **Quando si usa:** solo per i video H.264 a 8 bit, 4:2:0, progressivi, larghi 1920 punti. Tutto il resto (DVD, Video CD, DivX, 720p, H.264 interlacciato o a 10 bit, HEVC) va come nella 2.8, con il decoder dell'ARM. Se l'acceleratore trova un problema torna da solo al decoder normale dallo stesso punto del film, e lo scrive nel log. `MC_NOACC=1` in `mediacenter.ini` lo spegne.
 - **Diagnosi nel log:** ogni 10 secondi una riga `diag acceleratore` dice quante immagini sono state mandate e disegnate, i tempi dell'ARM e dell'FPGA, l'attesa della memoria e le immagini in ritardo o perse.
 - **Chiavetta USB elencata una volta sola:** se il sistema monta la stessa chiavetta su due cartelle (`/media/usb0` e `/media/usb1`), l'elenco delle sorgenti la mostra una volta sola.
+- **Video CD giusto sul CRT:** i Video CD da disco ora li riproduce lo stesso lettore dei Super Video CD (FFmpeg). Sul CRT l'immagine 4:3 occupa tutto lo schermo, senza le bande nere ai lati che comparivano prima, i dischi PAL vanno a 576i 50 Hz e con Start si apre il riquadro Formato. Menu del disco e capitoli funzionano come prima. `MC_VCD_OLD=1` in `mediacenter.ini` rimette il vecchio lettore.
 - **Nuova immagine** con la scritta Ver. 3.0 1080 P, mostrata 3 secondi solo quando si avvia lo script mediacenter a mano (non quando parte un DVD, un Super Video CD o un Video CD).
 
 Il motore non ha ancora il filtro anti-blocchi (deblocking) dell'H.264: come già nella 2.8 per il 1080p, l'immagine è quella della modalità leggera. Il filtro è il prossimo passo.
@@ -58,6 +59,7 @@ Provata su un MiSTer vero il 24 ottobre 2026, su CRT Sony Trinitron (SCART RGB, 
 | Scene pesanti (panoramiche, esplosioni) | FPGA al lavoro circa 30 ms per immagine su 41,7, nessuna immagine in ritardo |
 | DVD e DivX dopo l'aggiornamento | Come nella 2.8 (l'acceleratore non si accende) |
 | Chiavetta USB montata due volte | Elencata una volta sola |
+| Video CD PAL da disco sul CRT | Immagine 4:3 a tutto schermo senza bande laterali, riquadro Formato con Start funzionante |
 
 Alla prima riproduzione dopo l'accensione i primi secondi possono scattare un poco (il file viene letto per la prima volta dalla SD); dalla seconda volta no.
 
@@ -468,6 +470,7 @@ MC_CRT_VPOS=2
 | `MC_FIELDS=1` | DVD e video interlacciati: il lettore non fonde i due semiquadri. Il CRT li riceve intatti, come da un vero lettore DVD (più nitido e più fluido nel movimento); sull'HDMI li fonde lo scaler del Main, senza pettini. Consigliato con il CRT. Senza questa riga il lettore fonde le righe per tutte e due le uscite |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
 | `MC_NOACC=1` | Spegne l'acceleratore H.264 della 3.0: i video 1080p li decodifica l'ARM come nella 2.8 |
+| `MC_VCD_OLD=1` | Video CD da disco con il vecchio lettore Video CD, come nella 2.8 (sul CRT con le bande ai lati) |
 | `MC_NOZC=1` | Video 1080p senza acceleratore: l'immagine la copia l'ARM invece del core del menu (zero-copy spento) |
 | `MC_MENU_HD=1` | Elenchi a 1280x720 come nella versione 2.1, invece che disegnati per il CRT |
 | `MC_DIAG=0` | Spegne le righe di diagnosi `mediacenter: diag` nel log |
