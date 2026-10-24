@@ -834,6 +834,7 @@ typedef struct
 	const char *state_label; // replaces the state name when set
 	legend_t *legend;        // replaces the playback legend when set
 	int legend_n;
+	const char *format_label; // MediaCenter: the format box in place of the legend
 } osd_info_t;
 
 static const char *exit_question = "Uscire dal Video CD?";
@@ -982,6 +983,16 @@ static void osd_draw(const osd_info_t *info)
 		}
 		x += legend_item(x, legend_y, "A", "Conferma", 1) + SX(16);
 		ovl_text(x, legend_y + SY(3), "Altro tasto: Annulla");
+	}
+	else if (info->format_label)
+	{
+		// the format chosen during the film (MediaCenter's format_key)
+		char q[64];
+		snprintf(q, sizeof(q), "Formato  \x10 %s \x11", info->format_label);
+		int w = text_width(q) + SX(16) + legend_item(0, 0, "A", "Chiudi", 0);
+		x = (fb_w - w) / 2;
+		x = ovl_text(x, legend_y + SY(3), q) + SX(16);
+		legend_item(x, legend_y, "A", "Chiudi", 1);
 	}
 	else if (info->legend)
 	{

@@ -1688,6 +1688,12 @@ static void draw_audio_screen(void)
 
 enum { END_DONE, END_NEXT, END_PREV, END_BACK, END_QUIT, END_GOTO };
 
+// The format box during the film (format_key, after Regola CRT).
+static int format_key(int code, double t, int state, int menu);
+static int format_tick(double t);
+static const char *format_label(void);
+static void fmt_close(void);
+
 // Hooks for the Super Video CD menus (svcd_pbc): keys, the end of the
 // stream and the on-screen controls.
 static int (*play_key_hook)(int code);          // 1: key used; 2: used, playback ends with END_GOTO
@@ -1742,6 +1748,7 @@ static int media_play(int in_playlist)
 				if (code == KEY_ENTER) result = END_BACK;
 				continue;
 			}
+			if (format_key(code, t, p.state, mc.audio_only || play_osd_keep)) continue;
 			if (play_key_hook)
 			{
 				int h = play_key_hook(code);
@@ -1896,6 +1903,7 @@ static int media_play(int in_playlist)
 		}
 
 		if (p.confirm_exit && t >= p.osd_until) p.confirm_exit = 0;
+		if (format_tick(t)) p.dirty = 1;
 		int show_osd = p.state == ST_STOP || t < p.osd_until || mc.audio_only || play_osd_keep;
 		if (show_osd && (p.dirty || t - osd_built >= 0.25))
 		{
@@ -1911,6 +1919,7 @@ static int media_play(int in_playlist)
 			info.audio_label = mc.audio_label[0] ? mc.audio_label : NULL;
 			if (mc.astream < 0) info.audio_label = "Senza audio";
 			if (play_osd_hook) play_osd_hook(&info);
+			info.format_label = format_label();
 			osd_build(&info);
 			osd_built = t;
 			p.dirty = 1;
@@ -1936,6 +1945,7 @@ static int media_play(int in_playlist)
 	}
 
 	vt_end();
+	fmt_close();
 	main_idle(0);
 	if (mc.vstream >= 0 && played > 1)
 	{
@@ -2063,12 +2073,14 @@ static void scan_sources(void)
 // ---------------------------------------------------------------------------
 // The lists and the screens of the player
 //
-// The menu core shows a frame buffer 640 pixels wide on the 15 kHz CRT one
-// pixel for one, and its lines one for one when they are as many as those
-// of the output mode. The lists are drawn in such a frame buffer (menu_fb):
-// every stroke of the letters stays on the CRT. In the 1280x720 one every
-// other column was lost, and one line in five at 576i, three in five at
-// 288p, and the letters came out broken. HDMI enlarges it like a video.
+// The menu core shows a frame buffer 720 pixels wide on the 15 kHz CRT one
+// pixel for one, like a DVD, and its lines one for one when they are as many
+// as those of the output mode. The lists are drawn in such a frame buffer
+// (menu_fb, 720x576 or 720x480): every stroke of the letters stays on the
+// CRT. In the 1280x720 one every other column was lost, and one line in five
+// at 576i, three in five at 288p, and the letters came out broken. HDMI
+// enlarges it like a video. The lists keep to its middle 640 pixels
+// (menu_ox): the sides of a CRT are hidden under its frame.
 // ---------------------------------------------------------------------------
 
 static void menu_fb(void);
@@ -2097,9 +2109,13 @@ static void text_centre(int y, int sx, int sy, int bold, const char *str, uint32
 	fb_text_xy((fb_w - text_w(str, sx)) / 2, y, sx, sy, bold, str, color);
 }
 
-// Glyph pixel of the list text: 2x2 at 640x480 and 640x576; 1x1 at 288 and
+// Glyph pixel of the list text: 2x2 at 720x480 and 720x576; 1x1 at 288 and
 // 240 lines, whose lines are twice as tall on the CRT.
 static int menu_sx(void) { int v = fb_w / 320; return v < 1 ? 1 : v; }
+// Left edge and width of the part of the screen the lists use: the middle
+// 640 pixels of the lists' 720 wide frame buffer, all of any other.
+static int menu_ox(void) { return fb_menu && fb_w == 720 ? (fb_w - 640) / 2 : 0; }
+static int menu_w(void) { return fb_w - 2 * menu_ox(); }
 static int menu_sy(void) { int v = fb_h / 240; return v < 1 ? 1 : v; }
 
 // A screen is drawn into a copy and then copied to the frame buffer: the
@@ -2147,12 +2163,13 @@ static void draw_browser(const char *title, const char *const *labels, const int
 {
 	menu_begin();
 	int sx = menu_sx(), sy = menu_sy(), gw = GLYPH_W * sx;
+	int ox = menu_ox(), mw = menu_w();
 	int mx = 12 * sx;
 	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(160, 160, 160), accent = fb_rgb(40, 90, 190);
 
 	// the name: centred, twice as wide and three times as tall as the list
 	const char *name = "MiSTer MediaCenter";
-	int tsx = text_w(name, 2 * sx) <= fb_w - 2 * mx ? 2 * sx : sx;
+	int tsx = text_w(name, 2 * sx) <= mw - 2 * mx ? 2 * sx : sx;
 	text_centre(6 * sy, tsx, 3 * sy, 1, name, white);
 
 	// where we are, and the place in a long list
@@ -2160,27 +2177,27 @@ static void draw_browser(const char *title, const char *const *labels, const int
 	browser_layout(&top, &row_h, &rows);
 	char line[256], pos[32] = "";
 	if (count > rows) snprintf(pos, sizeof(pos), "%d/%d", sel + 1, count);
-	fit_text(line, sizeof(line), title, (fb_w - 2 * mx - text_w(pos, sx)) / gw - (pos[0] ? 1 : 0));
-	fb_text_xy(mx, 34 * sy, sx, sy, 0, line, grey);
-	if (pos[0]) fb_text_xy(fb_w - mx - text_w(pos, sx), 34 * sy, sx, sy, 0, pos, grey);
+	fit_text(line, sizeof(line), title, (mw - 2 * mx - text_w(pos, sx)) / gw - (pos[0] ? 1 : 0));
+	fb_text_xy(ox + mx, 34 * sy, sx, sy, 0, line, grey);
+	if (pos[0]) fb_text_xy(ox + mw - mx - text_w(pos, sx), 34 * sy, sx, sy, 0, pos, grey);
 
 	int first = sel - rows / 2;
 	if (first > count - rows) first = count - rows;
 	if (first < 0) first = 0;
-	if (!count) fb_text_xy(mx, top + 2 * sy, sx, sy, 1, message ? message : "Nessun file video o audio qui", grey);
+	if (!count) fb_text_xy(ox + mx, top + 2 * sy, sx, sy, 1, message ? message : "Nessun file video o audio qui", grey);
 	for (int i = first; i < count && i < first + rows; i++)
 	{
 		int y = top + (i - first) * row_h;
-		if (i == sel) fb_fill_rect(mx / 2, y, fb_w - mx, row_h, accent);
+		if (i == sel) fb_fill_rect(ox + mx / 2, y, mw - mx, row_h, accent);
 		char item[260];
 		snprintf(item, sizeof(item), "%s%s", labels[i], dirs && dirs[i] ? "/" : "");
-		fit_text(line, sizeof(line), item, (fb_w - 2 * mx) / gw);
-		fb_text_xy(mx, y + 2 * sy, sx, sy, 1, line, white);
+		fit_text(line, sizeof(line), item, (mw - 2 * mx) / gw);
+		fb_text_xy(ox + mx, y + 2 * sy, sx, sy, 1, line, white);
 	}
 
 	// the keys: centred, as large as the list and bold
 	const char *help = "A Apri  B Indietro  \x10\x11 Pagina  X Esci";
-	if (text_w(help, sx) > fb_w) help = "A Apri  B Indietro  X Esci";
+	if (text_w(help, sx) > mw) help = "A Apri  B Indietro  X Esci";
 	text_centre(fb_h - 14 * sy, sx, sy, 1, help, fb_rgb(230, 230, 230));
 	menu_end();
 }
@@ -2190,7 +2207,7 @@ static void menu_notice(const char *text)
 {
 	int sx = menu_sx(), sy = menu_sy();
 	int w = text_w(text, sx) + 4 * GLYPH_W * sx / 2, h = 16 * sy;
-	if (w > fb_w) w = fb_w;
+	if (w > menu_w()) w = menu_w();
 	int x = (fb_w - w) / 2, y = (fb_h - h) / 2;
 	fb_fill_rect(x, y, w, h, fb_rgb(255, 200, 80));
 	fb_fill_rect(x + sx, y + sy, w - 2 * sx, h - 2 * sy, fb_rgb(0, 0, 0));
@@ -2894,7 +2911,8 @@ static int browse(const char *root)
 //   whose subtitles and controls are already smoothed here;
 // - format Auto: the video's own aspect (the DVD's 4:3 or 16:9 flag, the
 //   file's display aspect); or fixed: Pieno fills the screen (stretched),
-//   4:3, 16:9, 21:9;
+//   4:3, 16:9, Anamorfico 2.35:1, Cinema 1.85:1 (also chosen during the
+//   film with Start: format_key);
 // - pan & scan (CRT only): a picture wider than 4:3 fills the CRT's height
 //   and its sides are cut, instead of black bars above and below.
 // ---------------------------------------------------------------------------
@@ -2911,12 +2929,12 @@ static const struct { const char *key, *label; int min, max; } crt_items[CRT_ITE
 	{ "MC_CRT_VPOS", "Pos. verticale", -16, 15 },
 	{ "MC_CRT_MODE", "Modo 15 kHz", 0, 4 },
 	{ "MC_CRT_FILTER", "Filtro tremolio", 0, 2 },
-	{ "MC_CRT_ASPECT", "Formato", 0, 4 },
+	{ "MC_CRT_ASPECT", "Formato", 0, 5 },
 	{ "MC_CRT_PANSCAN", "Pan & scan", 0, 1 },
 };
 static const char *const crt_mode_names[5] = { "Auto", "576i PAL", "288p PAL", "480i NTSC", "240p NTSC" };
 static const char *const crt_filter_names[3] = { "Auto", "Spento", "Acceso" };
-static const char *const crt_aspect_names[5] = { "Auto", "Pieno", "4:3", "16:9", "21:9" };
+static const char *const crt_aspect_names[6] = { "Auto", "Pieno", "4:3", "16:9", "Anamorfico 2,35:1", "Cinema 1,85:1" };
 static int crt_val[CRT_ITEMS];
 static int crt_sent_mode = -1, crt_sent_filter = -1;
 static int crt_std = -1; // standard of the video on screen: 1 PAL, 0 NTSC, -1 unknown
@@ -2930,7 +2948,8 @@ static double aspect_used(int sw, int sh)
 	case 1: return sw > 0 && sh > 0 ? (double)sw / sh : video_aspect;
 	case 2: return 4.0 / 3.0;
 	case 3: return 16.0 / 9.0;
-	case 4: return 64.0 / 27.0; // 21:9 as the cinema screens (2.37)
+	case 4: return 2.35;        // anamorphic widescreen
+	case 5: return 1.85;        // flat cinema
 	default: return video_aspect;
 	}
 }
@@ -2978,7 +2997,7 @@ static const char *crt_expected(char *buf, size_t len)
 	{
 		int pal = h == 576 || h == 288 ? 1 : h == 480 || h == 240 ? 0 : -1;
 		int lines = pal == 1 ? 288 : 240;
-		int scaled = fb_w > 640 || h > lines;
+		int scaled = fb_w > 720 || h > lines;
 		if (!scaled) mode = pal == 1 ? "288p PAL (1:1)" : pal == 0 ? "240p NTSC (1:1)" : "240p/288p secondo menu_pal (1:1)";
 		else if (h >= 400) mode = pal == 1 ? "576i PAL" : pal == 0 ? "480i NTSC" : "480i/576i secondo menu_pal";
 		else mode = pal == 1 ? "288p PAL" : pal == 0 ? "240p NTSC" : "240p/288p secondo menu_pal";
@@ -3124,8 +3143,93 @@ static int crt_save(void)
 	return err;
 }
 
+// The format chosen during the film: Start opens a box in place of the
+// button legend, Left/Right (or Up/Down) change the format at once, on the
+// CRT and over HDMI; A, Start or B close it, and so does a pause of 6 s.
+// The choice is saved like Regola CRT's (MC_CRT_ASPECT, MC_CRT_PANSCAN).
+static const struct { const char *name; int aspect, pan; } fmt_list[] = {
+	{ "Auto", 0, 0 },
+	{ "4:3", 2, 0 },
+	{ "16:9", 3, 0 },
+	{ "Cinema 1,85:1", 5, 0 },
+	{ "Anamorfico 2,35:1", 4, 0 },
+	{ "Pieno", 1, 0 },
+	{ "Pan & scan", 0, 1 },
+};
+#define FMT_N ((int)(sizeof(fmt_list) / sizeof(fmt_list[0])))
+static int fmt_open, fmt_changed;
+static double fmt_until;
+
+static int fmt_index(void)
+{
+	if (crt_val[CRT_PANSCAN]) return FMT_N - 1;
+	for (int i = 0; i < FMT_N; i++)
+		if (!fmt_list[i].pan && fmt_list[i].aspect == crt_val[CRT_ASPECT]) return i;
+	return 0;
+}
+
+static void fmt_close(void)
+{
+	if (!fmt_open) return;
+	fmt_open = 0;
+	if (!fmt_changed) return;
+	fmt_changed = 0;
+	int err = crt_save();
+	fprintf(stderr, "mediacenter: formato scelto durante il film: %s%s\n", fmt_list[fmt_index()].name,
+		err ? " (non salvato nel file ini)" : "");
+}
+
+// A key while a film plays; 1 when the box took it. menu: a disc menu or a
+// list is on screen (Start belongs to it).
+static int format_key(int code, double t, int state, int menu)
+{
+	if (!fmt_open)
+	{
+		if ((code == KEY_PLAY || code == KEY_PLAYCD) && state == ST_PLAY && !menu)
+		{
+			fmt_open = 1;
+			fmt_until = t + 6.0;
+			return 1;
+		}
+		return 0;
+	}
+	int d = 0;
+	switch (code)
+	{
+	case KEY_LEFT: case KEY_UP: d = FMT_N - 1; break;
+	case KEY_RIGHT: case KEY_DOWN: d = 1; break;
+	case KEY_ENTER: case KEY_PLAY: case KEY_PLAYCD: case KEY_ESC: case KEY_SPACE:
+		fmt_close();
+		return 1;
+	default:
+		// any other key closes the box and does its own job
+		fmt_close();
+		return 0;
+	}
+	int i = (fmt_index() + d) % FMT_N;
+	crt_val[CRT_ASPECT] = fmt_list[i].aspect;
+	crt_val[CRT_PANSCAN] = fmt_list[i].pan;
+	crt_send();
+	fmt_changed = 1;
+	fmt_until = t + 6.0;
+	return 1;
+}
+
+// Closes the box after its time; 1 when it did (the controls to redraw).
+static int format_tick(double t)
+{
+	if (!fmt_open || t < fmt_until) return 0;
+	fmt_close();
+	return 1;
+}
+
+static const char *format_label(void)
+{
+	return fmt_open ? fmt_list[fmt_index()].name : NULL;
+}
+
 // A test picture for the adjustment: border, grid, centre cross and values.
-// The lists' frame buffer: 640 pixels and the lines of the 15 kHz mode
+// The lists' frame buffer: 720 pixels and the lines of the 15 kHz mode
 // chosen in Regola CRT. Auto: 576 lines (576i) with menu_pal=1 in
 // MiSTer.ini, otherwise 480 (480i), as the menu core chooses for the lists.
 static int ini_menu_pal(void)
@@ -3156,9 +3260,9 @@ static void menu_fb(void)
 	static const int lines[5] = { 0, 576, 288, 480, 240 };
 	int h = lines[crt_val[CRT_MODE]];
 	if (!h) h = ini_menu_pal() ? 576 : 480;
-	if (fb_menu && native_w == 640 && native_h == h) return;
+	if (fb_menu && native_w == 720 && native_h == h) return;
 	menu_asking = 1;
-	fb_native(640, h, 4.0 / 3.0);
+	fb_native(720, h, 4.0 / 3.0);
 	menu_asking = 0;
 }
 
@@ -3184,22 +3288,25 @@ static void crt_draw(int sel, const char *message)
 	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(160, 160, 160), accent = fb_rgb(40, 90, 190);
 	uint32_t red = fb_rgb(220, 40, 40), green = fb_rgb(40, 200, 40);
 
-	// the test pattern: grid, centre cross, red border on the frame edge
+	// the test pattern: grid, centre cross, red border on the edge of the
+	// lists' part of the screen (the middle 640 pixels of 720: the same
+	// place as when the lists were 640 wide, so the values stay valid)
+	int ox = menu_ox(), mw = menu_w();
 	for (int i = 1; i < 8; i++)
 	{
-		fb_fill_rect(fb_w * i / 8, 0, sx, fb_h, grey);
-		fb_fill_rect(0, fb_h * i / 8, fb_w, sy, grey);
+		fb_fill_rect(ox + mw * i / 8, 0, sx, fb_h, grey);
+		fb_fill_rect(ox, fb_h * i / 8, mw, sy, grey);
 	}
 	fb_fill_rect(fb_w / 2 - sx, 0, 2 * sx, fb_h, green);
-	fb_fill_rect(0, fb_h / 2 - sy, fb_w, 2 * sy, green);
-	fb_fill_rect(0, 0, fb_w, 2 * sy, red);
-	fb_fill_rect(0, fb_h - 2 * sy, fb_w, 2 * sy, red);
-	fb_fill_rect(0, 0, 2 * sx, fb_h, red);
-	fb_fill_rect(fb_w - 2 * sx, 0, 2 * sx, fb_h, red);
+	fb_fill_rect(ox, fb_h / 2 - sy, mw, 2 * sy, green);
+	fb_fill_rect(ox, 0, mw, 2 * sy, red);
+	fb_fill_rect(ox, fb_h - 2 * sy, mw, 2 * sy, red);
+	fb_fill_rect(ox, 0, 2 * sx, fb_h, red);
+	fb_fill_rect(ox + mw - 2 * sx, 0, 2 * sx, fb_h, red);
 
 	int row_h = 11 * sy;
 	int bw = 38 * gw, bh = 29 * row_h / 2 + 8 * sy;
-	if (bw > fb_w - 8 * sx) bw = fb_w - 8 * sx;
+	if (bw > mw - 8 * sx) bw = mw - 8 * sx;
 	int bx = (fb_w - bw) / 2, by = (fb_h - bh) / 2;
 	fb_fill_rect(bx, by, bw, bh, fb_rgb(0, 0, 0));
 	int y = by + 4 * sy;

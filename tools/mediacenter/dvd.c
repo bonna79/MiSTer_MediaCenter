@@ -1450,6 +1450,7 @@ static int dvd_play(const char *device)
 				if (code == KEY_ENTER) result = END_BACK;
 				continue;
 			}
+			if (format_key(code, t, p.state, menu)) continue;
 			if (menu && p.state == ST_PLAY)
 			{
 				int done = 1;
@@ -1717,6 +1718,7 @@ static int dvd_play(const char *device)
 		if (now90 >= 0 && p.state != ST_FF && p.state != ST_REW) title_time = now90 / 90000.0;
 
 		if (p.confirm_exit && t >= p.osd_until) p.confirm_exit = 0;
+		if (format_tick(t)) p.dirty = 1;
 		int show_osd = p.state == ST_STOP || (t < p.osd_until && !(menu && p.state == ST_PLAY && !p.confirm_exit)) ||
 			(menu && t < p.osd_until);
 		if (show_osd && (p.dirty || t - osd_built >= 0.25))
@@ -1753,6 +1755,7 @@ static int dvd_play(const char *device)
 			{
 				info.legend = legend_dvd_play;
 				info.legend_n = sizeof(legend_dvd_play) / sizeof(legend_dvd_play[0]);
+				info.format_label = format_label();
 			}
 			osd_build(&info);
 			osd_built = t;
@@ -1830,6 +1833,7 @@ static int dvd_play(const char *device)
 	}
 
 	dvd_stop_thread();
+	fmt_close();
 	main_idle(0);
 	native_fb = 0;
 	yuv_dvd = 0;
