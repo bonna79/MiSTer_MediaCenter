@@ -222,6 +222,10 @@ reg [31:0] rd_done = 0;                 // ring bytes arrived
 reg [31:0] ans_rd = 0;                  // rd_done in the last answer
 reg [22:0] ro = 0;                      // offset of rf in the ring
 reg [22:0] rsize = 0;                   // bytes in the ring
+// worked out a clock late from ro (timing): a ring read waits for the table
+// look-up of ro (lk 0, 1, 2, 3) after every change of ro and rsize
+reg  [9:0] r_pg_end;                    // words to the end of ro's page
+reg        r_last;                      // ro is in the ring's last page
 reg [10:0] pages = 0;
 reg [10:0] t_left = 0, t_got = 0;       // page table words to ask for, arrived
 reg        need_ans = 0;
@@ -335,6 +339,9 @@ always @(posedge clk) begin
 		if (rst_n == 1 && !stop) e_reset <= 0;
 	end
 
+	r_pg_end <= 10'd512 - ro[11:3];
+	r_last   <= ro[22:12] == rsize[22:12] - 1'd1;
+
 	// ------------------------------------------------ steps
 	case (state)
 		S_IDLE, S_RUN: begin
@@ -354,7 +361,7 @@ always @(posedge clk) begin
 				end
 				else if (state == S_RUN && lk == 3 && !f_req && r_avail >= 8 && cf_room >= BURST) begin
 					// read the ring: bytes written, not past the page
-					to_end = 13'd512 - ro[11:3];
+					to_end = {3'd0, r_pg_end};
 					n = r_avail[31:3] > BURST ? 9'd32 : {1'b0, r_avail[10:3]};
 					if (n > to_end) n = to_end[8:0];
 					f_req   <= 1;
@@ -363,7 +370,7 @@ always @(posedge clk) begin
 					f_addr  <= {tab_q, ro[11:3]};
 					f_burst <= n[7:0];
 					rf      <= rf + {n, 3'b000};
-					ro      <= (ro + {n, 3'b000} >= rsize) ? 23'd0 : ro + {n, 3'b000};
+					ro      <= (r_last && {4'd0, n} == to_end) ? 23'd0 : ro + {n, 3'b000}; // a read stops at the page end
 					lk      <= 0;
 				end
 			end
