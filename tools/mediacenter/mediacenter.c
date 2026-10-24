@@ -308,6 +308,8 @@ static int open_audio_track(int index)
 // media_io instead of a file, and its chapters come from ENTRIES.SVD.
 static AVIOContext *media_io = NULL;
 static int svcd_on = 0;
+// The disc in the drive played through FFmpeg: "Super Video CD" or "Video CD".
+static const char *svcd_kind = "Super Video CD";
 static double svcd_chapter[MAX_ENTRIES];
 static int svcd_chapters = 0;
 
@@ -427,6 +429,9 @@ static int media_open(const char *path)
 		AVRational sar = av_guess_sample_aspect_ratio(mc.fmt, st, NULL);
 		double w = mc.vdec->width, h = mc.vdec->height;
 		if (sar.num > 0 && sar.den > 0) w *= av_q2d(sar);
+		// Video CD pictures are 4:3 whatever their MPEG-1 header says, as in
+		// the Video CD player.
+		if (svcd_on && st->codecpar->codec_id == AV_CODEC_ID_MPEG1VIDEO) w = h * 4.0 / 3.0;
 		video_aspect = fb_aspect = (h > 0 && w > 0) ? w / h : 4.0 / 3.0;
 		printf("mediacenter: %s, video %s %dx%d aspect %.3f, audio %s, %.0f s\n", path,
 			avcodec_get_name(st->codecpar->codec_id), mc.vdec->width, mc.vdec->height, video_aspect,
@@ -1818,7 +1823,9 @@ static int media_play(int in_playlist)
 	p.state = ST_PLAY;
 	p.osd_until = now_seconds() + 3.0;
 	have_frame = 0;
-	exit_question = svcd_on ? "Uscire dal Super Video CD?" : "Tornare all'elenco?";
+	static char svcd_question[48];
+	snprintf(svcd_question, sizeof(svcd_question), "Uscire dal %s?", svcd_kind);
+	exit_question = svcd_on ? svcd_question : "Tornare all'elenco?";
 
 	if (mc.astream >= 0 && audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	fb_clear();
@@ -2435,12 +2442,16 @@ static int play_disc_in_drive(const char *device)
 	cd_fd = fd;
 	const char *kind = (read_toc() == 0) ? detect_vcd_kind() : NULL;
 
-	// Super Video CD (MPEG-2): FFmpeg, not the Video CD player.
-	if (kind && strcmp(kind, "Video CD"))
+	// Super Video CD (MPEG-2) and Video CD (MPEG-1): FFmpeg, so the screen
+	// is set up for the CRT as for a DVD (the Video CD player kept the HDMI
+	// frame buffer). MC_VCD_OLD=1 keeps the Video CD player for Video CDs.
+	if (kind && (strcmp(kind, "Video CD") || !getenv("MC_VCD_OLD")))
 	{
 		printf("mediacenter: %s, %d track(s)\n", kind, track_last);
 		if (reopen_screen()) return -1;
+		svcd_kind = strcmp(kind, "Video CD") ? "Super Video CD" : "Video CD";
 		svcd_play();
+		svcd_kind = "Super Video CD";
 		close(cd_fd);
 		cd_fd = -1;
 		return 0;
@@ -2830,7 +2841,7 @@ static int spbc_item(int item)
 	if (item >= 2 && item <= 99)
 	{
 		if (item > track_last || !tracks[item].data) return -1;
-		snprintf(name, sizeof(name), "Super Video CD - traccia %d", item - 1);
+		snprintf(name, sizeof(name), "%s - traccia %d", svcd_kind, item - 1);
 		return svcd_play_range(tracks[item].start, tracks[item].end, item, -1, name, 1);
 	}
 	if (item >= 100 && item < 600)
@@ -2838,7 +2849,7 @@ static int spbc_item(int item)
 		int e = item - 100;
 		if (e >= num_entry_items || !entry_items[e].track) return -1;
 		int t = entry_items[e].track;
-		snprintf(name, sizeof(name), "Super Video CD - traccia %d", t - 1);
+		snprintf(name, sizeof(name), "%s - traccia %d", svcd_kind, t - 1);
 		return svcd_play_range(tracks[t].start, tracks[t].end, t, entry_items[e].lba, name, 1);
 	}
 	if (item >= 1000 && item < 1000 + seg_count)
@@ -2847,8 +2858,8 @@ static int spbc_item(int item)
 		// marked as continuations
 		int s = item - 1000, n = 1;
 		while (s + n < seg_count && (seg_info[s + n] & 0x20)) n++;
-		return svcd_play_range(seg_first + s * SEGMENT_SECTORS, seg_first + (s + n) * SEGMENT_SECTORS, 0, -1,
-			"Super Video CD - menu", 1);
+		snprintf(name, sizeof(name), "%s - menu", svcd_kind);
+		return svcd_play_range(seg_first + s * SEGMENT_SECTORS, seg_first + (s + n) * SEGMENT_SECTORS, 0, -1, name, 1);
 	}
 	return -1;
 }
@@ -2906,7 +2917,7 @@ static int svcd_pbc(void)
 	play_end_hook = NULL;
 	play_osd_hook = NULL;
 	memset(&spbc, 0, sizeof(spbc));
-	printf("mediacenter: end of the Super Video CD menus\n");
+	printf("mediacenter: end of the %s menus\n", svcd_kind);
 	return quit_requested ? END_QUIT : r;
 }
 
@@ -2919,7 +2930,7 @@ static int svcd_play(void)
 		if (tracks[t].data) list[n++] = t;
 	if (!n)
 	{
-		fprintf(stderr, "mediacenter: the Super Video CD has no MPEG tracks\n");
+		fprintf(stderr, "mediacenter: the %s has no MPEG tracks\n", svcd_kind);
 		return END_DONE;
 	}
 	read_entries();
@@ -2934,7 +2945,7 @@ static int svcd_play(void)
 		while (i >= 0 && i < n && !quit_requested)
 		{
 			char name[64];
-			snprintf(name, sizeof(name), "Super Video CD %d/%d", i + 1, n);
+			snprintf(name, sizeof(name), "%s %d/%d", svcd_kind, i + 1, n);
 			r = svcd_play_range(tracks[list[i]].start, tracks[list[i]].end, list[i], -1, name, 1);
 			if (r == END_QUIT || r == END_BACK) break;
 			if (r == END_PREV) i = i > 0 ? i - 1 : 0;
