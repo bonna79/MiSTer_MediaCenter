@@ -237,6 +237,7 @@ localparam M_IDLE = 0, M_REGION = 1, M_WAITY = 3, M_LLOAD = 4, M_LCALC = 5, M_WA
            M_CCALC = 7, M_NEXT = 8, M_CLOAD = 9;
 reg  [3:0] ms;
 reg  [1:0] c_rq, c_rk;
+(* preserve *) reg [1:0] c_rqw;   // copy of c_rq for the weights (fewer loads on c_rq)
 reg        c_l;
 reg        c_b;
 reg  [4:0] S;                 // region size 16, 8, 4
@@ -265,9 +266,9 @@ always @(posedge clk) begin
 	wtwo <= c_two;
 	wl2 <= wl;
 	wtwo2 <= wtwo;
-	wsel0a <= qwt[c_rq * 51 +: 51];
-	wsel1a <= qwt1[c_rq * 51 +: 51];
-	iwsela <= iw[c_rq * 9 +: 9];
+	wsel0a <= qwt[c_rqw * 51 +: 51];
+	wsel1a <= qwt1[c_rqw * 51 +: 51];
+	iwsela <= iw[c_rqw * 9 +: 9];
 	wsel0 <= wsel0a;
 	wsel1 <= wsel1a;
 	iwsel <= iwsela;
@@ -640,6 +641,7 @@ always @(posedge clk) begin
 				              (!use1[i] || (`MV1OF(i * 4) == `MV1OF(i * 4 + 1) && `MV1OF(i * 4) == `MV1OF(i * 4 + 2) &&
 				                            `MV1OF(i * 4) == `MV1OF(i * 4 + 3)));
 			c_rq <= 0;
+			c_rqw <= 0;
 			c_rk <= 0;
 			c_l <= !use0[0];
 			f_rq <= 0;
@@ -759,6 +761,7 @@ always @(posedge clk) begin
 			else if (quad_eq[c_rq] || c_rk == 3) begin
 				c_rk <= 0;
 				c_rq <= c_rq + 1'd1;
+				c_rqw <= c_rq + 1'd1;
 				c_l <= !use0[c_rq + 1'd1];
 				if (c_rq == 3) begin fin <= 1; ms <= M_IDLE; end
 			end
