@@ -36,6 +36,19 @@ The old `vcd_player` from the first versions is no longer needed: the Video CD p
 
 The player's on-screen texts are in Italian.
 
+## What's new in version 2.8
+
+2.8 gives every film its right shape on the CRT and lets you change it while watching.
+
+- **The right shape for every film on the CRT:** the menu core puts the black bars at the picture's real aspect (4:3, 16:9, 1.85:1, 2.35:1 and others), no longer only at 16:9. Pictures narrower than 4:3 get bars at the sides.
+- **Formato and Pan & scan in CRT Adjust:** two new entries. **Formato** (format): Auto (what the disc or file declares), Pieno (stretched, no bars), 4:3, 16:9, Anamorfico 2.35:1, Cinema 1.85:1; it applies to HDMI too. **Pan & scan** (CRT only): the picture fills the height and the sides are cut. Both are saved in `mediacenter.ini` (`MC_CRT_ASPECT`, `MC_CRT_PANSCAN`).
+- **Format box during the film:** press **Start** while the film plays and the Formato box appears. ◄ ► (or ▲ ▼) change the format and the picture changes at once, on CRT and HDMI; **A**, **Start** or **B** close it, and it closes by itself after 6 seconds. The choice stays saved. The entries are Auto, 4:3, 16:9, Cinema 1.85:1, Anamorfico 2.35:1, Pieno and Pan & scan.
+- **Lists 720 pixels wide:** the lists and CRT Adjust now use a 720x576 (PAL) or 720x480 (NTSC) picture, the right resolution for the CRT. The text stays centred, in the same 640 pixels as before, so the CRT adjustments do not change.
+- **Fixed: coloured band at the top of the CRT.** When the Main answered late, for example right after a change of 15 kHz mode, the player switched to its fallback drawing for the whole session and a cyan or yellow band could stay above the film. Now it tries again at the next video, waits longer after a mode change and always paints black outside the film.
+- **1080p:** while the player plays, the Main rests and leaves both ARM cores to the decoder; for 1920x1080 videos the menu core copies the picture into the frame buffer by itself (zero-copy, `MC_NOZC=1` turns it off). 1080p is still not recommended: about 14% of the pictures are not shown. Work is under way to bring it to 100% with an H.264 accelerator in the FPGA.
+
+Tested on a real MiSTer on 23 and 24 October 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI together: geometry test DVD with round circles in 4:3 and 16:9; correct black bars even after 15 kHz mode changes; format box during the film and lists at 720x480; One Piece 1080p with about 14% of the pictures not shown.
+
 ## What's new in version 2.7
 
 2.7 brings the CRT output to the standard of a real DVD player.
@@ -247,6 +260,7 @@ MMC is made for standard-definition video. These are the recommended maximum res
 | DVD (MPEG-2 720x576) | less than 1% |
 | 8-bit H.264 1280x720 | 0.1% at full resolution in 2.7 (1.4–2.5% in earlier versions, 10% before the FPGA converted the colours) |
 | 8-bit H.264 1440x810 | about 1.4% (was about 65% up to 2.5) |
+| 8-bit H.264 1920x1080 | about 14% (version 2.8, One Piece) |
 | 10-bit H.264 (Hi10p) 1280x720 | about 78% (measured with version 1.0) |
 
 With a 720p H.264 video the ARM needs about 30 ms to decode a picture, out of 41.7 ms available at 24 pictures per second. That is why the colour conversion, which took another 16 ms, moved to the FPGA: the ARM now copies the picture in 5.5 ms.
@@ -293,18 +307,20 @@ If the CRT's geometry is off, the picture can be narrowed, widened and moved wit
 
 The adjustments apply to the player's video on the 15 kHz output; HDMI does not change. The menu core redraws the picture in the new rectangle without changing the sync, so the CRT never loses lock and the colours stay the original ones. This feature was made possible by the work of Umberto Parisi (rmonic79) of Beceri Videoludici: it comes from his [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust), adapted to the way MMC draws the picture. Follow their YouTube channel, [I Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici).
 
-The same screen has two entries for the 15 kHz output, handled by the menu's FPGA core:
+The same screen has four entries handled by the menu's FPGA core:
 
 | Entry | Values |
 | --- | --- |
 | **Modo 15 kHz** (15 kHz mode) | **Auto** (576i for PAL DVDs and 25/50 fps videos, 480i for NTSC DVDs and 23.976/29.97/59.94 fps videos; lists in 480i or 576i following `menu_pal`), or fixed **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
 | **Filtro tremolio** (flicker filter) | **Auto** (on for interlaced lists, off for video and at 288p/240p), **Spento** (off), **Acceso** (on) |
+| **Formato** (format) | **Auto** (what the disc or file declares), **Pieno** (stretched, no bars), **4:3**, **16:9**, **Anamorfico 2.35:1**, **Cinema 1.85:1**; it applies to HDMI too. It can also be changed during the film with **Start** |
+| **Pan & scan** | CRT only: the picture fills the height and the sides are cut |
 
 The filter blends every line with the one below it: thin white text no longer flickers on the interlaced output. In Auto it stays off for video because the player already smooths the controls and subtitles, and the film stays sharp.
 
-Below the entries, **Misurata** (measured) shows the mode the Main actually measures on the core's output (for example `640x576i 15.63 kHz 50.0 Hz`). The same line, with the expected mode, also goes to `/tmp/mediacenter.log`.
+Below the entries, **Misurata** (measured) shows the mode the Main actually measures on the core's output (for example `720x576i 15.63 kHz 50.0 Hz`). The same line, with the expected mode, also goes to `/tmp/mediacenter.log`.
 
-The lists and the CRT Adjust screen use a picture 640 pixels wide with the lines of the chosen mode: 480 in Auto (576 with `menu_pal=1`), or 576, 288, 480 or 240. The CRT shows it pixel for pixel, centred in the 720-pixel line, and the text stays whole; HDMI enlarges it. With `MC_MENU_HD=1` in `mediacenter.ini` the lists go back to 1280x720 as in version 2.1.
+The lists and the CRT Adjust screen use a picture 720 pixels wide with the lines of the chosen mode: 480 in Auto (576 with `menu_pal=1`), or 576, 288, 480 or 240, with the text in the middle 640 pixels. The CRT shows it pixel for pixel and the text stays whole; HDMI enlarges it. With `MC_MENU_HD=1` in `mediacenter.ini` the lists go back to 1280x720 as in version 2.1.
 
 ## Tested on a real MiSTer
 
@@ -416,9 +432,10 @@ MC_CRT_VPOS=2
 | Setting | Effect |
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Moves the sound later (positive value) or earlier (negative), in seconds. Useful with TVs that delay the picture |
-| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
+| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER`, `MC_CRT_ASPECT`, `MC_CRT_PANSCAN` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
 | `MC_FIELDS=1` | Interlaced DVDs and videos: the player does not blend the two fields. The CRT gets them whole, as from a real DVD player (sharper and smoother in motion); on HDMI the Main's scaler blends them, with no combing. Recommended with a CRT. Without this line the player blends the lines for both outputs |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
+| `MC_NOZC=1` | 1080p videos: the ARM copies the picture instead of the menu core (zero-copy off) |
 | `MC_MENU_HD=1` | Lists at 1280x720 as in version 2.1, instead of drawn for the CRT |
 | `MC_DIAG=0` | Turns off the `mediacenter: diag` diagnosis lines in the log |
 | `MC_SPLASH=0` | Turns off the MMC picture when the script starts |
@@ -433,7 +450,7 @@ Use the controller, with the MiSTer menu buttons.
 | --- | --- | --- |
 | A | Opens | DVD: changes subtitles |
 | B | Goes back | Stop; on Super Video CDs goes back to the first menu |
-| Start | | Play |
+| Start | | Play; while the film plays opens the format box |
 | Select | | Pause |
 | ◄ ► | Previous/next page | Previous/next chapter; without chapters jumps 60 seconds; in music changes track |
 | ▲ ▼ | Up and down | Changes audio track, or the channel (stereo, left, right) |

@@ -2,22 +2,20 @@
 
 > Sviluppato con l'aiuto dell'intelligenza artificiale (Claude di Anthropic). / Developed with the help of AI (Anthropic's Claude).
 
-**MiSTer MediaCenter 2.7** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB e rete, su HDMI e su CRT a 15 kHz.
+**MiSTer MediaCenter 2.8** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB e rete, su HDMI e su CRT a 15 kHz.
 
-**Novità della 2.7:** l'uscita per il CRT diventa quella di un vero lettore DVD.
+**Novità della 2.8:** ogni film ha il suo formato giusto sul CRT, e si cambia durante la visione.
 
-- **CRT a 720 punti a 13,5 MHz** (standard DVD): i DVD arrivano al CRT punto per punto, le altre larghezze con un filtro orizzontale. Gli elenchi restano a 640 punti, al centro.
-- **Comandi del lettore dentro il bordo rosso di Regola CRT**, il video resta a 720 punti pieni.
-- **Modo 15 kHz Auto dagli fps del video:** 25/50 fps a 576i 50 Hz, 23,976/29,97/59,94 fps a 480i 60 Hz, sempre interlacciati.
-- **DVD in YUV:** i colori dei DVD li converte l'FPGA, sottotitoli e menu disegnati in YUV (`MC_NOYUV=1` per tornare all'RGB).
-- **Video 720p a piena risoluzione** (1280x720, prima 1280x360): scritte più nitide, sempre fluido (0,1% di immagini non mostrate).
-- **Corretto:** un DVD dopo un video 720p partiva a metà risoluzione (720x288).
-- **Immagine di MMC per 3 secondi** all'avvio dello script (`MC_SPLASH=0` la spegne).
-- **Con il CRT consigliamo `MC_FIELDS=1`** in `/media/fat/linux/mediacenter.ini`: semiquadri dei DVD intatti sul CRT, fusi dallo scaler sull'HDMI. Esempio nel [README](https://github.com/bonna79/MiSTer_MediaCenter#4-impostazioni-del-lettore-facoltative).
+- **Formato giusto per ogni film sul CRT:** bande nere alla proporzione vera dell'immagine (4:3, 16:9, 1,85:1, 2,35:1 e le altre), non più solo al 16:9; bande ai lati per le immagini più strette del 4:3.
+- **Formato e Pan & scan in Regola CRT:** Auto, Pieno, 4:3, 16:9, Anamorfico 2,35:1, Cinema 1,85:1 (anche per l'HDMI) e Pan & scan per il CRT, salvati in `mediacenter.ini`.
+- **Riquadro Formato con Start durante il film:** ◄ ► cambiano formato e l'immagine cambia subito su CRT e HDMI; A, Start o B lo chiudono, si chiude da solo dopo 6 secondi; la scelta resta salvata.
+- **Elenchi a 720x576 (PAL) e 720x480 (NTSC)**, la risoluzione giusta per il CRT, con le scritte al centro: le regolazioni del CRT non cambiano.
+- **Corretto:** una banda azzurra o gialla in alto sul CRT quando il Main rispondeva in ritardo, per esempio dopo un cambio di Modo 15 kHz. Ora il lettore riprova al video successivo e fuori dal film dipinge sempre il nero.
+- **1080p:** il Main resta fermo durante la riproduzione e il core del menu copia l'immagine nel framebuffer (zero-copy, `MC_NOZC=1` lo spegne). Il 1080p resta sconsigliato (circa il 14% di immagini non mostrate): è in corso il lavoro per un acceleratore H.264 nell'FPGA.
 
-Provata su un MiSTer vero il 19 e 20 ottobre 2026 su CRT Sony Trinitron e HDMI insieme: Star Wars Episodio III e Shrek 2 PAL; DVD in YUV con nessuna immagine saltata; MP4 720p a 1280x720 con una sola immagine non mostrata su 9528 e scritte perfette sul CRT.
+Provata su un MiSTer vero il 23 e 24 ottobre 2026 su CRT Sony Trinitron e HDMI insieme: DVD di prova della geometria con i cerchi rotondi in 4:3 e in 16:9, bande nere corrette anche dopo i cambi di modo, riquadro Formato ed elenchi a 720x480.
 
-Le novità delle versioni precedenti (2.6: video larghi fluidi, ritorno dai giochi PSX, pubblicità dei DVD) sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-26). Tutte le novità della 2.5 (Regola CRT, DVD interlacciati veri sul CRT, filtro tremolio, menu dei DVD fluidi) sono descritte nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-25).
+Le novità della 2.7 (CRT a 720 punti come un lettore DVD, modo Auto dagli fps, DVD in YUV, 720p a piena risoluzione) e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-27).
 
 **Ringraziamenti:**
 
@@ -42,22 +40,20 @@ Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0
 
 ---
 
-**English:** **MiSTer MediaCenter 2.7** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB and network, over HDMI and on a 15 kHz CRT.
+**English:** **MiSTer MediaCenter 2.8** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB and network, over HDMI and on a 15 kHz CRT.
 
-**What's new in 2.7:** the CRT output becomes that of a real DVD player.
+**What's new in 2.8:** every film gets its right shape on the CRT, and you can change it while watching.
 
-- **720-pixel CRT output at 13.5 MHz** (the DVD standard): DVDs reach the CRT pixel for pixel, other widths through a horizontal filter. Lists stay 640 pixels wide, centred.
-- **Player controls inside the red border of CRT Adjust**, the video stays a full 720 pixels.
-- **Auto 15 kHz mode from the video's frame rate:** 25/50 fps at 576i 50 Hz, 23.976/29.97/59.94 fps at 480i 60 Hz, always interlaced.
-- **DVDs in YUV:** the FPGA converts DVD colours, subtitles and menus drawn in YUV (`MC_NOYUV=1` goes back to RGB).
-- **720p videos at full resolution** (1280x720, before 1280x360): sharper text, still smooth (0.1% of pictures not shown).
-- **Fixed:** a DVD after a 720p video started at half resolution (720x288).
-- **MMC picture for 3 seconds** when the script starts (`MC_SPLASH=0` turns it off).
-- **With a CRT we recommend `MC_FIELDS=1`** in `/media/fat/linux/mediacenter.ini`: DVD fields whole on the CRT, blended by the scaler on HDMI. Example in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#4-player-settings-optional).
+- **The right shape for every film on the CRT:** black bars at the picture's real aspect (4:3, 16:9, 1.85:1, 2.35:1 and others), no longer only 16:9; bars at the sides for pictures narrower than 4:3.
+- **Formato and Pan & scan in CRT Adjust:** Auto, Pieno (stretched), 4:3, 16:9, Anamorfico 2.35:1, Cinema 1.85:1 (HDMI too) and Pan & scan for the CRT, saved in `mediacenter.ini`.
+- **Format box with Start during the film:** ◄ ► change the format and the picture changes at once on CRT and HDMI; A, Start or B close it, it closes by itself after 6 seconds; the choice stays saved.
+- **Lists at 720x576 (PAL) and 720x480 (NTSC)**, the right resolution for the CRT, with the text centred: the CRT adjustments do not change.
+- **Fixed:** a cyan or yellow band at the top of the CRT when the Main answered late, for example after a 15 kHz mode change. The player now tries again at the next video and always paints black outside the film.
+- **1080p:** the Main rests during playback and the menu core copies the picture into the frame buffer (zero-copy, `MC_NOZC=1` turns it off). 1080p is still not recommended (about 14% of pictures not shown): work is under way on an H.264 accelerator in the FPGA.
 
-Tested on a real MiSTer on 19 and 20 October 2026 on a Sony Trinitron CRT and HDMI together: Star Wars Episode III and Shrek 2 PAL; DVDs in YUV with no dropped pictures; 720p MP4 at 1280x720 with only one picture not shown out of 9528 and perfect text on the CRT.
+Tested on a real MiSTer on 23 and 24 October 2026 on a Sony Trinitron CRT and HDMI together: geometry test DVD with round circles in 4:3 and 16:9, correct black bars even after mode changes, format box and lists at 720x480.
 
-What's new in earlier versions (2.6: smooth wide videos, return from PSX games, DVD adverts) is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-26). Everything new in 2.5 (CRT Adjust, true interlaced DVDs on the CRT, flicker filter, smooth DVD menus) is described in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-25).
+What's new in 2.7 (720-pixel CRT output like a DVD player, Auto mode from the frame rate, DVDs in YUV, 720p at full resolution) and in earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-27).
 
 **Thanks:** Umberto Parisi (rmonic79) of the Beceri Videoludici, whose work on [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) made CRT Adjust possible ([YouTube channel](https://youtube.com/@rmonic79_ibecerivideoludici)); Max Riptide for the many tests and suggestions; mad4gith for the ideas to improve MMC.
 

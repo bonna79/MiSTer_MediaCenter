@@ -34,6 +34,19 @@ Il pacchetto è formato da queste parti:
 
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
 
+## Novità della versione 2.8
+
+La 2.8 dà a ogni film il suo formato giusto sul CRT e permette di cambiarlo durante la visione.
+
+- **Formato giusto per ogni film sul CRT:** il core del menu mette le bande nere alla proporzione vera dell'immagine (4:3, 16:9, 1,85:1, 2,35:1 e le altre), non più solo al 16:9. Le immagini più strette del 4:3 hanno le bande ai lati.
+- **Formato e Pan & scan in Regola CRT:** due voci nuove. **Formato**: Auto (quello che dichiara il disco o il file), Pieno (stirato senza bande), 4:3, 16:9, Anamorfico 2,35:1, Cinema 1,85:1; vale anche per l'HDMI. **Pan & scan** (solo CRT): l'immagine riempie l'altezza e i lati vengono tagliati. Si salvano in `mediacenter.ini` (`MC_CRT_ASPECT`, `MC_CRT_PANSCAN`).
+- **Riquadro Formato durante il film:** premi **Start** mentre il film va e compare il riquadro Formato. Con ◄ ► (o ▲ ▼) cambi formato e l'immagine cambia subito, su CRT e HDMI; **A**, **Start** o **B** lo chiudono, e si chiude da solo dopo 6 secondi. La scelta resta salvata. Le voci sono Auto, 4:3, 16:9, Cinema 1,85:1, Anamorfico 2,35:1, Pieno e Pan & scan.
+- **Elenchi a 720 punti:** gli elenchi e Regola CRT ora usano un'immagine di 720x576 (PAL) o 720x480 (NTSC), la risoluzione giusta per il CRT. Le scritte restano al centro, nei 640 punti di prima, quindi le regolazioni del CRT non cambiano.
+- **Corretto: banda colorata in alto sul CRT.** Se il Main rispondeva in ritardo, per esempio subito dopo un cambio di Modo 15 kHz, il lettore passava al disegno di riserva per tutta la sessione e sopra al film poteva restare una banda azzurra o gialla. Ora riprova al video successivo, aspetta di più dopo un cambio di modo e fuori dal film dipinge sempre il nero.
+- **1080p:** mentre il lettore riproduce, il Main resta fermo e lascia i due core dell'ARM al decoder; per i video 1920x1080 il core del menu copia da solo l'immagine nel framebuffer (zero-copy, `MC_NOZC=1` lo spegne). Il 1080p resta comunque sconsigliato: circa il 14% di immagini non mostrate. È in corso il lavoro per portarlo al 100% con un acceleratore H.264 nell'FPGA.
+
+Provata su un MiSTer vero il 23 e 24 ottobre 2026, su CRT Sony Trinitron (SCART RGB) e HDMI insieme: DVD di prova della geometria con i cerchi rotondi in 4:3 e in 16:9; bande nere corrette anche dopo i cambi di Modo 15 kHz; riquadro Formato durante il film ed elenchi a 720x480; One Piece 1080p con circa il 14% di immagini non mostrate.
+
 ## Novità della versione 2.7
 
 La 2.7 porta l'uscita per il CRT allo standard di un vero lettore DVD.
@@ -245,6 +258,7 @@ MMC è fatto per i video a risoluzione standard. Queste sono le risoluzioni mass
 | DVD (MPEG-2 720x576) | meno dell'1% |
 | H.264 8 bit 1280x720 | 0,1% a piena risoluzione nella 2.7 (1,4–2,5% nelle versioni precedenti, il 10% prima che l'FPGA convertisse i colori) |
 | H.264 8 bit 1440x810 | circa 1,4% (era circa 65% fino alla 2.5) |
+| H.264 8 bit 1920x1080 | circa 14% (versione 2.8, One Piece) |
 | H.264 10 bit (Hi10p) 1280x720 | circa 78% (misurato con la versione 1.0) |
 
 Con un video H.264 a 720p l'ARM impiega circa 30 ms per decodificare un'immagine, su 41,7 ms disponibili a 24 immagini al secondo. Per questo la conversione dei colori, che occupava altri 16 ms, è passata all'FPGA: ora l'ARM copia l'immagine in 5,5 ms.
@@ -291,18 +305,20 @@ Se il CRT ha la geometria sballata, l'immagine si può stringere, allargare e sp
 
 Le regolazioni valgono per il video del lettore sull'uscita a 15 kHz; l'HDMI non cambia. Il core del menu ridisegna l'immagine nel nuovo riquadro senza cambiare il sincronismo, quindi il CRT non perde mai l'aggancio e i colori restano quelli originali. Questa funzione è stata possibile grazie al lavoro di Umberto Parisi (rmonic79) dei Beceri Videoludici: viene dal suo [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust), adattato al modo in cui MMC disegna l'immagine. Seguite il loro canale YouTube, [I Beceri Videoludici](https://youtube.com/@rmonic79_ibecerivideoludici).
 
-Nella stessa schermata ci sono due voci per l'uscita a 15 kHz, gestite dal core FPGA del menu:
+Nella stessa schermata ci sono quattro voci gestite dal core FPGA del menu:
 
 | Voce | Valori |
 | --- | --- |
 | **Modo 15 kHz** | **Auto** (576i per i DVD PAL e i video a 25/50 fps, 480i per i DVD NTSC e i video a 23,976/29,97/59,94 fps; elenchi in 480i o 576i secondo `menu_pal`), oppure fisso **576i PAL**, **288p PAL**, **480i NTSC**, **240p NTSC** |
 | **Filtro tremolio** | **Auto** (acceso negli elenchi interlacciati, spento sul video e a 288p/240p), **Spento**, **Acceso** |
+| **Formato** | **Auto** (quello che dichiara il disco o il file), **Pieno** (stirato senza bande), **4:3**, **16:9**, **Anamorfico 2,35:1**, **Cinema 1,85:1**; vale anche per l'HDMI. Si cambia anche durante il film con **Start** |
+| **Pan & scan** | Solo CRT: l'immagine riempie l'altezza e i lati vengono tagliati |
 
 Il filtro fonde ogni riga con quella sotto: le scritte bianche sottili non sfarfallano più sull'uscita interlacciata. Sul video resta spento in Auto perché i comandi e i sottotitoli sono già ammorbiditi dal lettore, e il film resta nitido.
 
-Sotto le voci compare **Misurata**: la risoluzione che il Main misura davvero sull'uscita del core (per esempio `640x576i 15.63 kHz 50.0 Hz`). La stessa riga, con il modo atteso, finisce anche in `/tmp/mediacenter.log`.
+Sotto le voci compare **Misurata**: la risoluzione che il Main misura davvero sull'uscita del core (per esempio `720x576i 15.63 kHz 50.0 Hz`). La stessa riga, con il modo atteso, finisce anche in `/tmp/mediacenter.log`.
 
-Gli elenchi e la schermata Regola CRT usano un'immagine larga 640 punti con le righe del modo scelto: 480 in Auto (576 con `menu_pal=1`), oppure 576, 288, 480 o 240. Il CRT la mostra punto per punto, al centro della riga da 720 punti, e le scritte restano intere; in HDMI viene ingrandita. Con `MC_MENU_HD=1` in `mediacenter.ini` gli elenchi tornano a 1280x720 come nella versione 2.1.
+Gli elenchi e la schermata Regola CRT usano un'immagine larga 720 punti con le righe del modo scelto: 480 in Auto (576 con `menu_pal=1`), oppure 576, 288, 480 o 240, con le scritte nei 640 punti centrali. Il CRT la mostra punto per punto e le scritte restano intere; in HDMI viene ingrandita. Con `MC_MENU_HD=1` in `mediacenter.ini` gli elenchi tornano a 1280x720 come nella versione 2.1.
 
 ## Prove su un MiSTer vero
 
@@ -414,9 +430,10 @@ MC_CRT_VPOS=2
 | Impostazione | Effetto |
 | --- | --- |
 | `MC_AV_OFFSET=0.05` | Sposta l'audio più tardi (valore positivo) o più presto (negativo), in secondi. Serve con i televisori che ritardano l'immagine |
-| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
+| `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER`, `MC_CRT_ASPECT`, `MC_CRT_PANSCAN` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
 | `MC_FIELDS=1` | DVD e video interlacciati: il lettore non fonde i due semiquadri. Il CRT li riceve intatti, come da un vero lettore DVD (più nitido e più fluido nel movimento); sull'HDMI li fonde lo scaler del Main, senza pettini. Consigliato con il CRT. Senza questa riga il lettore fonde le righe per tutte e due le uscite |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
+| `MC_NOZC=1` | Video 1080p: l'immagine la copia l'ARM invece del core del menu (zero-copy spento) |
 | `MC_MENU_HD=1` | Elenchi a 1280x720 come nella versione 2.1, invece che disegnati per il CRT |
 | `MC_DIAG=0` | Spegne le righe di diagnosi `mediacenter: diag` nel log |
 | `MC_SPLASH=0` | Spegne l'immagine di MMC all'avvio dello script |
@@ -431,7 +448,7 @@ Si usa il controller, con i tasti del menu del MiSTer.
 | --- | --- | --- |
 | A | Apre | DVD: cambia i sottotitoli |
 | B | Torna indietro | Stop; nei Super Video CD torna al primo menu |
-| Start | | Play |
+| Start | | Play; mentre il film va apre il riquadro Formato |
 | Select | | Pausa |
 | ◄ ► | Pagina precedente/successiva | Capitolo precedente/successivo; senza capitoli salta di 60 secondi; nella musica cambia brano |
 | ▲ ▼ | Su e giù | Cambia traccia audio, oppure il canale (stereo, sinistro, destro) |
