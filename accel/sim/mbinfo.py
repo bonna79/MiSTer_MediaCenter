@@ -15,7 +15,7 @@ while i < len(c):
     elif t == 0xA2:
         n = (w & 63) + (((w >> 6) & 63) if (w >> 12) & 1 else 0)
         i += 1 + 3 * n
-    elif t == 0xA4:
+    elif t == 0xA4 or t == 0xA0:
         i += 1
     elif t == 0xA3:
         typ = (w >> 16) & 15
