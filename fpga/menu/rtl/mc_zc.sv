@@ -7,8 +7,9 @@
 // buffer page, line by line: it reads a line of Y and a line of U and V
 // (planar 4:2:0, as the decoder writes them), narrows them by 3:2 (1920 to
 // 1280: every 3 source pixels give 2, the nearer one weighing 2/3, the other
-// 1/3, exactly as the player's pack_yuyv_32) and writes the YUYV line. The
-// ARM only waits for it.
+// 1/3, exactly as the player's pack_yuyv_32), or by 2:1 when asked (1920 to
+// 960, for the 4:3 format: each pair of pixels averaged), and writes the YUYV
+// line. The ARM only waits for it.
 //
 // Mailbox (MBOX, 32-bit words, written by the player through /dev/mem):
 //   0 magic "MCZC"           1 sequence: a new value starts a picture
@@ -20,6 +21,7 @@
 //   7 Y bytes between output lines (2 source lines when half the lines are made)
 //   8 U offset    9 V offset
 //  10 [15:0] U/V bytes between output lines  [16] U/V line = output line / 2
+//     [17] narrow by 2:1 instead of 3:2 (at most 256 output words a line)
 // Answer (written by the block, 64 bytes on):
 //  16 clock cycles spent   17 status: 0 done, 1 refused (bad values)
 //  18 the sequence done (written last, in a word of its own)
@@ -102,6 +104,7 @@ reg [10:0] ny, nc;                     // source words a line: Y, U (V)
 wire [31:0] y_step = hdr[7];
 wire [15:0] c_step = hdr[10][15:0];
 wire        c_half = hdr[10][16];
+wire        n21    = hdr[10][17];   // 2:1 (the mailbox is not read again while lines are made)
 
 // ---------------------------------------------------------------- page table
 reg  [31:0] tab_lo[1024], tab_hi[1024];
@@ -147,7 +150,8 @@ reg [63:0] owd;
 always @(posedge clk) if(owe) obuf[owa] <= owd;
 
 // ---------------------------------------------------------------- making a line
-// Output word n takes Y bytes 6n..6n+5 and U, V bytes 3n..3n+2 of the line.
+// Output word n takes Y bytes 6n..6n+5 and U, V bytes 3n..3n+2 of the line
+// (2:1: Y bytes 8n..8n+7, U and V bytes 4n..4n+3).
 reg        mk_on = 0;
 reg        mk_bank;
 reg  [9:0] mk_n;          // word being asked for
@@ -182,6 +186,15 @@ always @(posedge clk) begin
 	p1_codd <= ca[0];
 end
 
+// (a + b + 1) / 2
+function [7:0] avg2(input [7:0] a, input [7:0] b);
+	reg [8:0] t;
+	begin
+		t = a + b + 1'd1;
+		avg2 = t[8:1];
+	end
+endfunction
+
 // a * 171/256 + b * 85/256 (2/3 and 1/3), as the player's third2
 function [7:0] third2(input [7:0] a, input [7:0] b);
 	reg [15:0] t;
@@ -193,30 +206,36 @@ endfunction
 
 always @(posedge clk) begin
 	reg [127:0] y16, u16, v16;
-	reg  [47:0] y6;
-	reg  [23:0] u3, v3;
+	reg  [63:0] y8;
+	reg  [31:0] u4, v4;
 
 	y16 = p1_yodd ? {ye_q, yo_q} : {yo_q, ye_q};
 	u16 = p1_codd ? {ue_q, uo_q} : {uo_q, ue_q};
 	v16 = p1_codd ? {ve_q, vo_q} : {vo_q, ve_q};
-	y6  = y16 >> {p1_ys, 3'b000};
-	u3  = u16 >> {p1_cs, 3'b000};
-	v3  = v16 >> {p1_cs, 3'b000};
+	y8  = y16 >> {p1_ys, 3'b000};
+	u4  = u16 >> {p1_cs, 3'b000};
+	v4  = v16 >> {p1_cs, 3'b000};
 
 	owe <= p1_v;
 	owa <= p1_n;
 	// bytes in memory order: Y0 U Y1 V Y2 U Y3 V
-	owd <= {third2(v3[23:16], v3[15:8]),  third2(y6[47:40], y6[39:32]),
-	        third2(u3[23:16], u3[15:8]),  third2(y6[31:24], y6[39:32]),
-	        third2(v3[7:0],   v3[15:8]),  third2(y6[23:16], y6[15:8]),
-	        third2(u3[7:0],   u3[15:8]),  third2(y6[7:0],   y6[15:8])};
+	if(n21)
+		owd <= {avg2(v4[23:16], v4[31:24]),   avg2(y8[55:48], y8[63:56]),
+		        avg2(u4[23:16], u4[31:24]),   avg2(y8[39:32], y8[47:40]),
+		        avg2(v4[7:0],   v4[15:8]),    avg2(y8[23:16], y8[31:24]),
+		        avg2(u4[7:0],   u4[15:8]),    avg2(y8[7:0],   y8[15:8])};
+	else
+		owd <= {third2(v4[23:16], v4[15:8]),  third2(y8[47:40], y8[39:32]),
+		        third2(u4[23:16], u4[15:8]),  third2(y8[31:24], y8[39:32]),
+		        third2(v4[7:0],   v4[15:8]),  third2(y8[23:16], y8[15:8]),
+		        third2(u4[7:0],   u4[15:8]),  third2(y8[7:0],   y8[15:8])};
 end
 
 always @(posedge clk) begin
 	if(mk_on) begin
 		mk_n <= mk_n + 1'd1;
-		mk_y <= mk_y + 13'd6;
-		mk_c <= mk_c + 12'd3;
+		mk_y <= mk_y + (n21 ? 13'd8 : 13'd6);
+		mk_c <= mk_c + (n21 ? 12'd4 : 12'd3);
 		if(mk_n + 1'd1 == ow) mk_on <= 0;
 	end
 	if(mk_go) begin
@@ -391,13 +410,14 @@ always @(posedge clk) begin
 				last_seq <= hdr[1];
 				cycles   <= 0;
 				ow       <= hdr[5][25:16];
-				ny       <= {1'b0, hdr[5][25:16]} - hdr[5][25:18];  // 3/4 of the output words
-				nc       <= hdr[5][25:17] - hdr[5][25:19];          // 3/8
+				// source words: 3/4 and 3/8 of the output words (2:1: as many, half)
+				ny       <= n21 ? {1'b0, hdr[5][25:16]} : {1'b0, hdr[5][25:16]} - hdr[5][25:18];
+				nc       <= n21 ? {2'b0, hdr[5][25:17]} : hdr[5][25:17] - hdr[5][25:19];
 				rows     <= hdr[3][31:16];
 				tab_n    <= hdr[5][10:0];
 				// output words: a multiple of 8, at most 340 (Y fits 256 words);
 				// 2048 pages at most; addresses on 8 bytes
-				refused  <= !hdr[5][25:16] || hdr[5][18:16] || hdr[5][25:16] > 10'd340 ||
+				refused  <= !hdr[5][25:16] || hdr[5][18:16] || hdr[5][25:16] > (n21 ? 10'd256 : 10'd340) ||
 				            !hdr[5][15:0] || hdr[5][15:0] > 16'd2048 || !hdr[3][31:16] ||
 				            |{hdr[2][2:0], hdr[3][2:0], hdr[4][2:0], hdr[6][2:0], hdr[7][2:0], hdr[8][2:0], hdr[9][2:0], hdr[10][2:0]};
 				state    <= S_TABLE;

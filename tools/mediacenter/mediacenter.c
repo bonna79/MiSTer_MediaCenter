@@ -1426,8 +1426,11 @@ static void yuv_draw(void)
 	// a picture of the FPGA accelerator is only in the FPGA's memory: the
 	// core draws all of it and the controls are blended over it here
 	int accf = have_frame && f && acc.on && acc_buf_of(f);
-	if (have_frame && f) acc_layout_note(narrow32 && yuv_half && w == fb_w && !(fb_w & 31));
-	if (narrow32 && yuv_half && have_frame && f && f->data[0] && w == fb_w)
+	// exactly 2:1 (1920 on 960, the 4:3 format): the core narrows the
+	// accelerator's pictures too, when it can (acc_can21)
+	int narrow21 = narrow && f->width == w * 2 && !(w & 31) && acc_can21();
+	if (have_frame && f) acc_layout_note((narrow32 || narrow21) && yuv_half && w == fb_w && !(fb_w & 31));
+	if ((narrow32 || (accf && narrow21)) && yuv_half && have_frame && f && f->data[0] && w == fb_w)
 	{
 		int rows = (ovl_shown && ovl_a && ovl_y < fb_h && !accf) ? (ovl_y > 0 ? ovl_y : 0) : fb_h;
 		if (zcp_draw(f, rows)) core_rows = rows;

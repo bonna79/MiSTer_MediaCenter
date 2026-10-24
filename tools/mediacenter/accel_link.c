@@ -505,6 +505,15 @@ static void acc_report(void)
 		al.late, al.lost, acc.pics_dropped, acc.slots_peak, acc.failed ? "; spento: " : "", acc.failed ? acc.why : "");
 }
 
+// The core's zero-copy block can also narrow by 2:1 (1920 on a 960 frame
+// buffer): said by mc_acc in its answer (word 20, bit 16); kept once seen.
+static int acc_core21;
+static int acc_can21(void)
+{
+	if (acc.on && al.mb && (al.mb[20] & 0x10000)) acc_core21 = 1;
+	return acc_core21;
+}
+
 // zcp_draw for a picture of the accelerator: waits for the core to finish
 // it, then has the zero-copy block copy its slot. 1 when drawn.
 static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows)
@@ -516,7 +525,8 @@ static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows)
 		acc_fail(NULL, "the picture cannot be drawn by the core");
 		return 0;
 	}
-	if (fb_w * 3 != f->width * 2 || (fb_w & 31) || rows <= 0 || f->height < 2 * rows)
+	int n21 = fb_w * 2 == f->width && acc_can21();
+	if ((fb_w * 3 != f->width * 2 && !n21) || (fb_w & 31) || rows <= 0 || f->height < 2 * rows)
 	{
 		acc_fail_layout("the picture format is not drawn by the core");
 		return 0;
@@ -553,7 +563,7 @@ static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows)
 	m[7] = 2 * ACC_Y_STRIDE;
 	m[8] = u_off;
 	m[9] = v_off;
-	m[10] = ACC_C_STRIDE;
+	m[10] = ACC_C_STRIDE | (n21 ? 1u << 17 : 0);
 	m[0] = ZCP_MAGIC;
 	__sync_synchronize();
 	unsigned seq = ++zcp_seq;
