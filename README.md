@@ -2,7 +2,7 @@
 
 **Italiano** · [English](README_EN.md)
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.0 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > Questo progetto è stato sviluppato con l'aiuto dell'intelligenza artificiale: il codice e la documentazione sono stati scritti con Claude, l'IA di Anthropic, e provati da rgm su un MiSTer vero.
 
@@ -28,11 +28,38 @@ Il pacchetto è formato da queste parti:
 | `MiSTer_MediaCenter` | `/media/fat/` | Il Main, il programma principale del MiSTer, usato nel menu. Quando inserisci un disco lo riconosce: dischi video e DVD dati li apre con il lettore, i giochi li avvia con il core giusto |
 | `mediacenter` | `/media/fat/linux/` | Il lettore vero e proprio, che gira sull'ARM |
 | `mediacenter.sh` | `/media/fat/Scripts/` | Lo script che compare in **Scripts**: apre il lettore per scegliere file da SD, USB o rete |
-| `menu_mediacenter.rbf` | `/media/fat/linux/` | Il core del menu di MMC: il menu normale del MiSTer più la conversione dei colori e l'uscita a 15 kHz per il CRT |
+| `menu_mediacenter.rbf` | `/media/fat/linux/` | Il core del menu di MMC: il menu normale del MiSTer più la conversione dei colori, l'uscita a 15 kHz per il CRT e, dalla 3.0, l'acceleratore H.264 per il 1080p |
 | `libdvdcss.so.2` | `/media/fat/dvdcss/` | La libreria per leggere i DVD protetti |
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | Le righe da copiare in `MiSTer.ini` (non è un `MiSTer.ini`: copia solo le righe) |
 
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
+
+## Novità della versione 3.0
+
+La 3.0 riproduce i video **1080p H.264** fluidi, su HDMI e su CRT: l'FPGA del MiSTer aiuta l'ARM a decodificarli.
+
+- **Acceleratore H.264 nell'FPGA:** il core del menu contiene un motore che ricostruisce le immagini dei video H.264. L'ARM legge il file e decifra il video (la parte che solo un processore sa fare bene), poi manda all'FPGA i comandi di ogni immagine; l'FPGA ricostruisce l'immagine nella sua memoria e la copia da sola nel framebuffer. Prima l'ARM impiegava circa 44 ms per immagine, più del tempo disponibile (41,7 ms a 24 immagini al secondo); ora gliene bastano in media 5–15.
+- **1080p fluido:** One Piece 1920x1080 a 23,976 immagini al secondo, nei tratti senza salti, ha 240 immagini mostrate su 240 ogni 10 secondi, contro circa il 14% di immagini non mostrate della 2.8. Panoramiche orizzontali e verticali fluide su HDMI e CRT.
+- **Anche nel formato 4:3 con Start:** l'FPGA restringe l'immagine a 1280 punti (Auto e gli altri formati) o a 960 (4:3), e il cambio di formato durante il film non spegne l'acceleratore.
+- **Quando si usa:** solo per i video H.264 a 8 bit, 4:2:0, progressivi, larghi 1920 punti. Tutto il resto (DVD, Video CD, DivX, 720p, H.264 interlacciato o a 10 bit, HEVC) va come nella 2.8, con il decoder dell'ARM. Se l'acceleratore trova un problema torna da solo al decoder normale dallo stesso punto del film, e lo scrive nel log. `MC_NOACC=1` in `mediacenter.ini` lo spegne.
+- **Diagnosi nel log:** ogni 10 secondi una riga `diag acceleratore` dice quante immagini sono state mandate e disegnate, i tempi dell'ARM e dell'FPGA, l'attesa della memoria e le immagini in ritardo o perse.
+- **Chiavetta USB elencata una volta sola:** se il sistema monta la stessa chiavetta su due cartelle (`/media/usb0` e `/media/usb1`), l'elenco delle sorgenti la mostra una volta sola.
+- **Nuova immagine** con la scritta Ver. 3.0 1080 P, mostrata 3 secondi solo quando si avvia lo script mediacenter a mano (non quando parte un DVD, un Super Video CD o un Video CD).
+
+Il motore non ha ancora il filtro anti-blocchi (deblocking) dell'H.264: come già nella 2.8 per il 1080p, l'immagine è quella della modalità leggera. Il filtro è il prossimo passo.
+
+Provata su un MiSTer vero il 24 ottobre 2026, su CRT Sony Trinitron (SCART RGB, 480i 59,94 Hz) e HDMI insieme, con One Piece Episodio 940 1080p H.264:
+
+| Prova | Risultato |
+| --- | --- |
+| Riproduzione continua, 238 s | 5724 immagini disegnate dall'FPGA, nessuna persa né in ritardo; ARM in media 5–13 ms per immagine |
+| Prova lunga con salti avanti e indietro, 449 s | 10365 immagini mostrate; nei tratti senza salti 240 su 240 ogni 10 secondi; le poche non mostrate sono tutte subito dopo i salti |
+| Cambio di formato con Start (Auto, 16:9, 4:3 e ritorno) | Fluido in tutti i formati, l'acceleratore resta acceso; su 265 s con salti e cambi il 2,6% di immagini non mostrate (attorno ai salti) |
+| Scene pesanti (panoramiche, esplosioni) | FPGA al lavoro circa 30 ms per immagine su 41,7, nessuna immagine in ritardo |
+| DVD e DivX dopo l'aggiornamento | Come nella 2.8 (l'acceleratore non si accende) |
+| Chiavetta USB montata due volte | Elencata una volta sola |
+
+Alla prima riproduzione dopo l'accensione i primi secondi possono scattare un poco (il file viene letto per la prima volta dalla SD); dalla seconda volta no.
 
 ## Novità della versione 2.8
 
@@ -43,7 +70,7 @@ La 2.8 dà a ogni film il suo formato giusto sul CRT e permette di cambiarlo dur
 - **Riquadro Formato durante il film:** premi **Start** mentre il film va e compare il riquadro Formato. Con ◄ ► (o ▲ ▼) cambi formato e l'immagine cambia subito, su CRT e HDMI; **A**, **Start** o **B** lo chiudono, e si chiude da solo dopo 6 secondi. La scelta resta salvata. Le voci sono Auto, 4:3, 16:9, Cinema 1,85:1, Anamorfico 2,35:1, Pieno e Pan & scan.
 - **Elenchi a 720 punti:** gli elenchi e Regola CRT ora usano un'immagine di 720x576 (PAL) o 720x480 (NTSC), la risoluzione giusta per il CRT. Le scritte restano al centro, nei 640 punti di prima, quindi le regolazioni del CRT non cambiano.
 - **Corretto: banda colorata in alto sul CRT.** Se il Main rispondeva in ritardo, per esempio subito dopo un cambio di Modo 15 kHz, il lettore passava al disegno di riserva per tutta la sessione e sopra al film poteva restare una banda azzurra o gialla. Ora riprova al video successivo, aspetta di più dopo un cambio di modo e fuori dal film dipinge sempre il nero.
-- **1080p:** mentre il lettore riproduce, il Main resta fermo e lascia i due core dell'ARM al decoder; per i video 1920x1080 il core del menu copia da solo l'immagine nel framebuffer (zero-copy, `MC_NOZC=1` lo spegne). Il 1080p resta comunque sconsigliato: circa il 14% di immagini non mostrate. È in corso il lavoro per portarlo al 100% con un acceleratore H.264 nell'FPGA.
+- **1080p:** mentre il lettore riproduce, il Main resta fermo e lascia i due core dell'ARM al decoder; per i video 1920x1080 il core del menu copia da solo l'immagine nel framebuffer (zero-copy, `MC_NOZC=1` lo spegne). Nella 2.8 il 1080p era ancora sconsigliato (circa il 14% di immagini non mostrate): la 3.0 lo rende fluido con l'acceleratore H.264 nell'FPGA.
 
 Provata su un MiSTer vero il 23 e 24 ottobre 2026, su CRT Sony Trinitron (SCART RGB) e HDMI insieme: DVD di prova della geometria con i cerchi rotondi in 4:3 e in 16:9; bande nere corrette anche dopo i cambi di Modo 15 kHz; riquadro Formato durante il film ed elenchi a 720x480; One Piece 1080p con circa il 14% di immagini non mostrate.
 
@@ -112,7 +139,7 @@ Provata su un MiSTer vero (16 ottobre 2026): DVD e DivX su HDMI a 720p e su CRT 
 
 ## Come funziona (parte tecnica)
 
-Il MiSTer ha due parti: un processore **ARM** Cortex-A9 a due core a 800 MHz, con Linux, e un'**FPGA** che genera le uscite video. MMC divide il lavoro così: l'ARM legge e decodifica, l'FPGA mostra. L'FPGA non decodifica il video.
+Il MiSTer ha due parti: un processore **ARM** Cortex-A9 a due core a 800 MHz, con Linux, e un'**FPGA** che genera le uscite video. MMC divide il lavoro così: l'ARM legge e decodifica, l'FPGA mostra. Solo per i video H.264 1080p, dalla 3.0, l'FPGA fa anche la parte più pesante della decodifica.
 
 ### Lato ARM
 
@@ -141,9 +168,11 @@ Il framebuffer ha tre pagine: l'ARM scrive la prossima immagine in una pagina me
 - **HDMI:** lo scaler del MiSTer porta l'immagine in YUV fino all'uscita, la converte in RGB alla fine e la ingrandisce alla risoluzione del televisore (`video_mode`) con le proporzioni giuste. La conversione dei colori nell'FPGA toglie all'ARM circa 16 ms per immagine.
 - **CRT a 15 kHz (modulo `mc_out`):** genera da solo il segnale per il CRT, indipendente dall'HDMI, a 13,5 MHz con 720 punti per riga come un lettore DVD: 576i o 480i per i video, secondo il DVD PAL o NTSC o gli fps del file, oppure 288p o 240p se forzati in Regola CRT. Converte i colori, porta l'immagine a 720 punti (i DVD punto per punto, le altre larghezze con un filtro che fonde i punti vicini), aggiunge le bande nere ai film 16:9 e applica Regola CRT ridisegnando l'immagine nel nuovo riquadro senza toccare il sincronismo, così il CRT non perde mai l'aggancio. Cambia pagina solo all'inizio di un semiquadro e solo quando l'indirizzo è stabile, così l'immagine non si spezza. Il filtro tremolio fa la media di ogni riga con quella sotto.
 
+- **Acceleratore H.264 (moduli `mc_acc`, `acc_engine`, `mc_zc`, dalla 3.0):** per i video 1080p FFmpeg sull'ARM legge il video (CABAC, vettori di movimento, coefficienti) ma non ricostruisce le immagini: scrive per ogni immagine i comandi del motore (circa 1 MB) in un anello di memoria. Il motore nell'FPGA, a 108 MHz, li legge dalla memoria DDR e ricostruisce le immagini (trasformata inversa, predizione intra, compensazione del movimento con i pesi delle immagini B) in 32 posti da 4 MB della memoria; poi il blocco zero-copy restringe l'immagine a 1280 o 960 punti e la scrive nel framebuffer in YUV. L'ARM non tocca più i pixel. Con il core 3.0 il core del menu usa il 55% della logica, il 17% della memoria interna e l'85% dei moltiplicatori dell'FPGA.
+
 Le due uscite funzionano insieme: la stessa immagine va all'HDMI e alla VGA nello stesso momento. L'audio è uno solo e arriva insieme all'HDMI, all'uscita analogica e a quella ottica.
 
-L'FPGA non decodifica il video: un decodificatore H.264 non ci sta e non ne esiste uno libero adatto al MiSTer. Per questo il limite pratico è l'H.264 a 720p.
+L'FPGA non ha spazio per un decodificatore H.264 completo: per questo divide il lavoro con l'ARM, che legge il video, e solo per l'H.264 a 8 bit progressivo largo 1920 punti. Gli altri video li decodifica tutti l'ARM.
 
 ## Novità della versione 2.0
 
@@ -249,16 +278,17 @@ MMC è fatto per i video a risoluzione standard. Queste sono le risoluzioni mass
 | Super Video CD (MPEG-2) | 480x576 (PAL), 480x480 (NTSC) | Perfetto |
 | DivX, Xvid (MPEG-4) | 720x576 | Fluido |
 | MP4, MKV in H.264 a 8 bit | 1280x720 | Fluido |
+| MP4, MKV in H.264 a 8 bit progressivo | 1920x1080, con l'acceleratore della 3.0 | Fluido |
 | Musica | Qualsiasi | Perfetta |
 
-**I video oltre i 720p, quelli in H.264 a 10 bit (Hi10p) e quelli in HEVC/H.265 sono sconsigliati.** Si riproducono, con l'audio sempre fluido, ma il MiSTer non riesce a mostrare tutti i fotogrammi e l'immagine scatta. Misure fatte su un MiSTer vero:
+**I video oltre i 720p che non sono H.264 a 8 bit progressivo 1920x1080, quelli in H.264 a 10 bit (Hi10p) e quelli in HEVC/H.265 sono sconsigliati.** Si riproducono, con l'audio sempre fluido, ma il MiSTer non riesce a mostrare tutti i fotogrammi e l'immagine scatta. Misure fatte su un MiSTer vero:
 
 | Video | Fotogrammi non mostrati |
 | --- | --- |
 | DVD (MPEG-2 720x576) | meno dell'1% |
 | H.264 8 bit 1280x720 | 0,1% a piena risoluzione nella 2.7 (1,4–2,5% nelle versioni precedenti, il 10% prima che l'FPGA convertisse i colori) |
 | H.264 8 bit 1440x810 | circa 1,4% (era circa 65% fino alla 2.5) |
-| H.264 8 bit 1920x1080 | circa 14% (versione 2.8, One Piece) |
+| H.264 8 bit 1920x1080 | 0% nei tratti senza salti con l'acceleratore della 3.0 (circa 14% nella 2.8, One Piece) |
 | H.264 10 bit (Hi10p) 1280x720 | circa 78% (misurato con la versione 1.0) |
 
 Con un video H.264 a 720p l'ARM impiega circa 30 ms per decodificare un'immagine, su 41,7 ms disponibili a 24 immagini al secondo. Per questo la conversione dei colori, che occupava altri 16 ms, è passata all'FPGA: ora l'ARM copia l'immagine in 5,5 ms.
@@ -266,7 +296,7 @@ Con un video H.264 a 720p l'ARM impiega circa 30 ms per decodificare un'immagine
 Il limite è nell'hardware, da tutte e due le parti:
 
 - **ARM:** tutta la decodifica avviene sul processore ARM Cortex-A9 a 800 MHz del DE10-Nano, che non ha un decodificatore video hardware. Basta per DVD e DivX, non per l'H.264 in alta definizione.
-- **FPGA:** non ha spazio per un decodificatore H.264, e non ne esiste uno libero adatto al MiSTer. Per questo l'FPGA si occupa dell'uscita video (conversione dei colori, ingrandimento per l'HDMI e segnale a 15 kHz), non della decodifica.
+- **FPGA:** non ha spazio per un decodificatore H.264 completo, e non ne esiste uno libero adatto al MiSTer. Dalla 3.0 ricostruisce le immagini dei video H.264 1080p mentre l'ARM legge il video; per il resto si occupa dell'uscita video (conversione dei colori, ingrandimento per l'HDMI e segnale a 15 kHz).
 
 Sul CRT, poi, l'alta definizione non serve: l'immagine viene comunque riportata a 480 o 576 righe.
 
@@ -350,6 +380,8 @@ Prove fatte da rgm su un MiSTer DE10-Nano con lettore USB Pioneer BDR-TD05, usci
 | DVD dopo un video 720p, versione 2.7 | Di nuovo a 720x576: 4752 immagini, una saltata |
 | Convivenza con il Main di Physical Disc | DVD e Video CD con MMC; un gioco PSX PAL con LibCrypt (The Legend of Dragoon) parte da solo e funziona con il Main di Physical Disc |
 
+Le prove della 3.0 (1080p con l'acceleratore) sono nella sezione [Novità della versione 3.0](#novità-della-versione-30).
+
 Da provare: Super Video CD letto da un disco masterizzato.
 
 ## Installazione
@@ -357,6 +389,8 @@ Da provare: Super Video CD letto da un disco masterizzato.
 ### 1. Scarica i file
 
 Dalla pagina [Releases](../../releases) scarica `MiSTer_MediaCenter.zip` ed estrailo nella cartella principale della SD (`/media/fat`). Le cartelle dello zip sono già organizzate come sulla SD. Lo zip contiene tutto quello che serve a MMC: Main, lettore, script, core del menu, la libreria per i DVD protetti e `MMC_MiSTer_ini.txt` con le righe per `MiSTer.ini`. Il Main di Physical Disc, per i giochi, si scarica dal suo progetto. Aggiornali sempre insieme, perché la conversione dei colori nell'FPGA richiede il Main e il core della stessa versione. Dopo aver copiato il Main o il core riavvia il MiSTer.
+
+**Aggiornare dalla 2.8 alla 3.0:** estrai lo zip della 3.0 sopra i file vecchi e riavvia il MiSTer. Servono insieme il lettore `mediacenter` e il core `menu_mediacenter.rbf` della 3.0: l'acceleratore 1080p è nel core, e con un core vecchio il lettore usa il decoder normale come nella 2.8. `MiSTer.ini` e `mediacenter.ini` restano come sono.
 
 La versione più recente si scarica dalla pagina [Actions](../../actions). Apri l'ultima compilazione riuscita (spunta verde) di **Build MiSTer MediaCenter** e scarica `MiSTer_MediaCenter` e `mediacenter_arm`. Il core del menu è nella compilazione **Build MediaCenter menu core**, file `mediacenter_rbf`.
 
@@ -433,7 +467,8 @@ MC_CRT_VPOS=2
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER`, `MC_CRT_ASPECT`, `MC_CRT_PANSCAN` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
 | `MC_FIELDS=1` | DVD e video interlacciati: il lettore non fonde i due semiquadri. Il CRT li riceve intatti, come da un vero lettore DVD (più nitido e più fluido nel movimento); sull'HDMI li fonde lo scaler del Main, senza pettini. Consigliato con il CRT. Senza questa riga il lettore fonde le righe per tutte e due le uscite |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
-| `MC_NOZC=1` | Video 1080p: l'immagine la copia l'ARM invece del core del menu (zero-copy spento) |
+| `MC_NOACC=1` | Spegne l'acceleratore H.264 della 3.0: i video 1080p li decodifica l'ARM come nella 2.8 |
+| `MC_NOZC=1` | Video 1080p senza acceleratore: l'immagine la copia l'ARM invece del core del menu (zero-copy spento) |
 | `MC_MENU_HD=1` | Elenchi a 1280x720 come nella versione 2.1, invece che disegnati per il CRT |
 | `MC_DIAG=0` | Spegne le righe di diagnosi `mediacenter: diag` nel log |
 | `MC_SPLASH=0` | Spegne l'immagine di MMC all'avvio dello script |
@@ -484,6 +519,7 @@ Apri una segnalazione nella pagina [Issues](../../issues) e allega:
 | `MC_SLOWDRAW=1` | Disegna le immagini con il vecchio metodo, riga per riga |
 | `MC_DEBUG=1` | Scrive nel log gli eventi della navigazione nei DVD |
 | `MC_FULLQUALITY=1` | Disattiva la modalità leggera dei video H.264/HEVC in alta definizione (deblocking spento, oltre le 720 righe metà delle righe ingrandite dallo scaler FPGA e, sopra i 30 fps, solo le immagini di riferimento) |
+| `MC_ACC_RING=so` | Acceleratore: l'anello dei comandi in una zona fissa della memoria invece che nelle pagine del lettore (per confrontare i tempi) |
 | `MC_TEST=...` | Prova senza schermo né controller: tasti simulati e immagini salvate in `/tmp/mc_<secondi>.ppm`. Con un file `.cue` riproduce un'immagine di Super Video CD come se fosse nel lettore |
 
 Per misurare la velocità di decodifica usa `/media/fat/linux/mediacenter --bench <file>` oppure `--bench /dev/sr0`. Analizza al massimo il primo minuto del file (Ctrl+C lo ferma prima). Se il risultato supera il 100% del tempo reale, il file si può riprodurre.

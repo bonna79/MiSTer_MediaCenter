@@ -2,20 +2,23 @@
 
 > Sviluppato con l'aiuto dell'intelligenza artificiale (Claude di Anthropic). / Developed with the help of AI (Anthropic's Claude).
 
-**MiSTer MediaCenter 2.8** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB e rete, su HDMI e su CRT a 15 kHz.
+**MiSTer MediaCenter 3.0** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB e rete, su HDMI e su CRT a 15 kHz.
 
-**Novità della 2.8:** ogni film ha il suo formato giusto sul CRT, e si cambia durante la visione.
+**Novità della 3.0:** i video **1080p H.264** sono fluidi, su HDMI e su CRT, grazie a un acceleratore nell'FPGA.
 
-- **Formato giusto per ogni film sul CRT:** bande nere alla proporzione vera dell'immagine (4:3, 16:9, 1,85:1, 2,35:1 e le altre), non più solo al 16:9; bande ai lati per le immagini più strette del 4:3.
-- **Formato e Pan & scan in Regola CRT:** Auto, Pieno, 4:3, 16:9, Anamorfico 2,35:1, Cinema 1,85:1 (anche per l'HDMI) e Pan & scan per il CRT, salvati in `mediacenter.ini`.
-- **Riquadro Formato con Start durante il film:** ◄ ► cambiano formato e l'immagine cambia subito su CRT e HDMI; A, Start o B lo chiudono, si chiude da solo dopo 6 secondi; la scelta resta salvata.
-- **Elenchi a 720x576 (PAL) e 720x480 (NTSC)**, la risoluzione giusta per il CRT, con le scritte al centro: le regolazioni del CRT non cambiano.
-- **Corretto:** una banda azzurra o gialla in alto sul CRT quando il Main rispondeva in ritardo, per esempio dopo un cambio di Modo 15 kHz. Ora il lettore riprova al video successivo e fuori dal film dipinge sempre il nero.
-- **1080p:** il Main resta fermo durante la riproduzione e il core del menu copia l'immagine nel framebuffer (zero-copy, `MC_NOZC=1` lo spegne). Il 1080p resta sconsigliato (circa il 14% di immagini non mostrate): è in corso il lavoro per un acceleratore H.264 nell'FPGA.
+- **Acceleratore H.264 nell'FPGA:** il core del menu contiene un motore che ricostruisce le immagini dei video H.264. L'ARM legge il file e decifra il video, poi manda all'FPGA i comandi di ogni immagine; l'FPGA ricostruisce l'immagine e la copia da sola nel framebuffer. Prima l'ARM impiegava circa 44 ms per immagine, più dei 41,7 ms disponibili a 24 immagini al secondo; ora gliene bastano in media 5–15.
+- **1080p fluido:** nei tratti senza salti 240 immagini mostrate su 240 ogni 10 secondi, contro circa il 14% di immagini non mostrate della 2.8. Panoramiche fluide su HDMI e CRT.
+- **Anche nel formato 4:3 con Start:** l'FPGA restringe l'immagine a 1280 punti (Auto e gli altri formati) o a 960 (4:3); il cambio di formato durante il film non spegne l'acceleratore.
+- **Quando si usa:** solo per i video H.264 a 8 bit, 4:2:0, progressivi, larghi 1920 punti. DVD, Video CD, DivX, 720p e gli altri video vanno come nella 2.8. Se l'acceleratore trova un problema torna da solo al decoder normale dallo stesso punto del film. `MC_NOACC=1` in `mediacenter.ini` lo spegne.
+- **Diagnosi nel log:** ogni 10 secondi una riga `diag acceleratore` con immagini mandate e disegnate, tempi dell'ARM e dell'FPGA, immagini in ritardo o perse.
+- **Chiavetta USB elencata una volta sola** anche quando il sistema la monta su `/media/usb0` e `/media/usb1`.
+- **Nuova immagine** Ver. 3.0 1080 P, mostrata solo quando si avvia lo script mediacenter a mano (non quando parte un DVD, un Super Video CD o un Video CD), come nella 2.8.
 
-Provata su un MiSTer vero il 23 e 24 ottobre 2026 su CRT Sony Trinitron e HDMI insieme: DVD di prova della geometria con i cerchi rotondi in 4:3 e in 16:9, bande nere corrette anche dopo i cambi di modo, riquadro Formato ed elenchi a 720x480.
+Il motore non ha ancora il filtro anti-blocchi (deblocking) dell'H.264: è il prossimo passo.
 
-Le novità della 2.7 (CRT a 720 punti come un lettore DVD, modo Auto dagli fps, DVD in YUV, 720p a piena risoluzione) e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-27).
+Provata su un MiSTer vero il 24 ottobre 2026 su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme, con One Piece Episodio 940 1080p H.264: 238 s di riproduzione continua con 5724 immagini disegnate dall'FPGA e nessuna persa; 449 s con salti avanti e indietro, 240 su 240 ogni 10 secondi nei tratti senza salti; cambi di formato Auto, 16:9, 4:3 fluidi con l'acceleratore sempre acceso; scene pesanti con l'FPGA al lavoro circa 30 ms su 41,7; DVD e DivX come nella 2.8. Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-30).
+
+Le novità della 2.8 (formato giusto per ogni film sul CRT, riquadro Formato con Start) e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-28).
 
 **Ringraziamenti:**
 
@@ -23,7 +26,7 @@ Le novità della 2.7 (CRT a 720 punti come un lettore DVD, modo Auto dagli fps, 
 - **Max Riptide**, per le numerose prove fatte e i suggerimenti.
 - **mad4gith**, per le idee suggerite per migliorare MMC.
 
-**Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD: contiene tutto quello che serve a MMC. Aggiorna sempre tutti i file insieme.
+**Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD: contiene tutto quello che serve a MMC. Aggiorna sempre tutti i file insieme. **Dalla 2.8:** estrai lo zip sopra i file vecchi e riavvia; servono insieme il lettore `mediacenter` e il core `menu_mediacenter.rbf` della 3.0 (l'acceleratore è nel core). `MiSTer.ini` e `mediacenter.ini` restano come sono.
 
 | File | Cartella |
 | --- | --- |
@@ -40,23 +43,26 @@ Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0
 
 ---
 
-**English:** **MiSTer MediaCenter 2.8** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB and network, over HDMI and on a 15 kHz CRT.
+**English:** **MiSTer MediaCenter 3.0** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB and network, over HDMI and on a 15 kHz CRT.
 
-**What's new in 2.8:** every film gets its right shape on the CRT, and you can change it while watching.
+**What's new in 3.0:** **1080p H.264** video plays smoothly, over HDMI and on the CRT, thanks to an accelerator in the FPGA.
 
-- **The right shape for every film on the CRT:** black bars at the picture's real aspect (4:3, 16:9, 1.85:1, 2.35:1 and others), no longer only 16:9; bars at the sides for pictures narrower than 4:3.
-- **Formato and Pan & scan in CRT Adjust:** Auto, Pieno (stretched), 4:3, 16:9, Anamorfico 2.35:1, Cinema 1.85:1 (HDMI too) and Pan & scan for the CRT, saved in `mediacenter.ini`.
-- **Format box with Start during the film:** ◄ ► change the format and the picture changes at once on CRT and HDMI; A, Start or B close it, it closes by itself after 6 seconds; the choice stays saved.
-- **Lists at 720x576 (PAL) and 720x480 (NTSC)**, the right resolution for the CRT, with the text centred: the CRT adjustments do not change.
-- **Fixed:** a cyan or yellow band at the top of the CRT when the Main answered late, for example after a 15 kHz mode change. The player now tries again at the next video and always paints black outside the film.
-- **1080p:** the Main rests during playback and the menu core copies the picture into the frame buffer (zero-copy, `MC_NOZC=1` turns it off). 1080p is still not recommended (about 14% of pictures not shown): work is under way on an H.264 accelerator in the FPGA.
+- **H.264 accelerator in the FPGA:** the menu core holds an engine that rebuilds the pictures of H.264 video. The ARM reads the file and parses the video, then sends the FPGA the commands for each picture; the FPGA rebuilds the picture and copies it into the frame buffer by itself. Before, the ARM needed about 44 ms per picture, more than the 41.7 ms available at 24 pictures per second; now 5–15 ms on average are enough.
+- **Smooth 1080p:** in stretches without seeks 240 of 240 pictures shown every 10 seconds, against about 14% not shown in 2.8. Smooth pans on HDMI and CRT.
+- **Also in the 4:3 format chosen with Start:** the FPGA narrows the picture to 1280 pixels (Auto and the other formats) or 960 (4:3); changing the format during the film does not turn the accelerator off.
+- **When it is used:** only for 8-bit, 4:2:0, progressive H.264 video 1920 pixels wide. DVD, Video CD, DivX, 720p and other video play as in 2.8. If the accelerator meets a problem it goes back to the normal decoder by itself from the same point of the film. `MC_NOACC=1` in `mediacenter.ini` turns it off.
+- **Diagnostics in the log:** every 10 seconds a `diag acceleratore` line with pictures sent and drawn, ARM and FPGA times, pictures late or lost.
+- **USB stick listed once** even when the system mounts it on both `/media/usb0` and `/media/usb1`.
+- **New picture** Ver. 3.0 1080 P, shown only when the mediacenter script is started by hand (not when a DVD, Super Video CD or Video CD starts it), as in 2.8.
 
-Tested on a real MiSTer on 23 and 24 October 2026 on a Sony Trinitron CRT and HDMI together: geometry test DVD with round circles in 4:3 and 16:9, correct black bars even after mode changes, format box and lists at 720x480.
+The engine does not have H.264's deblocking filter yet: that is the next step.
 
-What's new in 2.7 (720-pixel CRT output like a DVD player, Auto mode from the frame rate, DVDs in YUV, 720p at full resolution) and in earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-27).
+Tested on a real MiSTer on 24 October 2026 on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together, with One Piece Episode 940 1080p H.264: 238 s of continuous playback with 5724 pictures drawn by the FPGA and none lost; 449 s with seeks forward and back, 240 of 240 every 10 seconds in stretches without seeks; format changes Auto, 16:9, 4:3 smooth with the accelerator always on; heavy scenes with the FPGA working about 30 ms of 41.7; DVD and DivX as in 2.8. Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-30).
+
+What's new in 2.8 (the right shape for every film on the CRT, format box with Start) and in earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-28).
 
 **Thanks:** Umberto Parisi (rmonic79) of the Beceri Videoludici, whose work on [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) made CRT Adjust possible ([YouTube channel](https://youtube.com/@rmonic79_ibecerivideoludici)); Max Riptide for the many tests and suggestions; mad4gith for the ideas to improve MMC.
 
-**Install:** extract `MiSTer_MediaCenter.zip` to the root of the SD card: it holds everything MMC needs. Always update all files together: Main `MiSTer_MediaCenter` to `/media/fat/`, ARM player `mediacenter` and menu core `menu_mediacenter.rbf` to `/media/fat/linux/`, script `mediacenter.sh` to `/media/fat/Scripts/`, `libdvdcss.so.2` to `/media/fat/dvdcss/`, `MMC_MiSTer_ini.txt` to `/media/fat/`. Copy the lines of `MMC_MiSTer_ini.txt` into `/media/fat/MiSTer.ini`. The [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases) Main, for game discs, is downloaded from its own project. Restart the MiSTer. Full guide in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#installation).
+**Install:** extract `MiSTer_MediaCenter.zip` to the root of the SD card: it holds everything MMC needs. Always update all files together (**from 2.8:** extract the zip over the old files and restart; the 3.0 `mediacenter` player and `menu_mediacenter.rbf` core are needed together, the accelerator is in the core; `MiSTer.ini` and `mediacenter.ini` stay as they are): Main `MiSTer_MediaCenter` to `/media/fat/`, ARM player `mediacenter` and menu core `menu_mediacenter.rbf` to `/media/fat/linux/`, script `mediacenter.sh` to `/media/fat/Scripts/`, `libdvdcss.so.2` to `/media/fat/dvdcss/`, `MMC_MiSTer_ini.txt` to `/media/fat/`. Copy the lines of `MMC_MiSTer_ini.txt` into `/media/fat/MiSTer.ini`. The [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases) Main, for game discs, is downloaded from its own project. Restart the MiSTer. Full guide in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#installation).
 
 **Your feedback is very valuable:** write to me, even when everything works. If there are problems, open a report on [Issues](https://github.com/bonna79/MiSTer_MediaCenter/issues) with photos of the screen and the `/tmp/mediacenter.log`, `/tmp/mediacenter_main.log` and `/tmp/mediacenter_crt` files.

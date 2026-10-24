@@ -2,7 +2,7 @@
 
 [Italiano](README.md) · **English**
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.0 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
 
@@ -28,13 +28,40 @@ The package is made of these parts:
 | `MiSTer_MediaCenter` | `/media/fat/` | The Main, the MiSTer's main program, used in the menu. When you insert a disc it recognizes it: video discs and data DVDs open with the player, games start with the right core |
 | `mediacenter` | `/media/fat/linux/` | The player itself, which runs on the ARM |
 | `mediacenter.sh` | `/media/fat/Scripts/` | The script shown in **Scripts**: it opens the player to pick files from SD, USB or network |
-| `menu_mediacenter.rbf` | `/media/fat/linux/` | MMC's menu core: the normal MiSTer menu plus the colour conversion and the 15 kHz output for the CRT |
+| `menu_mediacenter.rbf` | `/media/fat/linux/` | MMC's menu core: the normal MiSTer menu plus the colour conversion, the 15 kHz output for the CRT and, from 3.0, the H.264 accelerator for 1080p |
 | `libdvdcss.so.2` | `/media/fat/dvdcss/` | The library for reading protected DVDs |
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | The lines to copy into `MiSTer.ini` (it is not a `MiSTer.ini`: copy only the lines) |
 
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
 The player's on-screen texts are in Italian.
+
+## What's new in version 3.0
+
+3.0 plays **1080p H.264** video smoothly, over HDMI and on the CRT: the MiSTer's FPGA helps the ARM decode it.
+
+- **H.264 accelerator in the FPGA:** the menu core holds an engine that rebuilds the pictures of H.264 video. The ARM reads the file and parses the video (the part only a processor does well), then sends the FPGA the commands for each picture; the FPGA rebuilds the picture in its own memory and copies it into the frame buffer by itself. Before, the ARM needed about 44 ms per picture, more than the time available (41.7 ms at 24 pictures per second); now 5–15 ms on average are enough.
+- **Smooth 1080p:** One Piece 1920x1080 at 23.976 pictures per second, in stretches without seeks, shows 240 of 240 pictures every 10 seconds, against about 14% of pictures not shown in 2.8. Horizontal and vertical pans are smooth on HDMI and CRT.
+- **Also in the 4:3 format chosen with Start:** the FPGA narrows the picture to 1280 pixels (Auto and the other formats) or to 960 (4:3), and changing the format during the film does not turn the accelerator off.
+- **When it is used:** only for 8-bit, 4:2:0, progressive H.264 video 1920 pixels wide. Everything else (DVD, Video CD, DivX, 720p, interlaced or 10-bit H.264, HEVC) plays as in 2.8, with the ARM decoder. If the accelerator meets a problem it goes back to the normal decoder by itself from the same point of the film, and says so in the log. `MC_NOACC=1` in `mediacenter.ini` turns it off.
+- **Diagnostics in the log:** every 10 seconds a `diag acceleratore` line gives the pictures sent and drawn, the ARM and FPGA times, the memory wait and the pictures late or lost.
+- **USB stick listed once:** if the system mounts the same stick on two folders (`/media/usb0` and `/media/usb1`), the source list shows it only once.
+- **New picture** reading Ver. 3.0 1080 P, shown for 3 seconds only when the mediacenter script is started by hand (not when a DVD, Super Video CD or Video CD starts it).
+
+The engine does not have H.264's deblocking filter yet: as already in 2.8 for 1080p, the picture is the light-mode one. The filter is the next step.
+
+Tested on a real MiSTer on 24 October 2026, on a Sony Trinitron CRT (SCART RGB, 480i 59.94 Hz) and HDMI together, with One Piece Episode 940 1080p H.264:
+
+| Test | Result |
+| --- | --- |
+| Continuous playback, 238 s | 5724 pictures drawn by the FPGA, none lost or late; ARM 5–13 ms per picture on average |
+| Long test with seeks forward and back, 449 s | 10365 pictures shown; in stretches without seeks 240 of 240 every 10 seconds; the few not shown are all right after the seeks |
+| Format change with Start (Auto, 16:9, 4:3 and back) | Smooth in every format, the accelerator stays on; over 265 s with seeks and changes 2.6% of pictures not shown (around the seeks) |
+| Heavy scenes (pans, explosions) | FPGA working about 30 ms per picture of 41.7, no picture late |
+| DVD and DivX after the update | As in 2.8 (the accelerator does not start) |
+| USB stick mounted twice | Listed once |
+
+On the first playback after power-on the first seconds may stutter a little (the file is read from the SD card for the first time); from the second time on they do not.
 
 ## What's new in version 2.8
 
@@ -45,7 +72,7 @@ The player's on-screen texts are in Italian.
 - **Format box during the film:** press **Start** while the film plays and the Formato box appears. ◄ ► (or ▲ ▼) change the format and the picture changes at once, on CRT and HDMI; **A**, **Start** or **B** close it, and it closes by itself after 6 seconds. The choice stays saved. The entries are Auto, 4:3, 16:9, Cinema 1.85:1, Anamorfico 2.35:1, Pieno and Pan & scan.
 - **Lists 720 pixels wide:** the lists and CRT Adjust now use a 720x576 (PAL) or 720x480 (NTSC) picture, the right resolution for the CRT. The text stays centred, in the same 640 pixels as before, so the CRT adjustments do not change.
 - **Fixed: coloured band at the top of the CRT.** When the Main answered late, for example right after a change of 15 kHz mode, the player switched to its fallback drawing for the whole session and a cyan or yellow band could stay above the film. Now it tries again at the next video, waits longer after a mode change and always paints black outside the film.
-- **1080p:** while the player plays, the Main rests and leaves both ARM cores to the decoder; for 1920x1080 videos the menu core copies the picture into the frame buffer by itself (zero-copy, `MC_NOZC=1` turns it off). 1080p is still not recommended: about 14% of the pictures are not shown. Work is under way to bring it to 100% with an H.264 accelerator in the FPGA.
+- **1080p:** while the player plays, the Main rests and leaves both ARM cores to the decoder; for 1920x1080 videos the menu core copies the picture into the frame buffer by itself (zero-copy, `MC_NOZC=1` turns it off). In 2.8 1080p was still not recommended (about 14% of the pictures not shown): 3.0 makes it smooth with the H.264 accelerator in the FPGA.
 
 Tested on a real MiSTer on 23 and 24 October 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI together: geometry test DVD with round circles in 4:3 and 16:9; correct black bars even after 15 kHz mode changes; format box during the film and lists at 720x480; One Piece 1080p with about 14% of the pictures not shown.
 
@@ -114,7 +141,7 @@ Tested on a real MiSTer (16 October 2026): DVD and DivX over HDMI at 720p and on
 
 ## How it works (technical part)
 
-The MiSTer has two halves: a dual-core 800 MHz Cortex-A9 **ARM** processor running Linux, and an **FPGA** that generates the video outputs. MMC splits the work like this: the ARM reads and decodes, the FPGA shows. The FPGA does not decode video.
+The MiSTer has two halves: a dual-core 800 MHz Cortex-A9 **ARM** processor running Linux, and an **FPGA** that generates the video outputs. MMC splits the work like this: the ARM reads and decodes, the FPGA shows. Only for 1080p H.264 video, from 3.0, the FPGA also does the heaviest part of decoding.
 
 ### ARM side
 
@@ -145,7 +172,9 @@ It is the MiSTer menu core with two additions, which read the same frame buffer 
 
 The two outputs work together: the same picture goes to HDMI and VGA at the same time. There is a single sound stream, which reaches HDMI, the analog output and the optical output together.
 
-The FPGA does not decode video: an H.264 decoder does not fit and there is no free one suited to the MiSTer. That is why the practical limit is 720p H.264.
+- **H.264 accelerator (modules `mc_acc`, `acc_engine`, `mc_zc`, from 3.0):** for 1080p video FFmpeg on the ARM reads the video (CABAC, motion vectors, coefficients) but does not rebuild the pictures: for each picture it writes the engine's commands (about 1 MB) into a ring in memory. The engine in the FPGA, at 108 MHz, reads them from DDR memory and rebuilds the pictures (inverse transform, intra prediction, motion compensation with the weights of B pictures) in 32 slots of 4 MB; then the zero-copy block narrows the picture to 1280 or 960 pixels and writes it into the frame buffer in YUV. The ARM no longer touches the pixels. With the 3.0 core the menu core uses 55% of the FPGA's logic, 17% of its internal memory and 85% of its multipliers.
+
+The FPGA has no room for a complete H.264 decoder: that is why it shares the work with the ARM, which reads the video, and only for progressive 8-bit H.264 1920 pixels wide. All other video is decoded by the ARM.
 
 ## What's new in version 2.0
 
@@ -251,16 +280,17 @@ MMC is made for standard-definition video. These are the recommended maximum res
 | Super Video CD (MPEG-2) | 480x576 (PAL), 480x480 (NTSC) | Perfect |
 | DivX, Xvid (MPEG-4) | 720x576 | Smooth |
 | MP4, MKV in 8-bit H.264 | 1280x720 | Smooth |
+| MP4, MKV in progressive 8-bit H.264 | 1920x1080, with the 3.0 accelerator | Smooth |
 | Music | Any | Perfect |
 
-**Video above 720p, 10-bit H.264 (Hi10p) and HEVC/H.265 are not recommended.** They play, with smooth audio, but the MiSTer cannot show every frame and the picture stutters. Measured on a real MiSTer:
+**Video above 720p that is not progressive 8-bit H.264 1920x1080, 10-bit H.264 (Hi10p) and HEVC/H.265 are not recommended.** They play, with smooth audio, but the MiSTer cannot show every frame and the picture stutters. Measured on a real MiSTer:
 
 | Video | Frames not shown |
 | --- | --- |
 | DVD (MPEG-2 720x576) | less than 1% |
 | 8-bit H.264 1280x720 | 0.1% at full resolution in 2.7 (1.4–2.5% in earlier versions, 10% before the FPGA converted the colours) |
 | 8-bit H.264 1440x810 | about 1.4% (was about 65% up to 2.5) |
-| 8-bit H.264 1920x1080 | about 14% (version 2.8, One Piece) |
+| 8-bit H.264 1920x1080 | 0% in stretches without seeks with the 3.0 accelerator (about 14% in 2.8, One Piece) |
 | 10-bit H.264 (Hi10p) 1280x720 | about 78% (measured with version 1.0) |
 
 With a 720p H.264 video the ARM needs about 30 ms to decode a picture, out of 41.7 ms available at 24 pictures per second. That is why the colour conversion, which took another 16 ms, moved to the FPGA: the ARM now copies the picture in 5.5 ms.
@@ -268,7 +298,7 @@ With a 720p H.264 video the ARM needs about 30 ms to decode a picture, out of 41
 The limit is in the hardware, on both sides:
 
 - **ARM:** all decoding runs on the DE10-Nano's 800 MHz ARM Cortex-A9, which has no hardware video decoder. It is enough for DVDs and DivX, not for high-definition H.264.
-- **FPGA:** there is no room for an H.264 decoder, and no free one suited to the MiSTer exists. So the FPGA handles the video output (colour conversion, scaling for HDMI and the 15 kHz signal), not decoding.
+- **FPGA:** there is no room for a complete H.264 decoder, and no free one suited to the MiSTer exists. From 3.0 it rebuilds the pictures of 1080p H.264 video while the ARM reads the video; otherwise it handles the video output (colour conversion, scaling for HDMI and the 15 kHz signal).
 
 On a CRT, high definition brings nothing anyway: the picture is brought back to 480 or 576 lines.
 
@@ -352,6 +382,8 @@ Tests run by rgm on a DE10-Nano MiSTer with a Pioneer BDR-TD05 USB drive, HDMI o
 | PSX game with the Physical Disc Main, then the mediacenter script, version 2.6 | The script puts the MMC Main back; on the second start the CRT shows the player |
 | Living alongside the Physical Disc Main | DVDs and Video CDs with MMC; a PAL PSX game with LibCrypt (The Legend of Dragoon) starts by itself and works with the Physical Disc Main |
 
+The 3.0 tests (1080p with the accelerator) are in [What's new in version 3.0](#whats-new-in-version-30).
+
 Still to test: Super Video CD read from a burned disc.
 
 ## Installation
@@ -359,6 +391,8 @@ Still to test: Super Video CD read from a burned disc.
 ### 1. Download the files
 
 From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds everything MMC needs: the Main, the player, the script, the menu core, the library for protected DVDs and `MMC_MiSTer_ini.txt` with the lines for `MiSTer.ini`. The Physical Disc Main, for games, is downloaded from its own project. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
+
+**Updating from 2.8 to 3.0:** extract the 3.0 zip over the old files and restart the MiSTer. The 3.0 `mediacenter` player and `menu_mediacenter.rbf` core are needed together: the 1080p accelerator is in the core, and with an old core the player uses the normal decoder as in 2.8. `MiSTer.ini` and `mediacenter.ini` stay as they are.
 
 The latest version is on the [Actions](../../actions) page. Open the latest successful run (green tick) of **Build MiSTer MediaCenter** and download `MiSTer_MediaCenter` and `mediacenter_arm`. The menu core is in the **Build MediaCenter menu core** run, file `mediacenter_rbf`.
 
@@ -435,7 +469,8 @@ MC_CRT_VPOS=2
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER`, `MC_CRT_ASPECT`, `MC_CRT_PANSCAN` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
 | `MC_FIELDS=1` | Interlaced DVDs and videos: the player does not blend the two fields. The CRT gets them whole, as from a real DVD player (sharper and smoother in motion); on HDMI the Main's scaler blends them, with no combing. Recommended with a CRT. Without this line the player blends the lines for both outputs |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
-| `MC_NOZC=1` | 1080p videos: the ARM copies the picture instead of the menu core (zero-copy off) |
+| `MC_NOACC=1` | Turns off the 3.0 H.264 accelerator: 1080p videos are decoded by the ARM as in 2.8 |
+| `MC_NOZC=1` | 1080p videos without the accelerator: the ARM copies the picture instead of the menu core (zero-copy off) |
 | `MC_MENU_HD=1` | Lists at 1280x720 as in version 2.1, instead of drawn for the CRT |
 | `MC_DIAG=0` | Turns off the `mediacenter: diag` diagnosis lines in the log |
 | `MC_SPLASH=0` | Turns off the MMC picture when the script starts |
@@ -486,6 +521,7 @@ Open a report on the [Issues](../../issues) page and attach:
 | `MC_SLOWDRAW=1` | Draws pictures the old way, line by line |
 | `MC_DEBUG=1` | Logs DVD navigation events |
 | `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking, above 720 lines half of the lines enlarged by the FPGA scaler and, above 30 fps, only reference pictures) |
+| `MC_ACC_RING=so` | Accelerator: the command ring in a fixed memory area instead of the player's pages (to compare times) |
 | `MC_TEST=...` | Runs without screen or controller: simulated keys, pictures saved to `/tmp/mc_<seconds>.ppm`. With a `.cue` file it plays a Super Video CD image as if it were in the drive |
 
 To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. It analyzes at most the first minute of the file (Ctrl+C stops it earlier). If the result is above 100% of real time, the file can be played.
