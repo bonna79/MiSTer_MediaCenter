@@ -36,6 +36,8 @@ static double video_aspect = 4.0 / 3.0;
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 
+#include "accel.c"
+
 #define MC_AUDIO_RATE 48000
 #define MC_AUDIO_LEAD 0.3
 #define MC_VQ_MAX 40  // pictures the queue can hold
@@ -193,6 +195,13 @@ static void zcp_close(void);
 static void zcp_mark(const AVFrame *f);
 static int zcp_get_buffer(AVCodecContext *s, AVFrame *f, int flags);
 
+// FPGA accelerator (accel.c, accel_link.c)
+static int acc_file_off;  // it gave up on this file: the normal decoder
+static void acc_try(AVCodecContext *ctx, const AVStream *st);
+static void acc_close(void);
+static void acc_seek(void);
+static void acc_report(void);
+
 static AVCodecContext *open_decoder(int stream)
 {
 	AVStream *st = mc.fmt->streams[stream];
@@ -227,6 +236,7 @@ static AVCodecContext *open_decoder(int stream)
 		half_lines = st->codecpar->height > 720;
 		fprintf(stderr, "mediacenter: %dx%d %s, light decoding\n", st->codecpar->width, st->codecpar->height, codec->name);
 		if (!zc_get_buffer2) zcp_open(ctx, st->codecpar->width, half_lines);
+		acc_try(ctx, st);
 	}
 	if (avcodec_open2(ctx, codec, NULL) < 0)
 	{
@@ -316,6 +326,7 @@ static void media_close(void)
 	sws_freeContext(mc.sws);
 	av_packet_free(&mc.pkt);
 	av_frame_free(&mc.frame);
+	acc_close();
 	zcp_close();
 	if (mc.fmt) avformat_close_input(&mc.fmt);
 	free(mc.pend);
@@ -330,6 +341,7 @@ static int media_open(const char *path)
 	skip_base = AVDISCARD_DEFAULT;
 	half_lines = 0;
 	media_close();
+	acc_file_off = 0;
 	if (media_io)
 	{
 		mc.fmt = avformat_alloc_context();
@@ -1352,6 +1364,7 @@ static void yuv_dvd_draw(void)
 }
 
 #include "zerocopy.c"
+#include "accel_link.c"
 
 // fb_present for a YUV framebuffer: the picture is the size of the
 // framebuffer; the controls are blended in grey (Y toward their level, U and
@@ -1392,10 +1405,27 @@ static void yuv_draw(void)
 	}
 	// 1080p: the core draws the lines above the controls (zerocopy.c)
 	int core_rows = 0;
+	// a picture of the FPGA accelerator is only in the FPGA's memory: the
+	// core draws all of it and the controls are blended over it here
+	int accf = have_frame && f && acc.on && acc_buf_of(f);
 	if (narrow32 && yuv_half && have_frame && f && f->data[0] && w == fb_w)
 	{
-		int rows = (ovl_shown && ovl_a && ovl_y < fb_h) ? (ovl_y > 0 ? ovl_y : 0) : fb_h;
+		int rows = (ovl_shown && ovl_a && ovl_y < fb_h && !accf) ? (ovl_y > 0 ? ovl_y : 0) : fb_h;
 		if (zcp_draw(f, rows)) core_rows = rows;
+	}
+	else if (accf) acc_fail(NULL, "the picture is not drawn by the core");
+	if (accf)
+	{
+		if (!core_rows) fb_blank(fb_mem, (size_t)fb_stride * fb_h);
+		else if (ovl_shown && ovl_a)
+			for (int y = ovl_y > 0 ? ovl_y : 0; y < fb_h; y++)
+			{
+				uint8_t *out = fb_mem + (size_t)y * fb_stride;
+				memcpy(row_buf, out, (size_t)fb_w * 2);
+				yuv_band(row_buf, y);
+				memcpy(out, row_buf, (size_t)fb_w * 2);
+			}
+		return;
 	}
 	for (int y = core_rows; y < fb_h; y++)
 	{
@@ -1509,6 +1539,12 @@ static void draw_video_frame(AVFrame *f)
 		}
 	}
 	else pic_fields = 0;
+	if (acc.on && acc_buf_of(f))
+	{
+		// only the core can draw the accelerator's pictures
+		acc_fail(NULL, "the picture is not drawn by the core");
+		return;
+	}
 	if (!fb_mem) return;
 	// The rows outside the picture are not drawn again: on a new layout all
 	// the pages are made black (fb_layout clears only the one shown), or the
@@ -1594,6 +1630,7 @@ static void media_seek(double t)
 	if (mc.vdec) avcodec_flush_buffers(mc.vdec);
 	if (mc.adec) avcodec_flush_buffers(mc.adec);
 	vq_clear();
+	acc_seek();
 	mc.pend_len = 0;
 	mc.audio_end = t;
 	mc.last_vpts = mc.read_vpts = NAN;
@@ -1601,6 +1638,27 @@ static void media_seek(double t)
 	mc.clock = vt.clock = t;
 	if (vt.on) pthread_mutex_unlock(&vt.lock);
 	audio_flush();
+}
+
+// The FPGA accelerator gave up on this file (accel.c, acc_fail): the normal
+// decoder goes on from the same moment.
+static void acc_fallback(void)
+{
+	if (!acc.on || !acc.failed) return;
+	printf("mediacenter: diag acceleratore: spento per questo video a %.1f s (%s), riprende il decoder normale\n", mc.clock, acc.why);
+	double t = mc.clock;
+	int was_on = vt.on;
+	vt_end();
+	vq_clear();
+	if (yuv_last) av_frame_unref(yuv_last);
+	if (mc.vdec) avcodec_free_context(&mc.vdec);
+	acc_close();
+	zcp_close();
+	acc_file_off = 1;
+	mc.vdec = open_decoder(mc.vstream);
+	if (!mc.vdec) mc.vstream = -1;
+	else if (was_on) vt_start();
+	media_seek(t);
 }
 
 // Shows the first picture at or after t (fast forward / rewind). Returns its
@@ -1838,6 +1896,7 @@ static int media_play(int in_playlist)
 		}
 		if (result != END_DONE) break;
 
+		acc_fallback();
 		AVFrame *show = NULL;
 		if (p.state == ST_PLAY)
 		{
@@ -1957,6 +2016,7 @@ static int media_play(int in_playlist)
 			printf("mediacenter: per picture: colour conversion %.1f ms, drawing on screen %.1f ms\n",
 				1000 * draw_convert / draw_count, 1000 * draw_present / draw_count);
 		zcp_report();
+		acc_report();
 		if (dd.on && dd.n)
 			printf("mediacenter: diag decoder: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms (%.1f%%), %d saltate per recuperare\n",
 				dd.n, 1000 * dd.sum / dd.n, 1000 * dd.max, dd.over, 1000 * dd.budget, 100.0 * dd.over / dd.n, dd.skipped);

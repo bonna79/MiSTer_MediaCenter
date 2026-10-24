@@ -39,7 +39,7 @@ extern struct mc_acc_hooks *mc_acc_hooks;    // in our FFmpeg
 typedef struct {
 	int slot;
 	unsigned seq;                            // decoding order of the picture in it
-	unsigned session;
+	unsigned session;                        // ~0: no commands for it
 } acc_buf_t;
 
 static struct {
@@ -52,14 +52,14 @@ static struct {
 	unsigned next_seq;                       // the next picture to start
 	unsigned next_send;                      // the next picture to send
 	struct mc_acc_pic *inflight[ACC_INFLIGHT];
-	struct mc_acc_pic *spare[ACC_INFLIGHT];
+	struct mc_acc_pic *spare[4 * ACC_INFLIGHT];
 	int nspare;
 	uint64_t slots_used;                     // bit per slot
 	int slots_peak;
 	acc_buf_t bufs[ACC_SLOTS];
 	uint8_t *dummy;                          // the shared pixel memory
 	size_t dummy_size;
-	int dummy_ls;
+	int dummy_ls, dummy_cs, dummy_h;         // its layout: Y, U and V planes
 	// sends a finished picture's commands (an even number of words)
 	int (*send)(const uint32_t *w, size_t n, unsigned seq);
 	// counters
@@ -88,9 +88,9 @@ static void acc_buf_free(void *opaque, uint8_t *data)
 {
 	(void)data;
 	acc_buf_t *b = (acc_buf_t *)opaque;
-	pthread_mutex_lock(&acc.lock);
-	acc.slots_used &= ~(1ull << b->slot);
-	pthread_mutex_unlock(&acc.lock);
+	// without the lock: the player frees pictures while a decoding thread
+	// may hold it waiting for room in the ring
+	__atomic_fetch_and(&acc.slots_used, ~(1ull << b->slot), __ATOMIC_SEQ_CST);
 }
 
 // The decoder's pictures: a slot each, pixels in the shared dummy memory.
@@ -106,26 +106,38 @@ static int acc_get_buffer(AVCodecContext *s, AVFrame *f, int flags)
 	avcodec_align_dimensions2(s, &w, &h, align);
 	int ys = (w + 63) & ~63, cs = ((w + 1) / 2 + 63) & ~63, ch = (h + 1) / 2;
 	size_t need = (size_t)ys * h + 2 * (size_t)cs * ch + 4096;
-	if (need > acc.dummy_size || ys != acc.dummy_ls)
+	pthread_mutex_lock(&acc.lock);
+	if (!acc.dummy)
 	{
-		// sized once for the stream (FFmpeg's threads are not running yet)
-		free(acc.dummy);
+		// sized once for the stream and kept: pictures still point at it
 		acc.dummy = (uint8_t *)aligned_alloc(64, (need + 63) & ~(size_t)63);
 		acc.dummy_size = acc.dummy ? need : 0;
 		acc.dummy_ls = ys;
-		if (!acc.dummy) return AVERROR(ENOMEM);
+		acc.dummy_cs = cs;
+		acc.dummy_h = h;
 	}
-	pthread_mutex_lock(&acc.lock);
-	int slot = -1;
-	for (int i = 0; i < ACC_SLOTS; i++)
-		if (!(acc.slots_used >> i & 1)) { slot = i; break; }
-	if (slot >= 0)
-	{
-		acc.slots_used |= 1ull << slot;
-		int n = __builtin_popcountll(acc.slots_used);
-		if (n > acc.slots_peak) acc.slots_peak = n;
-	}
+	int fits = acc.dummy && need == acc.dummy_size && ys == acc.dummy_ls && h == acc.dummy_h;
 	pthread_mutex_unlock(&acc.lock);
+	if (!fits)
+	{
+		acc_fail(NULL, "the picture size changed");
+		return avcodec_default_get_buffer2(s, f, flags);
+	}
+	int slot = -1;
+	uint64_t used = __atomic_load_n(&acc.slots_used, __ATOMIC_SEQ_CST);
+	for (;;)
+	{
+		slot = -1;
+		for (int i = 0; i < ACC_SLOTS; i++)
+			if (!(used >> i & 1)) { slot = i; break; }
+		if (slot < 0) break;
+		if (__atomic_compare_exchange_n(&acc.slots_used, &used, used | 1ull << slot, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+		{
+			int n = __builtin_popcountll(used | 1ull << slot);
+			if (n > acc.slots_peak) acc.slots_peak = n;
+			break;
+		}
+	}
 	if (slot < 0)
 	{
 		acc_fail(NULL, "no free picture slot in the FPGA memory");
@@ -134,7 +146,7 @@ static int acc_get_buffer(AVCodecContext *s, AVFrame *f, int flags)
 	acc_buf_t *b = &acc.bufs[slot];
 	b->slot = slot;
 	b->seq = 0;
-	b->session = acc.session;
+	b->session = ~0u; // until its commands start (acc_begin)
 	f->buf[0] = av_buffer_create(acc.dummy, acc.dummy_size, acc_buf_free, b, 0);
 	if (!f->buf[0])
 	{
@@ -166,6 +178,17 @@ static int acc_slot(void *o, const AVFrame *f)
 
 // ---------------------------------------------------------------- pictures
 
+// a picture buffer back to the spares (acc.lock held)
+static void acc_spare(struct mc_acc_pic *p)
+{
+	if (acc.nspare < 4 * ACC_INFLIGHT) acc.spare[acc.nspare++] = p;
+	else
+	{
+		free(p->data);
+		free(p);
+	}
+}
+
 static struct mc_acc_pic *acc_begin(void *o, const AVFrame *f, int mb_w, int mb_h)
 {
 	(void)o;
@@ -179,6 +202,7 @@ static struct mc_acc_pic *acc_begin(void *o, const AVFrame *f, int mb_w, int mb_
 	}
 	if (!p || acc.next_seq - acc.next_send >= ACC_INFLIGHT)
 	{
+		if (p) acc_spare(p);
 		pthread_mutex_unlock(&acc.lock);
 		acc_fail(NULL, "too many pictures at once");
 		return NULL;
@@ -188,7 +212,11 @@ static struct mc_acc_pic *acc_begin(void *o, const AVFrame *f, int mb_w, int mb_
 	p->done = 0;
 	acc.inflight[p->seq % ACC_INFLIGHT] = p;
 	acc_buf_t *b = acc_buf_of(f);
-	if (b) b->seq = p->seq;
+	if (b)
+	{
+		b->seq = p->seq;
+		b->session = p->session;
+	}
 	pthread_mutex_unlock(&acc.lock);
 	p->p = p->data;
 	p->end = p->data + p->cap;
@@ -230,7 +258,7 @@ static void acc_end(void *o, struct mc_acc_pic *p)
 		// from before a seek: dropped
 		if (acc.inflight[p->seq % ACC_INFLIGHT] == p) acc.inflight[p->seq % ACC_INFLIGHT] = NULL;
 		acc.pics_dropped++;
-		acc.spare[acc.nspare++] = p;
+		acc_spare(p);
 		pthread_mutex_unlock(&acc.lock);
 		return;
 	}
@@ -245,7 +273,7 @@ static void acc_end(void *o, struct mc_acc_pic *p)
 		acc.pics_sent++;
 		acc.words_sent += q->p - q->data;
 		acc.inflight[acc.next_send % ACC_INFLIGHT] = NULL;
-		acc.spare[acc.nspare++] = q;
+		acc_spare(q);
 		acc.next_send++;
 	}
 	pthread_mutex_unlock(&acc.lock);
@@ -265,6 +293,15 @@ static void acc_attach(AVCodecContext *ctx)
 	ctx->skip_loop_filter = AVDISCARD_ALL; // no deblocking in the FPGA yet
 	acc.failed = 0;
 	acc.why[0] = 0;
+	// the last file's pictures are all gone with its decoder
+	free(acc.dummy);
+	acc.dummy = NULL;
+	acc.dummy_size = 0;
+	acc.slots_used = 0;
+	acc.slots_peak = 0;
+	acc.pics_sent = acc.slot_waits = acc.pics_dropped = 0;
+	acc.words_sent = 0;
+	acc.send_time = 0;
 	acc.on = 1;
 	mc_acc_hooks = &acc.hooks;
 }
@@ -277,7 +314,7 @@ static void acc_restart(void)
 	for (int i = 0; i < ACC_INFLIGHT; i++)
 		if (acc.inflight[i] && acc.inflight[i]->done)
 		{
-			acc.spare[acc.nspare++] = acc.inflight[i];
+			acc_spare(acc.inflight[i]);
 			acc.inflight[i] = NULL;
 		}
 		else if (acc.inflight[i]) acc.inflight[i] = NULL; // its end() returns it

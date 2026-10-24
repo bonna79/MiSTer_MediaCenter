@@ -252,19 +252,26 @@ wire       c_two = use0[c_rq] && use1[c_rq];
 // the first group of the pass on, several clocks later):
 //   px = clip(((pred * wA + p0 * wB + K) >>> sh) + o)
 // with p0 the list 0 prediction kept by the first pass (second pass only).
-reg  [1:0] wq;                // c_rq a clock later (its own copy, few loads)
+// c_rq a clock later: a copy for each 17 bits of weights, so each copy has
+// few loads (one copy for all of them missed 108 MHz in the menu core)
+(* preserve *) reg [1:0] wq[7];
 reg        wl, wl2, wtwo, wtwo2;
 reg [50:0] wsel0, wsel1;      // weights of the two references of quadrant c_rq
 reg signed [8:0] iwsel;
+integer wi;
 always @(posedge clk) begin
-	wq <= c_rq;
+	for (wi = 0; wi < 7; wi = wi + 1) wq[wi] <= c_rq;
 	wl <= c_l;
 	wtwo <= c_two;
 	wl2 <= wl;
 	wtwo2 <= wtwo;
-	wsel0 <= qwt[wq * 51 +: 51];
-	wsel1 <= qwt1[wq * 51 +: 51];
-	iwsel <= iw[wq * 9 +: 9];
+	wsel0[16:0]  <= qwt[wq[0] * 51 +: 17];
+	wsel0[33:17] <= qwt[wq[1] * 51 + 17 +: 17];
+	wsel0[50:34] <= qwt[wq[2] * 51 + 34 +: 17];
+	wsel1[16:0]  <= qwt1[wq[3] * 51 +: 17];
+	wsel1[33:17] <= qwt1[wq[4] * 51 + 17 +: 17];
+	wsel1[50:34] <= qwt1[wq[5] * 51 + 34 +: 17];
+	iwsel <= iw[wq[6] * 9 +: 9];
 end
 
 function signed [8:0] wof(input [50:0] ws, input [1:0] j);   // weight of plane j

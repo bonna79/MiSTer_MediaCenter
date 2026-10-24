@@ -92,6 +92,39 @@ static volatile uint32_t *zcp_table(int slot)
 	return zcp_mb + (ZCP_TABLE + (size_t)slot * ZCP_TSIZE) / 4;
 }
 
+// The mailbox (also for the FPGA accelerator's pictures, accel_link.c).
+static int zcp_map(void)
+{
+	if (zcp_mb) return 0;
+	if (zcp_broken) return -1;
+	zcp_devmem = open("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC);
+	zcp_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+	void *m = zcp_devmem < 0 ? MAP_FAILED :
+		mmap(NULL, ZCP_MLEN, PROT_READ | PROT_WRITE, MAP_SHARED, zcp_devmem, ZCP_MBOX);
+	if (m == MAP_FAILED || zcp_pagemap < 0)
+	{
+		fprintf(stderr, "mediacenter: zero-copy not available (/dev/mem or pagemap), the ARM draws\n");
+		zcp_broken = 1;
+		return -1;
+	}
+	zcp_mb = (volatile uint32_t *)m;
+	zcp_mb[0] = ZCP_MAGIC;
+	zcp_seq = zcp_mb[1];
+	return 0;
+}
+
+// Linux must not move locked pages while the core reads them (zero-copy
+// pool, accelerator ring): counted, the setting comes back with the last.
+static int zcp_pins;
+static void zcp_pin(void)
+{
+	if (!zcp_pins++) zcp_sysctl("0", zcp_compact, sizeof(zcp_compact));
+}
+static void zcp_unpin(void)
+{
+	if (zcp_pins && !--zcp_pins && zcp_compact[0]) zcp_sysctl(zcp_compact, NULL, 0);
+}
+
 // Called when a file opens its video decoder: the pool for a 1080p picture
 // that is drawn narrowed and with half its lines.
 static void zcp_open(AVCodecContext *ctx, int width, int half)
@@ -103,23 +136,8 @@ static void zcp_open(AVCodecContext *ctx, int width, int half)
 	if (e && atoi(e)) return;
 	e = getenv("MC_ZC_AGE");
 	if (e && atoi(e) > 0) zcp_age = atoi(e);
-	if (!zcp_mb)
-	{
-		zcp_devmem = open("/dev/mem", O_RDWR | O_SYNC | O_CLOEXEC);
-		zcp_pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
-		void *m = zcp_devmem < 0 ? MAP_FAILED :
-			mmap(NULL, ZCP_MLEN, PROT_READ | PROT_WRITE, MAP_SHARED, zcp_devmem, ZCP_MBOX);
-		if (m == MAP_FAILED || zcp_pagemap < 0)
-		{
-			fprintf(stderr, "mediacenter: zero-copy not available (/dev/mem or pagemap), the ARM draws\n");
-			zcp_broken = 1;
-			return;
-		}
-		zcp_mb = (volatile uint32_t *)m;
-		zcp_mb[0] = ZCP_MAGIC;
-		zcp_seq = zcp_mb[1];
-	}
-	zcp_sysctl("0", zcp_compact, sizeof(zcp_compact));
+	if (zcp_map()) return;
+	zcp_pin();
 	zcp_on = 1;
 	ctx->get_buffer2 = zcp_get_buffer;
 	memset(&zd, 0, sizeof(zd));
@@ -143,7 +161,7 @@ static void zcp_close(void)
 	// keep the blocks still in use (none expected) at their places
 	if (!kept) zcp_nslots = 0;
 	pthread_mutex_unlock(&zcp_lock);
-	if (zcp_on && zcp_compact[0]) zcp_sysctl(zcp_compact, NULL, 0);
+	if (zcp_on) zcp_unpin();
 	zcp_on = 0;
 }
 
@@ -260,8 +278,17 @@ static void zcp_report(void)
 // Has the core draw lines 0..rows-1 of the frame buffer page at fb_mem from
 // f (1080p, half the lines, 1920 -> fb_w = 1280). Returns 1 when done, 0 when
 // the ARM must draw them.
+static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows);
+
 static int zcp_draw(AVFrame *f, int rows)
 {
+	// a picture of the FPGA accelerator (accel_link.c)
+	acc_buf_t *ab = acc.on ? acc_buf_of(f) : NULL;
+	if (ab)
+	{
+		zcp_diag(now_seconds());
+		return acc_zc_draw(f, ab, rows);
+	}
 	if (!zcp_on || zcp_broken || !zcp_mb || !fb_phys || !f->data[0]) return 0;
 	double t0 = now_seconds();
 	zcp_diag(t0);
