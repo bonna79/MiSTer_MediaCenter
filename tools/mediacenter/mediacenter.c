@@ -922,6 +922,11 @@ static int native_fb = 0;        // set while a DVD plays
 static int native_w, native_h;   // current special mode, 0 for the normal one
 static double native_aspect;
 static int native_ok = 1;        // cleared when Main ignores the command
+// Main answers a mode late while it is busy (switching the CRT mode, say):
+// that turns the special frame buffers off only until the next video
+// (native_retry), and for good after 3 misses in a row (a Main without them).
+static int native_fails, yuv_fails;
+static double crt_mode_sent_t;   // when the CRT mode was last changed
 static int fb_fake = 0;          // test mode: memory framebuffer
 static int def_w, def_h;         // the normal framebuffer
 static int fb_menu, menu_asking; // the lists' own frame buffer is in use (menu_fb)
@@ -1042,6 +1047,22 @@ static double aspect_used(int sw, int sh);
 static void crt_fb_changed(void);
 static void crt_video_std(const AVFrame *f);
 
+// At the start of a video: the special frame buffers (and YUV) are asked
+// again after a Main that answered late, unless it missed 3 times in a row.
+static void native_retry(void)
+{
+	if (!native_ok && native_fails && native_fails < 3)
+	{
+		fprintf(stderr, "mediacenter: special frame buffers asked again\n");
+		native_ok = 1;
+	}
+	if (!yuv_ok && yuv_fails && yuv_fails < 3)
+	{
+		fprintf(stderr, "mediacenter: YUV frame buffer asked again\n");
+		yuv_ok = 1;
+	}
+}
+
 static void fb_native(int w, int h, double aspect)
 {
 	fb_native_fmt(w, h, aspect, 0);
@@ -1075,6 +1096,7 @@ static void fb_native_fmt(int w, int h, double aspect, int yuv)
 		if (fd < 0)
 		{
 			native_ok = 0;
+			native_fails = 3; // no Main to ask
 			return;
 		}
 		char cmd[96];
@@ -1083,9 +1105,10 @@ static void fb_native_fmt(int w, int h, double aspect, int yuv)
 		int ok = write(fd, cmd, strlen(cmd)) > 0;
 		close(fd);
 
-		// Main applies the mode in its own loop: wait for Linux to report it.
-		int changed = 0;
-		for (int i = 0; ok && i < 100 && !changed; i++)
+		// Main applies the mode in its own loop: wait for Linux to report it
+		// (longer just after a CRT mode change, which keeps the Main busy).
+		int changed = 0, tries = now_seconds() - crt_mode_sent_t < 5.0 ? 400 : 100;
+		for (int i = 0; ok && i < tries && !changed; i++)
 		{
 			usleep(10000);
 			int f = open("/dev/fb0", O_RDWR | O_CLOEXEC);
@@ -1099,12 +1122,14 @@ static void fb_native_fmt(int w, int h, double aspect, int yuv)
 		{
 			fprintf(stderr, "mediacenter: YUV framebuffer not available (needs the MediaCenter menu core and Main), colours converted on the ARM\n");
 			yuv_ok = 0;
+			yuv_fails++;
 			return;
 		}
 		if (!changed)
 		{
-			fprintf(stderr, "mediacenter: framebuffer %dx%d not available, scaling on the ARM\n", want_w, want_h);
+			fprintf(stderr, "mediacenter: framebuffer %dx%d not available, scaling on the ARM (until the next video)\n", want_w, want_h);
 			native_ok = 0;
+			native_fails++;
 			return;
 		}
 		fb_close();
@@ -1116,6 +1141,8 @@ static void fb_native_fmt(int w, int h, double aspect, int yuv)
 			return;
 		}
 	}
+	native_fails = 0;
+	if (fb_yuv) yuv_fails = 0;
 	fprintf(stderr, "mediacenter: framebuffer %dx%d%s%s%s\n", fb_w, fb_h, w ? " stretched by the scaler" : "",
 		fb_pages > 1 ? ", 3 pages" : "", fb_yuv ? ", YUV converted by the FPGA" : "");
 	native_w = w;
@@ -1483,7 +1510,12 @@ static void draw_video_frame(AVFrame *f)
 	}
 	else pic_fields = 0;
 	if (!fb_mem) return;
+	// The rows outside the picture are not drawn again: on a new layout all
+	// the pages are made black (fb_layout clears only the one shown), or the
+	// bars keep what the other pages showed before (a list, say).
+	int relayout = f->width != src_w || h != src_h || fb_aspect / fb_par != fb_layout_aspect;
 	fb_layout(f->width, h);
+	if (relayout) fb_clear();
 	if (!frame_rgb || !line_buf || !x_map) return;
 	mc.sws = sws_getCachedContext(mc.sws, f->width, h, (enum AVPixelFormat)f->format,
 		f->width, h, fb_bgr ? AV_PIX_FMT_BGRA : AV_PIX_FMT_RGBA, SWS_POINT, NULL, NULL, NULL);
@@ -2381,6 +2413,7 @@ static int play_file(const char *path, int in_playlist)
 		return END_DONE;
 	}
 	if (media_open(path)) return END_DONE;
+	native_retry();
 	native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");
 	int r = media_play(in_playlist);
 	native_fb = 0;
@@ -2512,6 +2545,7 @@ static int svcd_play_range(int start, int end, int track, int seek_lba, const ch
 		if (t >= 0.5) media_seek(t); // otherwise from the first picture already read
 		fprintf(stderr, "mediacenter: %s, sectors %d-%d, %d chapter(s)%s\n", name, start, end, svcd_chapters,
 			seek_lba >= 0 ? ", from an entry point" : "");
+		native_retry();
 		native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");
 		r = media_play(in_playlist);
 		native_fb = 0;
@@ -2969,6 +3003,7 @@ static void crt_send(void)
 	{
 		snprintf(cmd, sizeof(cmd), "fb_cmd3 crtmode %d %d\n", mode, flt);
 		crt_write(cmd);
+		if (mode != crt_sent_mode) crt_mode_sent_t = now_seconds();
 		crt_sent_mode = mode;
 		crt_sent_filter = flt;
 	}

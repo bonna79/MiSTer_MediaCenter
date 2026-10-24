@@ -1394,6 +1394,7 @@ static int dvd_play(const char *device)
 	exit_question = "Uscire dal DVD?";
 	if (audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
 	fb_clear();
+	native_retry();
 	native_fb = !getenv("MC_ARMSCALE");
 	// a video file played before may have left its light mode on
 	half_lines = 0;
