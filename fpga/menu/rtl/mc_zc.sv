@@ -247,6 +247,9 @@ assign want = (rd_ready || wr_ready) && !ddr_rd && !ddr_we;
 assign idle = !ddr_rd && !ddr_we && !pend && !wr_beats;
 
 reg [19:0] wd = 0;  // watchdog: words that never arrive
+// words to the end of rd_off's page, a clock late: a page read waits for the
+// table look-up (lk 0, 1, 3, 2) after every change of rd_off, so it is current
+reg [11:0] pg_end;
 
 always @(posedge clk) begin
 	reg [31:0] pa;
@@ -259,6 +262,7 @@ always @(posedge clk) begin
 	if(state != S_WAIT && state != S_DEAD) cycles <= cycles + 1'd1;
 
 	// ------------------------------------------------ transfers under way
+	pg_end <= 12'd512 - rd_off[11:3];
 	if(ddr_rd && !ddr_busy) ddr_rd <= 0;
 
 	if(w_acc) begin
@@ -314,7 +318,7 @@ always @(posedge clk) begin
 		if(grant && rd_ready && !wr_ready && !ddr_rd && !ddr_we) begin
 			if(rd_kind == 2) begin
 				pa     = {tab_q[19:0], rd_off[11:0]};
-				to_end = 12'd512 - rd_off[11:3];
+				to_end = pg_end;
 			end
 			else begin
 				pa     = rd_off;
