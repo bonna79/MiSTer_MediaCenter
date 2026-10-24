@@ -2170,11 +2170,28 @@ static void scan_sources(void)
 	if (dir_exists("/media/fat/Video")) add_source("SD: Video", "/media/fat/Video");
 	if (dir_exists("/media/fat/Music")) add_source("SD: Musica", "/media/fat/Music");
 	add_source("SD: tutta la scheda", "/media/fat");
+	// the same disk mounted on two /media/usbN (it happens) is listed once
+	dev_t seen[8];
+	int nseen = 0;
 	for (int i = 0; i < 8; i++)
 	{
 		char path[32], label[32];
 		snprintf(path, sizeof(path), "/media/usb%d", i);
 		if (!dir_has_entries(path)) continue;
+		struct stat st;
+		if (!stat(path, &st))
+		{
+			int dup = 0;
+			for (int k = 0; k < nseen; k++) dup |= seen[k] == st.st_dev;
+			if (dup)
+			{
+				static unsigned told; // said once in the log
+				if (!(told & 1u << i)) printf("mediacenter: %s e' lo stesso disco di una USB gia' in lista, non ripetuto\n", path);
+				told |= 1u << i;
+				continue;
+			}
+			seen[nseen++] = st.st_dev;
+		}
 		snprintf(label, sizeof(label), "USB %d", i);
 		add_source(label, path);
 	}
