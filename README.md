@@ -2,6 +2,9 @@
 
 **Italiano** · [English](README_EN.md)
 
+> [!WARNING]
+> **AVVERTENZA: HDMI e CRT collegati insieme.** Se usi insieme l'uscita HDMI verso un televisore LCD e l'uscita VGA→SCART verso un CRT, collega **MiSTer, televisore LCD e CRT alla stessa multipresa elettrica**. Con i due televisori su prese diverse, accendere il CRT mentre il MiSTer è acceso può far passare uno sbalzo elettrico attraverso il MiSTer, tramite le masse dei cavi. È successo in una prova: l'HDMI è diventato verde per qualche secondo, poi l'immagine è sparita su tutte e due le uscite (l'audio continuava) e il pad non rispondeva più; è servito riavviare. Se non puoi usare la stessa multipresa, **accendi il CRT prima del MiSTer**.
+
 <p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.0 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > Questo progetto è stato sviluppato con l'aiuto dell'intelligenza artificiale: il codice e la documentazione sono stati scritti con Claude, l'IA di Anthropic, e provati da rgm su un MiSTer vero.
@@ -35,6 +38,9 @@ Il pacchetto è formato da queste parti:
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
 
 ## Novità della versione 3.0
+
+> [!WARNING]
+> **AVVERTENZA: HDMI e CRT collegati insieme.** Se usi insieme l'uscita HDMI verso un televisore LCD e l'uscita VGA→SCART verso un CRT, collega **MiSTer, televisore LCD e CRT alla stessa multipresa elettrica**. Con i due televisori su prese diverse, accendere il CRT mentre il MiSTer è acceso può far passare uno sbalzo elettrico attraverso il MiSTer, tramite le masse dei cavi. È successo in una prova: l'HDMI è diventato verde per qualche secondo, poi l'immagine è sparita su tutte e due le uscite (l'audio continuava) e il pad non rispondeva più; è servito riavviare. Se non puoi usare la stessa multipresa, **accendi il CRT prima del MiSTer**.
 
 La 3.0 riproduce i video **1080p H.264** fluidi, su HDMI e su CRT: l'FPGA del MiSTer aiuta l'ARM a decodificarli.
 
