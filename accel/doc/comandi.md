@@ -50,9 +50,9 @@ da questi comandi si ottengono immagini identiche a FFmpeg (video di prova di
 
 ## Deblocking `A5` (versione 3, core dalla fase 4)
 Prima dell'`A3` del macroblocco, 5 parole. Un macroblocco senza `A5` non è
-filtrato. I valori vengono dal filtro di FFmpeg stesso (`h264_mcdbk.c`, in
-modalità "cattura": nota i bordi senza toccare i pixel), quindi l'FPGA filtra
-come FFmpeg. Il core lo dice nella risposta (parola 20, bit 17); il lettore lo
+filtrato. I valori sono calcolati dall'ARM come li calcola il filtro di FFmpeg
+(`h264_mcdbk.c`, dalle stesse tabelle del filtro, senza filtrare i pixel),
+quindi l'FPGA filtra come FFmpeg. Il core lo dice nella risposta (parola 20, bit 17); il lettore lo
 manda solo allora e senza `MC_NODEBLOCK=1`.
 - p0: `0xA5` << 24 | forte verticale bordo 0 | forte orizzontale bordo 0 << 1 |
   offset alfa (5 bit con segno, `slice_alpha_c0_offset`) << 2 | offset beta
