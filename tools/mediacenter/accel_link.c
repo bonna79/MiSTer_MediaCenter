@@ -447,10 +447,18 @@ static void acc_try(AVCodecContext *ctx, const AVStream *st)
 	for (int s = 0; s < ACC_SLOTS; s++)
 		for (unsigned p = 0; p < ACC_SLOT_PAGES; p++) t[s * 1024 + p] = (ACC_SLOT_BASE + (uint32_t)s * ACC_SLOT_SIZE) / 4096 + p;
 	acc.send = al_send;
+	// deblocking in the core (answer word 20, bit 17), unless MC_NODEBLOCK=1.
+	// Word 20 comes just after the words al_open waited for: every core
+	// since 3.0 sets bit 16 in it, so once bit 16 is there the word is new.
+	for (int i = 0; i < 40 && !(al.mb[20] & 0x10000); i++) usleep(500);
+	e = getenv("MC_NODEBLOCK");
+	int dbk_core = (al.mb[20] & 0x20000) != 0, dbk_off = e && atoi(e);
+	acc.hooks.deblock = dbk_core && !dbk_off;
 	acc_attach(ctx);
 	memset(&zd, 0, sizeof(zd));
-	printf("mediacenter: diag acceleratore: acceso (anello %s, svuotamento L2 %s, sessione %u, pronto in %.0f ms)\n",
-		al.so ? "fuori da Linux" : "nella memoria del lettore", al.l2 ? "si" : "NO", (unsigned)al.fsess, 1000 * (now_seconds() - t0));
+	printf("mediacenter: diag acceleratore: acceso (anello %s, svuotamento L2 %s, sessione %u, pronto in %.0f ms, deblocking %s)\n",
+		al.so ? "fuori da Linux" : "nella memoria del lettore", al.l2 ? "si" : "NO", (unsigned)al.fsess, 1000 * (now_seconds() - t0),
+		acc.hooks.deblock ? "nell'FPGA" : (dbk_core ? "spento (MC_NODEBLOCK)" : "no (core senza filtro)"));
 }
 
 // After the decoder and all its pictures are gone.

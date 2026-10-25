@@ -4,7 +4,8 @@
 // of tools/mediacenter/accel.c (only the commands, as on the MiSTer, with the
 // player's two threads), and writes <prefix>.cmd (the commands, in the order
 // the FPGA gets them) and <prefix>.rec (FFmpeg's pictures in the same order),
-// for accel/sim/model.py and the test benches.
+// for accel/sim/model.py and the test benches. With deblocking (command A5),
+// as the player with a core that filters; MC_NODEBLOCK=1: without.
 //   acctest <file> <prefix> [threads] [pictures held, like the player's queue]
 // Built with -DACC_FAKE, the commands go through the player's link with the
 // core (tools/mediacenter/accel_link.c: ring, sessions, waiting for each
@@ -87,6 +88,7 @@ static void *fake_core(void *arg)
 				else { left = type ? 5 : 37; stage = 1; }
 			}
 			else if (tag == 0xA4) pics++;
+			else if (tag == 0xA5) left = 4;
 			else if (tag != 0xA0) { fake_bad++; m[20] = 1; }
 		}
 		rd += take;
@@ -161,7 +163,10 @@ int main(int argc, char **argv)
 	avcodec_parameters_to_context(cn, fmt->streams[vs]->codecpar);
 	avcodec_parameters_to_context(ca, fmt->streams[vs]->codecpar);
 	cn->thread_count = 1;
-	cn->skip_loop_filter = AVDISCARD_ALL;
+	// deblocking in the FPGA (command A5) as the player does, unless MC_NODEBLOCK=1
+	const char *nd = getenv("MC_NODEBLOCK");
+	acc.hooks.deblock = !(nd && atoi(nd));
+	cn->skip_loop_filter = acc.hooks.deblock ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
 	cn->flags2 |= AV_CODEC_FLAG2_FAST;
 	ca->thread_count = threads;
 	ca->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;

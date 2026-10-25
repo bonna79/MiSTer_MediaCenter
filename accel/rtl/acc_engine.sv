@@ -3,8 +3,8 @@
 // The ARM reads the stream (CABAC/CAVLC, modes, vectors, coefficients) and
 // sends the commands of accel/doc/comandi.md; this engine rebuilds the
 // pixels: inverse transforms, intra prediction, inter prediction (acc_mc),
-// and writes every macroblock into the picture slot in DDR. Progressive
-// 8-bit 4:2:0 only, no deblocking (light mode, as the player today).
+// and writes every macroblock into the picture slot in DDR through the
+// deblocking filter (acc_dbk, command A5). Progressive 8-bit 4:2:0 only.
 //
 // Picture layout in memory (64-bit words): slot base = slot << SLOT_L2;
 // Y rows of (1 << YSTRIDE_L2) words, U at UOFF and V at VOFF words from the
@@ -47,7 +47,8 @@ module acc_engine #(
 
 localparam S_CMD = 0, S_PIC = 1, S_REFS = 2, S_MB1 = 3, S_INFO = 4, S_NCOEF = 5, S_COEF = 6,
            S_IDCTW = 7, S_CTX = 8, S_I4 = 9, S_I8 = 10, S_I16 = 11, S_CHR = 12, S_MC = 13,
-           S_WB = 14, S_LB = 15, S_PCM = 16, S_DONE = 17, S_HAND = 18, S_IDLE = 19;
+           S_WB = 14, S_LB = 15, S_PCM = 16, S_DONE = 17, S_HAND = 18, S_IDLE = 19,
+           S_DBK = 20, S_FIN = 21;
 
 // Two stages working on consecutive macroblocks:
 //  A (sa): reads the commands, transforms the coefficients into the residual
@@ -68,6 +69,9 @@ reg  [8:0] a_iw[4];
 reg [31:0] a_mv[16], a_mv1[16];
 reg  [7:0] a_q_slot[4], a_q_slot1[4];
 reg [50:0] a_q_wt[4], a_q_wt1[4];
+reg [159:0] a_dbk;            // its command A5 (deblocking), if a_dbk_on
+reg        a_dbk_on;
+reg  [1:0] dcnt;              // A5 words read after the first
 
 reg  [7:0] wmb, hmb;          // picture size in macroblocks
 reg  [7:0] cur_slot;
@@ -82,6 +86,8 @@ reg  [3:0] cmode, i16mode;
 reg [13:0] qref[4];           // reference of each 8x8: list 0 bits 0-5, list 1 bits 7-12, bits 6 and 13 = list unused
 reg  [8:0] iw[4];             // implicit weight of list 0 of each 8x8
 reg [31:0] mv[16], mv1[16];
+reg [159:0] b_dbk;
+reg        b_dbk_on;
 
 // reference lists
 reg  [5:0] n0, n1;
@@ -434,28 +440,30 @@ acc_mc #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRID
 );
 
 // --------------------------------------------------------- write back
-// The writer sends a finished macroblock to memory (48 words) while B
-// already predicts the next one into the other half of acc_recon. It shares
-// the memory port with the MC fetch: it starts a word only when the MC has
-// no request waiting, and the MC sees the port busy while a word is out.
+// The deblocking filter (acc_dbk) takes a finished macroblock from acc_recon
+// and writes the filtered pixels to memory while B already predicts the
+// next one into the other half of acc_recon. It shares the memory port with
+// the MC fetch: it starts a word only when the MC has no request waiting,
+// and the MC sees the port busy while a word is out.
 
 reg        pbuf;              // recon buffer B predicts into
-reg        w_active, w_buf;
-reg  [7:0] w_mbx, w_mby;
-reg  [5:0] wbk;               // 0..31 luma words, 32..39 U, 40..47 V
-reg        wb_we;
-reg [AW-1:0] wb_addr;
-reg [63:0] wb_din;
 reg  [1:0] lbk;
-
-wire [AW-1:0] slot_base = AW'(cur_slot) << SLOT_L2;
-// the RAM is read one word ahead: address of the word to send next clock
-wire        wb_adv = w_active && (!wb_we || !mem_busy) && wbk != 48 && !mc_rd;
-wire  [6:0] rc_addr = w_active ? {w_buf, wb_adv ? wbk + 1'd1 : wbk} : {pbuf, 6'd0};
+reg        dbk_start, dbk_fin;
+wire       dbk_busy;
+wire       wb_we;
+wire [AW-1:0] wb_addr;
+wire [63:0] wb_din;
+wire  [6:0] rc_addr;
 wire [63:0] wb_word;
-wire [AW-1:0] wb_word_addr =
-	wbk < 32 ? slot_base + ((AW'({w_mby, wbk[4:1]})) << YSTRIDE_L2) + {w_mbx, wbk[0]} :
-	slot_base + (wbk < 40 ? AW'(UOFF) : AW'(VOFF)) + ((AW'({w_mby, wbk[2:0]})) << CSTRIDE_L2) + w_mbx;
+
+acc_dbk #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRIDE_L2), .UOFF(UOFF), .VOFF(VOFF)) dbk
+(
+	.clk(clk), .reset(reset),
+	.start(dbk_start), .fin(dbk_fin), .sbuf(~pbuf), .mbx(mbx), .mby(mby), .wmb(wmb), .hmb(hmb), .slot(cur_slot),
+	.prm_on(b_dbk_on), .prm(b_dbk), .busy(dbk_busy),
+	.rc_addr(rc_addr), .rc_word(wb_word),
+	.wb_we(wb_we), .wb_addr(wb_addr), .wb_din(wb_din), .mem_busy(mem_busy), .mc_rd(mc_rd)
+);
 
 assign mem_rd    = wb_we ? 1'b0 : mc_rd;
 assign mem_we    = wb_we;
@@ -469,8 +477,9 @@ assign mem_be    = 8'hFF;
 wire [7:0] tag = cmd_data[31:24];
 wire coef_blk_change = coef_have && cmd_data[26:22] != coef_blk;
 wire b_free = sb == S_IDLE;                // B can take the next macroblock
-wire b_idle = b_free && !w_active;         // and all written
-assign cmd_ready = !reset && ((sa == S_CMD && (tag == 8'hA3 || tag == 8'hA0 || b_idle)) || sa == S_PIC || sa == S_REFS || sa == S_MB1 ||
+wire b_idle = b_free && !dbk_busy && !dbk_start;   // and all written
+assign cmd_ready = !reset && ((sa == S_CMD && (tag == 8'hA3 || tag == 8'hA5 || tag == 8'hA0 || b_idle)) || sa == S_PIC || sa == S_REFS || sa == S_MB1 ||
+                   sa == S_DBK ||
                    sa == S_INFO || sa == S_NCOEF || sa == S_PCM ||
                    (sa == S_COEF && !coef_blk_change && idct_in && !idct_go));
 wire take = cmd_valid && cmd_ready;
@@ -627,6 +636,8 @@ always @(posedge clk) begin
 	idct_go <= 0;
 	mc_start <= 0;
 	pic_done <= 0;
+	dbk_start <= 0;
+	dbk_fin <= 0;
 
 	resid_clr <= 0;
 
@@ -673,30 +684,14 @@ always @(posedge clk) begin
 		end
 	end
 
-	// writer
-	if (w_active && (!wb_we || !mem_busy)) begin
-		if (wbk == 48) begin
-			wb_we <= 0;
-			w_active <= 0;
-		end
-		else if (!mc_rd) begin
-			wb_we <= 1;
-			wb_addr <= wb_word_addr;
-			wb_din <= wb_word;
-			wbk <= wbk + 1'd1;
-		end
-		else wb_we <= 0;
-	end
-
 	if (reset) begin
-		w_active <= 0;
+		a_dbk_on <= 0;
 		pbuf <= 0;
 		sa <= S_CMD;
 		sb <= S_IDLE;
 		abuf <= 0;
 		error <= 0;
 		mb_count <= 0;
-		wb_we <= 0;
 	end
 	else begin
 		case (sa)
@@ -727,12 +722,30 @@ always @(posedge clk) begin
 					sa <= cmd_data[18:16] == 4 ? S_PCM : S_MB1;
 				end
 				8'hA4: begin
-					pic_done <= 1;
+					// the filter writes the last rows, then the picture is done
+					dbk_fin <= 1;
 					pic_slot <= cur_slot;
+					sa <= S_FIN;
+				end
+				8'hA5: begin
+					a_dbk[31:0] <= cmd_data;
+					dcnt <= 0;
+					sa <= S_DBK;
 				end
 				8'hA0: ;                     // padding to a 64-bit word: nothing
 				default: error <= 1;
 			endcase
+		end
+
+		S_DBK: if (cmd_valid) begin             // always ready here
+			a_dbk[32 + dcnt * 32 +: 32] <= cmd_data;
+			dcnt <= dcnt + 1'd1;
+			if (dcnt == 3) begin a_dbk_on <= 1; sa <= S_CMD; end
+		end
+
+		S_FIN: if (!dbk_fin && !dbk_busy) begin
+			pic_done <= 1;
+			sa <= S_CMD;
 		end
 
 		S_PIC: if (cmd_valid) begin             // always ready here
@@ -862,6 +875,9 @@ always @(posedge clk) begin
 				mv[i] <= a_mv[i];
 				mv1[i] <= a_mv1[i];
 			end
+			b_dbk <= a_dbk;
+			b_dbk_on <= a_dbk_on;
+			a_dbk_on <= 0;
 			bbuf <= abuf;
 			abuf <= ~abuf;
 			sb <= S_CTX;
@@ -1063,18 +1079,14 @@ always @(posedge clk) begin
 				lbv[{mbx, lbk[0]}] <= cbot_v[lbk[0] * 32 +: 32];
 			end
 			if (lbk != 3) lbk <= lbk + 1'd1;
-			else if (!w_active) begin
+			else if (!dbk_busy && !dbk_start) begin
 				for (i = 0; i < 16; i = i + 1) lefty[i] <= rcol[3][i * 8 +: 8];
 				for (i = 0; i < 8; i = i + 1) begin leftu[i] <= crt_u[i * 8 +: 8]; leftv[i] <= crt_v[i * 8 +: 8]; end
 				cornery <= topy[15];
 				corneru <= topu[7];
 				cornerv <= topv[7];
 				mb_count <= mb_count + 1'd1;
-				w_active <= 1;
-				w_buf <= pbuf;
-				w_mbx <= mbx;
-				w_mby <= mby;
-				wbk <= 0;
+				dbk_start <= 1;       // takes buffer pbuf (~pbuf from next clock)
 				pbuf <= ~pbuf;
 				sb <= S_IDLE;
 			end

@@ -33,6 +33,7 @@ struct mc_acc_hooks {
 	void (*end)(void *opaque, struct mc_acc_pic *pic);
 	int (*slot)(void *opaque, const AVFrame *f);
 	void (*fail)(void *opaque, const char *why);
+	int deblock;                             // the core filters (command A5): set before acc_attach
 };
 extern struct mc_acc_hooks *mc_acc_hooks;    // in our FFmpeg
 
@@ -290,7 +291,9 @@ static void acc_attach(AVCodecContext *ctx)
 	acc.hooks.fail = acc_fail;
 	ctx->opaque = &acc;
 	ctx->get_buffer2 = acc_get_buffer;
-	ctx->skip_loop_filter = AVDISCARD_ALL; // no deblocking in the FPGA yet
+	// the deblocking parameters are read by FFmpeg and sent to the core
+	// (command A5), which filters; without them no deblocking (light mode)
+	ctx->skip_loop_filter = acc.hooks.deblock ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
 	acc.failed = 0;
 	acc.why[0] = 0;
 	// the last file's pictures are all gone with its decoder
