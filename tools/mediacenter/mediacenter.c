@@ -636,6 +636,9 @@ static struct
 	int n, over, skipped;
 	double w_sum, w_max, w_start; // current 10 s window
 	int w_n, w_over, w_skipped, w_shown, w_dropped;
+	// peaks: pictures over twice the time per picture, and the longest run
+	// of pictures in a row over the time per picture
+	int peaks, run, run_max, w_peaks, w_run_max;
 } dd;
 
 static void dec_diag_reset(void)
@@ -667,20 +670,94 @@ static void dec_diag_add(double t0, double t1, int skipping)
 		dd.w_n++;
 		if (d > dd.max) dd.max = d;
 		if (d > dd.w_max) dd.w_max = d;
-		if (d > dd.budget) { dd.over++; dd.w_over++; }
+		if (d > dd.budget) { dd.over++; dd.w_over++; dd.run++; }
+		else dd.run = 0;
+		if (d > 2 * dd.budget) { dd.peaks++; dd.w_peaks++; }
+		if (dd.run > dd.run_max) dd.run_max = dd.run;
+		if (dd.run > dd.w_run_max) dd.w_run_max = dd.run;
 	}
 	if (t1 - dd.w_start >= 10)
 	{
 		printf("mediacenter: diag decoder %.0f s: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms, "
-			"%d saltate per recuperare; mostrate %d, scartate in ritardo %d\n",
+			"%d saltate per recuperare; mostrate %d, scartate in ritardo %d; picchi oltre %.1f ms %d, serie piu' lunga oltre %.1f ms %d\n",
 			mc.clock, dd.w_n, dd.w_n ? 1000 * dd.w_sum / dd.w_n : 0, 1000 * dd.w_max, dd.w_over, 1000 * dd.budget,
-			dd.w_skipped, frames_shown - dd.w_shown, frames_dropped - dd.w_dropped);
+			dd.w_skipped, frames_shown - dd.w_shown, frames_dropped - dd.w_dropped,
+			2000 * dd.budget, dd.w_peaks, 1000 * dd.budget, dd.w_run_max);
+		dd.w_peaks = dd.w_run_max = 0;
 		dd.w_shown = frames_shown;
 		dd.w_dropped = frames_dropped;
 		dd.w_sum = dd.w_max = 0;
 		dd.w_n = dd.w_over = dd.w_skipped = 0;
 		dd.w_start = t1;
 	}
+}
+
+// Diagnosis of the main loop, which shows the pictures (MC_DIAG=0: off;
+// nothing here changes the playback): a picture is "dropped late" when two
+// are due in the same round, so a round longer than a picture's time costs
+// one. Every 10 s: the rounds, where the drawing time goes (waiting for a
+// free framebuffer page, the drawing itself) and how many decoded pictures
+// were ready ahead when one was shown.
+static struct
+{
+	double w_start;
+	int rounds, slow;          // rounds; those longer than a picture's time
+	double round_max;
+	int drawn;
+	double draw_sum, draw_max, wait_sum, wait_max;
+	int ready_min, ready_sum, ready_n, empty;
+	int s_slow, s_drawn, s_empty; // whole video
+	double s_draw, s_wait;
+} ld;
+static double fb_page_waited; // set by fb_present_paged
+
+static void loop_diag_reset(void)
+{
+	memset(&ld, 0, sizeof(ld));
+	ld.ready_min = -1;
+}
+
+static void loop_diag_round(double t, double round)
+{
+	if (!dd.on) return;
+	if (!ld.w_start) ld.w_start = t;
+	ld.rounds++;
+	if (round > dd.budget) { ld.slow++; ld.s_slow++; }
+	if (round > ld.round_max) ld.round_max = round;
+	if (t - ld.w_start < 10) return;
+	printf("mediacenter: diag ciclo %.0f s: %d giri, %d oltre %.1f ms (peggiore %.1f ms); disegnate %d, disegno medio %.1f ms "
+		"(attesa pagina libera %.1f ms, peggiore disegno %.1f ms, peggiore attesa %.1f ms); pronte in coda minimo %d, media %.1f, vuota %d volte\n",
+		mc.clock, ld.rounds, ld.slow, 1000 * dd.budget, 1000 * ld.round_max, ld.drawn,
+		ld.drawn ? 1000 * ld.draw_sum / ld.drawn : 0, ld.drawn ? 1000 * ld.wait_sum / ld.drawn : 0,
+		1000 * ld.draw_max, 1000 * ld.wait_max, ld.ready_min < 0 ? 0 : ld.ready_min,
+		ld.ready_n ? (double)ld.ready_sum / ld.ready_n : 0, ld.empty);
+	ld.w_start = t;
+	ld.rounds = ld.slow = ld.drawn = ld.ready_n = ld.ready_sum = ld.empty = 0;
+	ld.round_max = ld.draw_sum = ld.draw_max = ld.wait_sum = ld.wait_max = 0;
+	ld.ready_min = -1;
+}
+
+// a picture was shown, with `ready` decoded pictures left in the queue
+static void loop_diag_shown(int ready)
+{
+	if (!dd.on) return;
+	if (ld.ready_min < 0 || ready < ld.ready_min) ld.ready_min = ready;
+	ld.ready_sum += ready;
+	ld.ready_n++;
+	if (!ready) { ld.empty++; ld.s_empty++; }
+}
+
+static void loop_diag_drawn(double d)
+{
+	if (!dd.on) return;
+	ld.drawn++;
+	ld.s_drawn++;
+	ld.draw_sum += d;
+	ld.s_draw += d;
+	if (d > ld.draw_max) ld.draw_max = d;
+	ld.wait_sum += fb_page_waited;
+	ld.s_wait += fb_page_waited;
+	if (fb_page_waited > ld.wait_max) ld.wait_max = fb_page_waited;
 }
 
 static void *video_thread(void *arg)
@@ -1015,6 +1092,7 @@ static int pic_fields = 0;
 // Draws the picture into the next page and shows it.
 static void fb_present_paged(void)
 {
+	fb_page_waited = 0;
 	if (fb_pages < 2)
 	{
 		fb_wait_vsync();
@@ -1029,7 +1107,12 @@ static void fb_present_paged(void)
 	static double slot_free[8], last_flip, interval = 0.04;
 	int next = (fb_page + 1) % fb_pages;
 	double wait = slot_free[next] - now_seconds();
-	if (wait > 0 && wait < 0.1) usleep((useconds_t)(wait * 1e6));
+	if (wait > 0 && wait < 0.1)
+	{
+		double w0 = now_seconds();
+		usleep((useconds_t)(wait * 1e6));
+		fb_page_waited = now_seconds() - w0;
+	}
 	fb_page = next;
 	fb_mem = fb_map + (size_t)fb_page * fb_len;
 	fb_present();
@@ -1702,6 +1785,7 @@ static void draw_video_frame(AVFrame *f)
 			fb_present_paged();
 			draw_present += now_seconds() - t_start;
 			draw_count++;
+			loop_diag_drawn(now_seconds() - t_start);
 			return;
 		}
 	}
@@ -1783,6 +1867,7 @@ static AVFrame *due_frame(void)
 		memmove(mc.vq, mc.vq + n, (mc.vq_count - n) * sizeof(mc.vq[0]));
 		mc.vq_count -= n;
 		frames_shown++;
+		loop_diag_shown(mc.vq_count);
 	}
 	return show;
 }
@@ -1971,6 +2056,7 @@ static int media_play(int in_playlist)
 	fb_clear();
 	if (mc.audio_only) draw_audio_screen();
 	dec_diag_reset();
+	loop_diag_reset();
 	main_idle(1);
 	bg_pause(1);
 	cpu_diag(now_seconds(), 1);
@@ -1994,6 +2080,7 @@ static int media_play(int in_playlist)
 		double t = now_seconds();
 		double elapsed = t - last;
 		last = t;
+		if (p.state == ST_PLAY) loop_diag_round(t, elapsed);
 		cpu_diag(t, 0);
 		if (t - bg_look >= 10) { bg_look = t; bg_pause(1); }
 		if (elapsed > 0.5) elapsed = 0.5;
@@ -2224,6 +2311,12 @@ static int media_play(int in_playlist)
 		if (dd.on && dd.n)
 			printf("mediacenter: diag decoder: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms (%.1f%%), %d saltate per recuperare\n",
 				dd.n, 1000 * dd.sum / dd.n, 1000 * dd.max, dd.over, 1000 * dd.budget, 100.0 * dd.over / dd.n, dd.skipped);
+		if (dd.on && dd.n)
+			printf("mediacenter: diag picchi: %d immagini decodificate oltre %.1f ms, serie piu' lunga oltre %.1f ms %d\n",
+				dd.peaks, 2000 * dd.budget, 1000 * dd.budget, dd.run_max);
+		if (dd.on && ld.s_drawn)
+			printf("mediacenter: diag ciclo: %d giri oltre %.1f ms; disegno medio %.1f ms, di cui attesa pagina libera %.1f ms; coda vuota %d volte\n",
+				ld.s_slow, 1000 * dd.budget, 1000 * ld.s_draw / ld.s_drawn, 1000 * ld.s_wait / ld.s_drawn, ld.s_empty);
 		av_report();
 	}
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
