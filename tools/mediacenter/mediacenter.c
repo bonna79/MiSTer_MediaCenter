@@ -1089,6 +1089,27 @@ static void fb_clear(void)
 // output, as a DVD player does, and the HDMI scaler blends them.
 static int pic_fields = 0;
 
+// The length of a frame of the 15 kHz CRT output (two fields when
+// interlaced), from the mode the Main measured (/tmp/mediacenter_crt, read
+// again every 2 s); 0 while it is not known.
+static double crt_frame_time(void)
+{
+	static double frame, read_at = -10;
+	double t = now_seconds();
+	if (t - read_at < 2) return frame;
+	read_at = t;
+	frame = 0;
+	FILE *f = fopen("/tmp/mediacenter_crt", "re");
+	if (!f) return 0;
+	unsigned w = 0, h = 0;
+	int il = 0;
+	double hz = 0, vz = 0;
+	if (fscanf(f, "%u %u %d %lf %lf", &w, &h, &il, &hz, &vz) == 5 && vz >= 40 && vz <= 70)
+		frame = (il ? 2.0 : 1.0) / vz;
+	fclose(f);
+	return frame;
+}
+
 // Draws the picture into the next page and shows it.
 static void fb_present_paged(void)
 {
@@ -1104,6 +1125,15 @@ static void fb_present_paged(void)
 	// of wait to stay clear of the frame start): a page is drawn again only
 	// after that, or the CRT shows half of the new picture (a horizontal tear)
 	// when pictures come close together.
+	// When the picture's fields are not kept apart (pic_fields 0) the core
+	// takes the page at every field, so a page is free a field after the
+	// switch: a frame and a half (50 ms at 480i, 60 ms at 576i) leaves room
+	// to spare. The fixed 65 ms of before is kept for kept fields and when
+	// the CRT mode is not known. At 30 pictures a second with 3 pages a page
+	// comes back 3 pictures (100 ms) after it was shown, but the switch to a
+	// picture comes after its drawing (about 10 ms): with 65 ms each wait
+	// carried over to two pictures later and grew until a picture was
+	// dropped (1080p 30 fps lost 12% of its pictures that way).
 	static double slot_free[8], last_flip, interval = 0.04;
 	int next = (fb_page + 1) % fb_pages;
 	double wait = slot_free[next] - now_seconds();
@@ -1122,7 +1152,13 @@ static void fb_present_paged(void)
 	double t = now_seconds();
 	if (t - last_flip < 0.2) interval = 0.9 * interval + 0.1 * (t - last_flip);
 	last_flip = t;
-	slot_free[(fb_page + fb_pages - 1) % fb_pages] = t + (interval >= 0.03 ? 0.065 : 0.03);
+	double keep = 0.03;
+	if (interval >= 0.03)
+	{
+		double frame = crt_frame_time();
+		keep = (pic_fields || frame <= 0) ? 0.065 : 1.5 * frame;
+	}
+	slot_free[(fb_page + fb_pages - 1) % fb_pages] = t + keep;
 	if (fb_cmd_fd < 0 || write(fb_cmd_fd, cmd, n) != n)
 	{
 		// Main does not take it: back to a single page
