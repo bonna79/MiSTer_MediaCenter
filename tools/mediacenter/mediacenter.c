@@ -3883,6 +3883,10 @@ static void crt_adjust_screen(void)
 
 #include "splash.h"
 
+#ifndef MC_BUILD
+#define MC_BUILD "locale"
+#endif
+
 // The MMC picture for 3 s when the player starts from the Scripts menu (a
 // disc started by the Main goes straight to the film). It is drawn in the
 // lists' frame buffer, shown as 4:3 on the CRT and over HDMI. Any key skips
@@ -3917,6 +3921,13 @@ static void show_splash(void)
 			uint32_t *row = (uint32_t *)(fb_mem + (size_t)(y0 + y) * fb_stride) + x0;
 			for (int x = 0; x < dw; x++) row[x] = pal[src[x * SPLASH_W / dw]];
 		}
+		// the build number in the black band at the bottom, right of the
+		// centre, big enough to read on the CRT (24 lines out of 480)
+		char b[32];
+		snprintf(b, sizeof(b), "Build %s", MC_BUILD);
+		int s = dh / 160 > 2 ? dh / 160 : 2;
+		int tw = (int)strlen(b) * GLYPH_W * s;
+		fb_text(x0 + dw * 560 / 640 - tw, y0 + dh * 436 / 480, s, b, fb_rgb(200, 200, 200));
 	}
 	menu_end();
 	free(pic);
