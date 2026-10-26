@@ -1,6 +1,6 @@
 # Scheda tecnica: l'acceleratore H.264 nell'FPGA di MiSTer MediaCenter
 
-*Versione 3.0, ottobre 2026. In inglese: [TECHNICAL_SHEET_ACCELERATOR_EN.md](TECHNICAL_SHEET_ACCELERATOR_EN.md).*
+*Versione 3.0, aggiornata il 26 ottobre 2026 con il filtro anti-blocchi (deblocking) nell'FPGA, che non è ancora in una release. In inglese: [TECHNICAL_SHEET_ACCELERATOR_EN.md](TECHNICAL_SHEET_ACCELERATOR_EN.md).*
 
 Questa scheda è per i programmatori che vogliono capire, modificare o migliorare l'acceleratore, anche ripartendo da zero. Spiega:
 - come l'acceleratore divide il lavoro fra il processore ARM e l'FPGA del MiSTer;
@@ -24,14 +24,14 @@ Un video **H.264 1920x1080** chiede all'ARM circa **44 ms per immagine**, ma a 2
 | Chi | Cosa fa | Perché lì |
 | --- | --- | --- |
 | ARM (FFmpeg con una nostra modifica) | Legge il file, decifra il flusso H.264 (CABAC/CAVLC), ricava per ogni macroblocco il tipo, i modi intra, i riferimenti, i vettori di movimento e i coefficienti già dequantizzati | È la parte sequenziale, piena di decisioni bit per bit: un processore la fa bene |
-| FPGA (il motore nel core del menu) | Ricostruisce i pixel: trasformata inversa 4x4/8x8, predizione intra, compensazione del movimento con filtri a 6 prese e pesi, somma del residuo, scrittura dell'immagine in memoria | È la parte con molti calcoli uguali in parallelo: l'hardware la fa bene |
+| FPGA (il motore nel core del menu) | Ricostruisce i pixel: trasformata inversa 4x4/8x8, predizione intra, compensazione del movimento con filtri a 6 prese e pesi, somma del residuo, filtro anti-blocchi (deblocking) con il calcolo delle forze dei bordi, scrittura dell'immagine in memoria | È la parte con molti calcoli uguali in parallelo: l'hardware la fa bene |
 | FPGA (il blocco zero-copy) | Copia l'immagine finita nel framebuffer, restringendola a 1280 o 960 punti | Così l'ARM non tocca più i pixel |
 
-Con questa divisione l'ARM impiega in media **5–15 ms per immagine**, e l'FPGA circa 20–33 ms nelle scene pesanti, in parallelo con l'ARM.
+Con questa divisione l'ARM impiega in media **5–15 ms per immagine** in un 1080p a 23,976 immagini al secondo, e l'FPGA circa 20–33 ms nelle scene pesanti, in parallelo con l'ARM. In un 1080p a 29,97 immagini al secondo molto pesante (HTC.mp4) l'ARM impiega in media circa 25 ms su 33,4 e un terzo delle immagini va oltre: il limite lì è l'ARM, non l'FPGA (capitolo 11).
 
 **Limiti di oggi:**
 - solo H.264 a 8 bit, 4:2:0, progressivo, largo 1920 punti;
-- nessun filtro anti-blocchi (deblocking): FFmpeg lo salta già nella "modalità leggera" del lettore per i video oltre 576 righe;
+- il filtro anti-blocchi lo fa l'FPGA dalla fase 4 (capitolo 7). Senza acceleratore il lettore lo salta, come prima, nella "modalità leggera" per i video oltre 576 righe;
 - tutto il resto (DVD, Video CD, DivX, 720p, H.264 interlacciato o a 10 bit, HEVC) lo decodifica l'ARM come prima.
 
 ---
@@ -42,7 +42,7 @@ Con questa divisione l'ARM impiega in media **5–15 ms per immagine**, e l'FPGA
 
 | File | Cosa contiene |
 | --- | --- |
-| `tools/mediacenter/ffmpeg-mediacenter.patch` | La modifica a FFmpeg 6.1.2. Aggiunge `libavcodec/h264_mcacc.c` e lo aggancia al decoder H.264 (`h264_slice.c`, `h264_picture.c`, `h264dec.h`). Quando il lettore la accende, il decoder non ricostruisce più i pixel ma scrive i comandi del motore. Contiene anche `MC_PARSEONLY`, usato solo per le misure. |
+| `tools/mediacenter/ffmpeg-mediacenter.patch` | La modifica a FFmpeg 6.1.2. Aggiunge `libavcodec/h264_mcacc.c` e `libavcodec/h264_mcdbk.c` (il comando `A5` del deblocking) e li aggancia al decoder H.264 (`h264_slice.c`, `h264_picture.c`, `h264dec.h`). Quando il lettore la accende, il decoder non ricostruisce più i pixel ma scrive i comandi del motore. Contiene anche `MC_PARSEONLY`, usato solo per le misure. |
 | `tools/mediacenter/build_ffmpeg.sh` | Compila FFmpeg per l'ARM del MiSTer e applica la patch. |
 | `tools/mediacenter/accel.c` | Lato ARM indipendente dall'hardware: <ul><li>gli "slot" (le immagini nella memoria dell'FPGA);</li><li>il buffer finto dei pixel;</li><li>i comandi di ogni immagine;</li><li>l'ordine di invio con due thread di decodifica;</li><li>le sessioni (salti).</li></ul> |
 | `tools/mediacenter/accel_link.c` | Il collegamento con il core: <ul><li>`/dev/mem`;</li><li>la casella postale (mailbox);</li><li>l'anello dei comandi e la gestione delle cache;</li><li>l'attesa delle immagini finite;</li><li>il disegno tramite lo zero-copy;</li><li>le righe di diagnosi.</li></ul> |
@@ -60,6 +60,8 @@ Con questa divisione l'ARM impiega in media **5–15 ms per immagine**, e l'FPGA
 | `accel/rtl/acc_resid.sv` | Memoria del residuo di un macroblocco (8 banchi, doppio buffer). |
 | `accel/rtl/acc_recon.sv` | Memoria del macroblocco ricostruito, da cui si scrive in DDR. |
 | `accel/rtl/acc_mc.sv` | Predizione inter (immagini P e B): filtri, pesi, bi-predizione, lettura delle finestre di riferimento. |
+| `accel/rtl/acc_bs.sv` | Le forze dei bordi (bS) del deblocking, calcolate dai comandi `A3` del macroblocco e dei vicini a sinistra e sopra. |
+| `accel/rtl/acc_dbk.sv` | Il filtro anti-blocchi: prende il macroblocco finito da `acc_recon`, filtra i bordi e scrive l'immagine in DDR. |
 | `accel/rtl/acc_ram.sv` | Blocco RAM a doppia porta che Quartus mette in M10K. |
 | `fpga/menu/rtl/mc_zc.sv` | Lo zero-copy: legge Y, U e V da una tabella delle pagine, restringe 3:2 o 2:1 e scrive righe YUYV nel framebuffer. |
 | `fpga/menu/rtl/mc_bus.sv` | Divide la porta DDR fra `mc_out` (uscita CRT, sempre per prima), `mc_zc` e `mc_acc` (a turni). |
@@ -113,7 +115,7 @@ Attenzione: quando il framebuffer non è attivo, il core del menu pulisce la DDR
 1. **Il Main carica il nostro core del menu.** `fpga_io.cpp` carica `/media/fat/linux/menu_mediacenter.rbf` al posto di `menu.rbf`. Se un altro Main (per esempio Physical Disc) rimette il menu ufficiale, `user_io.cpp` lo ricarica, una volta sola per menu. Il core si riconosce dalla stringa di versione `vMCY` nella sua `CONF_STR` (`menu_is_mediacenter()`).
 2. **Il lettore chiede un framebuffer YUV.** Scrive in `/dev/MiSTer_cmd` il comando `fb_cmd3 422 0 <larghezza> <altezza> <aspetto×1000> 1000`. Per il 1080p il framebuffer è 1280x540 (o 960x540 nel formato 4:3) in YUYV, a 3 pagine. Il Main imposta lo scaler e mette lo stato `status[5]` (FB) del core a 1. Nel core, `fb_own & FB` abilita `mc_zc` e `mc_acc` (`menu.sv`).
 3. **Il lettore apre il decoder.** In `open_decoder()` (`mediacenter.c`), per H.264, HEVC e VP9 oltre 576 righe c'è la **modalità leggera**:
-   - niente deblocking;
+   - niente deblocking sull'ARM (con l'acceleratore lo fa l'FPGA);
    - `AV_CODEC_FLAG2_FAST`;
    - per il 1080p metà delle righe (`half_lines`).
 
@@ -139,9 +141,9 @@ Attenzione: quando il framebuffer non è attivo, il core del menu pulisce la DDR
 7. **`acc_attach()` (`accel.c`) aggancia FFmpeg:**
    - imposta `mc_acc_hooks`;
    - `get_buffer2 = acc_get_buffer`;
-   - `skip_loop_filter = AVDISCARD_ALL`.
+   - `skip_loop_filter = AVDISCARD_DEFAULT` se il core sa filtrare (parola 20, bit 18) e `MC_NODEBLOCK` non è impostata, altrimenti `AVDISCARD_ALL`. Con `DEFAULT` FFmpeg legge i parametri del filtro ma non filtra nessun pixel: scrive il comando `A5`.
 
-   Il log scrive `diag acceleratore: acceso (...)`.
+   Il log scrive `diag acceleratore: acceso (..., deblocking nell'FPGA)`.
 
 Da qui ogni immagine decodificata passa dall'FPGA.
 
@@ -155,14 +157,14 @@ Da qui ogni immagine decodificata passa dall'FPGA.
 | --- | --- | --- |
 | Inizio immagine (`h264_frame_start`) | `mcacc_begin()` | Controlla che l'immagine sia progressiva, non MBAFF, 8 bit e 4:2:0 (altrimenti `fail`). Chiede al lettore un buffer (`begin`), che contiene già il comando `A1` con lo slot e le dimensioni in macroblocchi. |
 | Inizio slice (`decode_slice`) | `mcacc_slice()` | Scrive `A2`: liste di riferimento (lo slot di ogni immagine di riferimento, chiesto con `slot`) e pesi. |
-| Ogni macroblocco | `mcacc_mb()` al posto di `ff_h264_hl_decode_mb()` | Scrive `A3`: tipo, posizione, maschera dei blocchi con coefficienti, modi intra o riferimenti e vettori, poi i coefficienti non nulli. Fa sull'ARM le trasformate dei DC (intra 16x16 e croma), che costano poco, e azzera i blocchi di coefficienti come farebbe la ricostruzione. |
+| Ogni macroblocco | `mcacc_mb()` al posto di `ff_h264_hl_decode_mb()` | Se il deblocking è acceso e la slice è filtrata, scrive prima `A5` (`mcacc_dbk()` in `h264_mcdbk.c`: offset della slice, vicini usati, qp dei bordi). Poi scrive `A3`: tipo, posizione, maschera dei blocchi con coefficienti, modi intra o riferimenti e vettori, poi i coefficienti non nulli. Fa sull'ARM le trasformate dei DC (intra 16x16 e croma), che costano poco, e azzera i blocchi di coefficienti come farebbe la ricostruzione. |
 | Fine immagine (`ff_h264_field_end`) | `ff_h264_mcacc_end()` | Scrive `A4` e consegna il buffer (`end`). |
 
 Se `mc_acc_hooks` è `NULL` o il contesto non è quello del lettore, il decoder lavora come l'originale.
 
 Il formato completo dei comandi è in [`accel/doc/comandi.md`](../accel/doc/comandi.md). In breve:
 - parole da 32 bit, little endian;
-- `A1` inizio immagine, `A2` slice, `A3` macroblocco, `A4` fine, `A0` riempimento (per arrivare a un numero pari di parole, perché il core legge parole da 64 bit);
+- `A1` inizio immagine, `A2` slice, `A5` deblocking del macroblocco (3 parole, prima dell'`A3`), `A3` macroblocco, `A4` fine, `A0` riempimento (per arrivare a un numero pari di parole, perché il core legge parole da 64 bit);
 - un'immagine 1080p è circa **1 MB di comandi**: circa 30 MB/s a 24 immagini al secondo.
 
 ### `accel.c`: immagini, slot e ordine
@@ -190,7 +192,7 @@ Il formato completo dei comandi è in [`accel/doc/comandi.md`](../accel/doc/coma
 | 17 | core | sessione in corso |
 | 18 | core | byte letti dall'anello: l'ARM può riscriverli |
 | 19 | core | immagini finite |
-| 20 | core | bit 0: comando inatteso; bit 1: la memoria non ha risposto; bit 15:8: ultimo slot; bit 16: `mc_zc` sa restringere 2:1 |
+| 20 | core | bit 0: comando inatteso; bit 1: la memoria non ha risposto; bit 15:8: ultimo slot; bit 16: `mc_zc` sa restringere 2:1; bit 18: il core fa il deblocking (comando `A5` da 3 parole) |
 | 21 | core | colpi di clock fra le ultime due immagini finite |
 | 22 | core | di questi, quelli senza comandi da leggere |
 | 23 | core | di questi, quelli in attesa della memoria |
@@ -274,7 +276,7 @@ Il core del menu ha una sola porta DDR (`DDRAM_*`, 64 bit, burst fino a 255 paro
 
 Il motore lavora su **due macroblocchi alla volta**:
 - **fase A** legge i comandi del macroblocco, fa la trasformata inversa dei coefficienti (`acc_idct`) e mette il residuo in `acc_resid`;
-- **fase B** fa la predizione (intra nel motore, inter con `acc_mc`), somma il residuo, satura a 0–255, mette il risultato in `acc_recon` e lo scrive in DDR nello slot.
+- **fase B** fa la predizione (intra nel motore, inter con `acc_mc`), somma il residuo, satura a 0–255 e mette il risultato in `acc_recon`. Da lì il filtro anti-blocchi (`acc_dbk`) lo filtra e lo scrive in DDR nello slot.
 
 I comandi di immagine e di slice aspettano che la fase B sia libera.
 
@@ -291,6 +293,13 @@ I comandi di immagine e di slice aspettano che la fase B sia libera.
   - I circa 140 (10,6 ms).
 
   Un 1080p ha 8160 macroblocchi e il tempo disponibile è 552 colpi per macroblocco. Sul MiSTer, nelle scene pesanti, il motore impiega circa 20–33 ms per immagine, di cui fino a circa 19 ms in attesa della memoria.
+
+### Il filtro anti-blocchi (`acc_bs.sv`, `acc_dbk.sv`, fase 4)
+
+- **Le forze dei bordi (`acc_bs`).** Mentre la fase B ricostruisce un macroblocco, `acc_bs` calcola le 32 forze dei suoi bordi (bS 0–4) come `ff_h264_filter_mb` di FFmpeg per un'immagine progressiva. Usa il comando `A3` del macroblocco e quelli dei vicini a sinistra (registri) e sopra (memoria di riga, una voce per colonna di macroblocchi): intra, blocchi con coefficienti, riferimenti (come slot, dall'`A2`) e vettori. Circa 38 colpi di clock per macroblocco. L'ARM manda solo quello che i comandi non dicono: offset della slice, vicini usati e qp (`A5`, 3 parole).
+- **Il filtro (`acc_dbk`).** Prende il posto della vecchia scrittura in DDR. Filtrare un macroblocco cambia fino a 3 punti dall'altra parte dei bordi sinistro e alto, quindi un punto va in memoria solo quando nessun filtro può più cambiarlo: ogni passo scrive una zona spostata di 8 punti a sinistra e 4 righe in su (croma: 8 a sinistra e 2 in su). Tiene un'area di lavoro di 20 righe per 24 colonne di luma (croma 10 per 16 per piano) e le ultime 4 righe di luma (2 di croma) della fila di macroblocchi sopra. Per ogni macroblocco: rotazione dell'area (le righe che escono vanno in DDR o nelle memorie di riga), poi bordi verticali, poi orizzontali, in 4 stadi da 2 colpi.
+- La predizione intra usa i punti non filtrati (le memorie di riga del motore), come vuole lo standard; le immagini in DDR, usate come riferimento, sono filtrate.
+- Un macroblocco senza `A5` non viene filtrato. Con `MC_NODEBLOCK=1` il lettore non manda `A5` e il risultato è quello della 3.0.
 
 ### `mc_zc.sv`: dallo slot al framebuffer
 
@@ -317,10 +326,10 @@ Il lettore cambia pagina con `fb_cmd3 page <n>`.
 2. Uno dei due thread di FFmpeg inizia l'immagine:
    - `acc_get_buffer` dà uno slot;
    - `mcacc_begin` scrive `A1`;
-   - per ogni slice `A2`, per ogni macroblocco `A3`, alla fine `A4`.
+   - per ogni slice `A2`, per ogni macroblocco `A5` (se il deblocking è acceso) e `A3`, alla fine `A4`.
 3. `acc_end` mette l'immagine in fila. Quando tocca a lei, `al_send` la copia nell'anello e avanza la parola 4.
 4. `mc_acc` vede che il puntatore è avanzato, legge l'anello a burst e riempie la FIFO dei comandi.
-5. Il motore ricostruisce i macroblocchi e li scrive nello slot. Per i riferimenti legge gli slot delle immagini precedenti.
+5. Il motore ricostruisce i macroblocchi, il filtro anti-blocchi li filtra e li scrive nello slot. Per i riferimenti legge gli slot delle immagini precedenti.
 6. A fine immagine `mc_acc` aumenta la parola 19 e scrive i tempi.
 7. Quando l'immagine deve essere mostrata, `yuv_draw` chiama `acc_zc_draw`:
    - `al_wait` aspetta la parola 19;
@@ -347,6 +356,8 @@ Il lettore cambia pagina con `fb_cmd3 page <n>`.
   Al ciclo successivo `acc_fallback()` chiude il decoder, ne apre uno normale e riparte dallo stesso istante (`media_seek`). Nel log: `diag acceleratore: spento per questo video a ... s (motivo)`.
 - **Formato non disegnabile** (per esempio un framebuffer largo 720 per un formato scelto con Start): l'acceleratore si spegne solo finché dura (`acc_file_off = 2`). Quando il formato torna disegnabile per almeno 1 s, `acc_resume()` lo riaccende.
 - **`MC_NOACC=1`** in `/media/fat/linux/mediacenter.ini`: l'acceleratore non si accende mai.
+- **`MC_NODEBLOCK=1`**: l'acceleratore resta acceso ma l'FPGA non filtra (come la 3.0). Serve solo per i confronti.
+- **Core senza filtro** (per esempio quello della 3.0): il bit 18 della parola 20 manca, il lettore non manda `A5` e il log dice `deblocking no (core senza filtro)`.
 - **Core senza acceleratore:** la sessione non riceve risposta e il lettore usa il decoder normale.
 
 ---
@@ -355,7 +366,7 @@ Il lettore cambia pagina con `fb_cmd3 page <n>`.
 
 Con la diagnosi accesa (normale, `MC_DIAG=0` la spegne) il file `/tmp/mediacenter.log` contiene:
 
-- all'apertura: `diag acceleratore: acceso (anello ..., svuotamento L2 si, sessione N, pronto in X ms)` oppure `spento (motivo)`;
+- all'apertura: `diag acceleratore: acceso (anello ..., svuotamento L2 si, sessione N, pronto in X ms, deblocking nell'FPGA)` oppure `spento (motivo)`;
 - ogni 10 secondi di video:
 
   ```
@@ -375,16 +386,21 @@ Con la diagnosi accesa (normale, `MC_DIAG=0` la spegne) il file `/tmp/mediacente
 
 Le righe `diag decoder` e `diag zero-copy` dicono quanto lavora il resto del lettore.
 
+La riga `diag altri programmi N s: ... (altri in tutto X%)`, ogni 10 s, dice quali altri programmi hanno usato più del 5% della CPU e quanto hanno usato tutti insieme (da `/proc/stat`, compresi i comandi brevi). Serve a capire se un rallentamento viene da fuori. Per questo il lettore mette in pausa MiSTer Remote (`remote.sh`, installato da update_all) mentre un video suona e lo fa ripartire alla fine (righe `in pausa durante il video` e `ripartito dopo il video`). Lo cerca ogni 10 s, perché parte solo quando il wifi è connesso, circa mezzo minuto dopo l'accensione. Nei primi minuti dopo l'accensione cataloga i giochi e usava il 20–30% della CPU. `MC_NOPAUSE=1` lo lascia stare.
+
 ---
 
-## 11. Prestazioni e risorse (versione 3.0)
+## 11. Prestazioni e risorse (con il deblocking, ottobre 2026)
 
 | Misura | Valore |
 | --- | --- |
-| Core del menu con l'acceleratore | 55% della logica (ALM), 17% della memoria interna, 85% dei DSP (95 su 112) |
-| Frequenza | 108 MHz (`clk_sys`); margine dei tempi +0,26 ns, anche a -40 °C positivo |
-| Motore da solo (sintesi `accel/syn`) | circa 12,9k ALM (31%), 39 DSP, 30 blocchi M10K, Fmax circa 112 MHz |
-| One Piece 1080p sul MiSTer | 238 s senza salti: 5724 immagini disegnate dall'FPGA, 0 perse, 0 in ritardo; ARM 5–13 ms per immagine |
+| Core del menu con l'acceleratore e il deblocking | 73% della logica (ALM; 55% nella 3.0), 35% dei blocchi di memoria interna (20% dei bit), 85% dei DSP (95 su 112) |
+| Frequenza | 108 MHz (`clk_sys`). Con il deblocking i tempi sono stretti: dei seed del fitter 1–9 solo il **seed 4** (`menu.qsf`) li rispetta sia a 100 °C (+0,003 ns) sia a -40 °C (+0,082 ns); HDMI +0,288 ns |
+| Motore da solo (sintesi `accel/syn`, fase 3, senza deblocking) | circa 12,9k ALM (31%), 39 DSP, 30 blocchi M10K, Fmax circa 112 MHz |
+| One Piece 1080p 23,976 sul MiSTer | 3.0: 238 s senza salti, 5724 immagini dall'FPGA, 0 perse, 0 in ritardo, ARM 5–13 ms. Con il deblocking: 144 s, 0,3% di immagini non mostrate, ARM 7,9 ms in media |
+| HTC.mp4, 1080p 29,97, molto pesante | Con il deblocking: 147 s, 12,4% di immagini non mostrate (3.0 senza filtro: 12,4%), FPGA circa 23 ms per immagine, 0 perse, 0 in ritardo; ARM 25,7 ms in media, il 34% oltre 33,4 ms. Spariti i punti viola, verdi e gialli che si vedevano nelle scene di neve senza filtro |
+
+Il filtro nell'FPGA non costa tempo all'ARM: le forze dei bordi le calcola il core. Una prima versione le calcolava sull'ARM (+25–35% di lavoro di lettura del flusso) e portava HTC.mp4 al 53% di immagini non mostrate.
 
 ---
 
@@ -409,8 +425,8 @@ Ogni compilazione può spostare un po' i percorsi (rumore del fitter): controlla
 2. `accel/sim/make_tests.sh <cartella> [file 1080p]` crea i video di prova:
    - t1–t6: intra, pesi, CAVLC, coefficienti, 1080p;
    - b1–b4, b6: immagini B.
-3. `accdump <video> <prefisso>` scrive `<prefisso>.cmd` (i comandi) e `<prefisso>.rec` (le immagini di FFmpeg senza deblocking).
-4. `model.py <prefisso>`: il modello Python ricostruisce dai comandi e confronta.
+3. `accdump <video> <prefisso>` scrive `<prefisso>.cmd` (i comandi) e `<prefisso>.rec` (le immagini di FFmpeg senza deblocking). Con `accdump -d` i comandi hanno `A5` e le immagini attese sono filtrate da FFmpeg.
+4. `model.py <prefisso>`: il modello Python ricostruisce dai comandi (compreso il deblocking, con le forze calcolate come `acc_bs`) e confronta.
 5. `accel/sim/tb/run_engine.py <prefisso> [immagini]`: il motore Verilog, confronto bit per bit.
 6. `accel/sim/core/run_core.py <prefisso> [immagini] [pagine dell'anello] [latenza]`: `mc_acc` più il motore con l'anello.
 7. `acctest` (con `-DACC_FAKE`): il lato ARM vero (`accel.c`, `accel_link.c`) contro un core finto che legge l'anello a velocità casuali.
@@ -437,7 +453,7 @@ Ogni modifica al motore deve restare **identica bit per bit** a FFmpeg su tutti 
 
 ## 14. Cosa si può migliorare
 
-- **Il filtro anti-blocchi (deblocking) nell'FPGA**: è il prossimo passo previsto. Serve qualche dato in più dall'ARM (qp, intensità dei bordi) e una passata sui bordi dei macroblocchi; deve stare nel tempo che resta (oggi circa 20–33 ms su 41,7 nelle scene pesanti) e nei DSP rimasti (circa 15%).
+- **Il 1080p a 30 immagini al secondo**: nei file molto pesanti (HTC.mp4) circa il 12% delle immagini non viene mostrato perché l'ARM, solo per leggere il flusso H.264, va oltre i 33,4 ms in un terzo delle immagini. L'FPGA ha margine. Si può guadagnare solo alleggerendo il lavoro dell'ARM (per esempio comandi più compatti).
 - **Meno attesa della memoria**: fino a circa 19 ms per immagine nelle scene pesanti. Si può migliorare con burst più lunghi per le finestre di riferimento, riuso delle finestre fra regioni vicine e turni di `mc_bus` più adatti.
 - **Altri formati:** larghezze diverse da 1920 (1440, 1280), H.264 interlacciato (MBAFF/PAFF), 10 bit; ognuno chiede modifiche ai comandi e al motore.
 - **Comandi più compatti**: oggi circa 1 MB per immagine; meno dati vuol dire meno tempo dell'ARM e della memoria.
