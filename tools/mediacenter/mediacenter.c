@@ -42,6 +42,7 @@ static double video_aspect = 4.0 / 3.0;
 #define MC_AUDIO_LEAD 0.3
 #define MC_VQ_MAX 40  // pictures the queue can hold
 #define MC_VQ_FILE 12 // pictures decoded ahead for files
+#define MC_VQ_ACC 24  // with the FPGA accelerator (1080p): a deeper reserve for the heavy moments
 #define MC_PENDING_SECONDS 4
 #define MC_SKIP_SECONDS 60.0
 
@@ -466,9 +467,23 @@ static void push_audio(AVFrame *f)
 }
 
 // Sends the decoded audio that is due (up to MC_AUDIO_LEAD ahead) to aplay.
+// Pictures decoded ahead: with the FPGA accelerator (1080p, the ARM close
+// to its limit at 30 pictures a second) a deeper queue absorbs the runs of
+// slow pictures, which otherwise end in pictures skipped or dropped late.
+static int vq_depth(void)
+{
+	return acc.on ? MC_VQ_ACC : MC_VQ_FILE;
+}
+
+// At the start (and after fast forward / rewind) with the accelerator the
+// clock and the sound wait until the decoder is MC_VQ_ACC pictures ahead,
+// for one second at most: the queue starts full instead of empty.
+static int preroll;
+static double preroll_t0;
+
 static void feed_audio_output(void)
 {
-	if (!mc.pend_len) return;
+	if (!mc.pend_len || preroll) return;
 
 	// drop what is already late (after a seek or a stall)
 	int late = (int)((mc.clock - 0.05 - mc.pend_pts) * MC_AUDIO_RATE);
@@ -624,6 +639,12 @@ static struct
 	double clock;         // copy of mc.clock for the thread
 } vt = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
+static void preroll_start(void)
+{
+	preroll = acc.on && vt.on;
+	preroll_t0 = now_seconds();
+}
+
 // Diagnosis of the decoder's time (MC_DIAG=0 turns it off; nothing here
 // changes the playback): the time each packet spends in the decoder, counted
 // only for packets decoded normally (not while skipping to catch up), with
@@ -767,7 +788,7 @@ static void *video_thread(void *arg)
 	pthread_mutex_lock(&vt.lock);
 	while (vt.run && frame)
 	{
-		if (!vt.count || mc.vq_count >= MC_VQ_FILE)
+		if (!vt.count || mc.vq_count >= vq_depth())
 		{
 			pthread_cond_wait(&vt.cond, &vt.lock);
 			continue;
@@ -957,7 +978,7 @@ static int need_more(void)
 		// (not beyond a second ahead: when only key pictures are decoded
 		// the thread empties its queue at once)
 		pthread_mutex_lock(&vt.lock);
-		int more = vt.count < 8 && mc.vq_count < MC_VQ_FILE && !(mc.read_vpts > mc.clock + 1.0);
+		int more = vt.count < 8 && mc.vq_count < vq_depth() && !(mc.read_vpts > mc.clock + (acc.on ? 1.5 : 1.0));
 		pthread_mutex_unlock(&vt.lock);
 		if (more) return 1;
 	}
@@ -2025,6 +2046,7 @@ static void media_resume(double t)
 		mc.clock = vt.clock = shown;
 		mc.audio_end = shown;
 	}
+	preroll_start();
 }
 
 static int num_chapters(void)
@@ -2107,6 +2129,7 @@ static int media_play(int in_playlist)
 	bg_pause(1);
 	cpu_diag(now_seconds(), 1);
 	vt_start();
+	preroll_start();
 	frames_shown = frames_dropped = 0;
 	draw_convert = draw_present = 0;
 	draw_count = 0;
@@ -2236,11 +2259,25 @@ static int media_play(int in_playlist)
 		AVFrame *show = NULL;
 		if (p.state == ST_PLAY)
 		{
-			mc.clock += elapsed;
-			played += elapsed;
+			if (preroll)
+			{
+				pthread_mutex_lock(&vt.lock);
+				int ready = mc.vq_count;
+				pthread_mutex_unlock(&vt.lock);
+				if (ready >= MC_VQ_ACC || t - preroll_t0 > 1.0 || mc.eof || !acc.on || !vt.on)
+				{
+					preroll = 0;
+					if (dd.on) printf("mediacenter: diag partenza: %d immagini pronte dopo %.0f ms\n", ready, 1000 * (t - preroll_t0));
+				}
+			}
+			if (!preroll)
+			{
+				mc.clock += elapsed;
+				played += elapsed;
+			}
 			fill();
 			feed_audio_output();
-			av_sync(elapsed);
+			if (!preroll) av_sync(elapsed);
 			if (vt.on)
 			{
 				pthread_mutex_lock(&vt.lock);
