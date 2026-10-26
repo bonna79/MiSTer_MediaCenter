@@ -6,6 +6,7 @@ set_global_assignment -name TOP_LEVEL_ENTITY acc_syn
 set_global_assignment -name SYSTEMVERILOG_FILE acc_syn.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_engine.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_dbk.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_bs.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_mc.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_idct.sv
 set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_resid.sv
