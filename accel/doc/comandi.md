@@ -48,23 +48,29 @@ da questi comandi si ottengono immagini identiche a FFmpeg (video di prova di
   << 16 | blocco (0-15 luma, 16-19 Cb, 20-23 Cr) << 22
   - i DC dei blocchi intra 16x16 e del croma sono già trasformati dall'ARM
 
-## Deblocking `A5` (versione 3, core dalla fase 4)
-Prima dell'`A3` del macroblocco, 5 parole. Un macroblocco senza `A5` non è
-filtrato. I valori sono calcolati dall'ARM come li calcola il filtro di FFmpeg
-(`h264_mcdbk.c`, dalle stesse tabelle del filtro, senza filtrare i pixel),
-quindi l'FPGA filtra come FFmpeg. Il core lo dice nella risposta (parola 20, bit 17); il lettore lo
-manda solo allora e senza `MC_NODEBLOCK=1`.
-- p0: `0xA5` << 24 | forte verticale bordo 0 | forte orizzontale bordo 0 << 1 |
+## Deblocking `A5` (versione 4, core dalla fase 4b)
+Prima dell'`A3` del macroblocco, 3 parole. Un macroblocco senza `A5` non è
+filtrato. Le forze dei bordi le calcola il core (`acc_bs.sv`) dai comandi
+`A3` del macroblocco e dei vicini a sinistra e sopra, come il filtro di FFmpeg
+(`ff_h264_filter_mb`, immagine progressiva): intra, blocchi con coefficienti,
+riferimenti (come slot, dall'`A2` della slice) e vettori. L'ARM manda solo
+quello che i comandi non dicono (`h264_mcdbk.c`). Il core lo dice nella
+risposta (parola 20, bit 18); il lettore lo manda solo allora e senza
+`MC_NODEBLOCK=1`. Il core di prova della fase 4 (bit 17, `A5` di 5 parole con
+le forze calcolate dall'ARM) non è più usato.
+- p0: `0xA5` << 24 | vicino sinistro filtrato | vicino alto filtrato << 1 |
   offset alfa (5 bit con segno, `slice_alpha_c0_offset`) << 2 | offset beta
-  (5 bit con segno) << 7
+  (5 bit con segno) << 7. Il vicino è filtrato se esiste ed è nella stessa
+  slice (`disable_deblocking_filter_idc` 2) o se esiste (0)
 - p1: qp luma bordo sinistro | qp luma bordo alto << 6 | qp luma interno << 12 |
   qp Cb sinistro << 18 | qp Cb alto << 24 (6 bit ciascuno; qp di un bordo =
   media dei due macroblocchi, come FFmpeg)
 - p2: qp Cb interno | qp Cr sinistro << 6 | qp Cr alto << 12 | qp Cr interno << 18
-- p3: forza dei bordi verticali: bordo e (0-3, colonne 0, 4, 8, 12), tratto s
-  (righe 4s..4s+3) ai bit (e * 4 + s) * 2, 2 bit (0-3); "forte" (4) è nel bit
-  di p0
-- p4: lo stesso per i bordi orizzontali (righe 0, 4, 8, 12; tratto = colonne)
+- forze (nel core): bordo verticale e (0-3, colonne 0, 4, 8, 12), tratto s
+  (righe 4s..4s+3); orizzontale: righe 0, 4, 8, 12, tratto = colonne. Bordo 0
+  con un macroblocco intra: 4; bordo interno di un intra: 3; blocchi con
+  coefficienti: 2; riferimenti o vettori diversi (4 quarti di punto): 1; con
+  la trasformata 8x8 i bordi 1 e 3 non si filtrano
 - croma: i bordi 0 e 1 (colonne o righe 0 e 4) usano la forza dei bordi luma 0
   e 2
 - indici delle tabelle: clip(qp + offset, 0, 51)

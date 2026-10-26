@@ -88,7 +88,7 @@ static void *fake_core(void *arg)
 				else { left = type ? 5 : 37; stage = 1; }
 			}
 			else if (tag == 0xA4) pics++;
-			else if (tag == 0xA5) left = 4;
+			else if (tag == 0xA5) left = 2;
 			else if (tag != 0xA0) { fake_bad++; m[20] = 1; }
 		}
 		rd += take;

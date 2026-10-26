@@ -291,8 +291,9 @@ static void acc_attach(AVCodecContext *ctx)
 	acc.hooks.fail = acc_fail;
 	ctx->opaque = &acc;
 	ctx->get_buffer2 = acc_get_buffer;
-	// the deblocking parameters are read by FFmpeg and sent to the core
-	// (command A5), which filters; without them no deblocking (light mode)
+	// the deblocking parameters (qp, neighbours) are read by FFmpeg and sent
+	// to the core (command A5), which works out the edge strengths and
+	// filters; without them no deblocking (light mode)
 	ctx->skip_loop_filter = acc.hooks.deblock ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
 	acc.failed = 0;
 	acc.why[0] = 0;

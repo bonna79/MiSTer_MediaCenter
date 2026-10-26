@@ -447,12 +447,14 @@ static void acc_try(AVCodecContext *ctx, const AVStream *st)
 	for (int s = 0; s < ACC_SLOTS; s++)
 		for (unsigned p = 0; p < ACC_SLOT_PAGES; p++) t[s * 1024 + p] = (ACC_SLOT_BASE + (uint32_t)s * ACC_SLOT_SIZE) / 4096 + p;
 	acc.send = al_send;
-	// deblocking in the core (answer word 20, bit 17), unless MC_NODEBLOCK=1.
+	// deblocking in the core, which works out the edge strengths (answer
+	// word 20, bit 18: command A5 of 3 words), unless MC_NODEBLOCK=1. The
+	// phase 4 test core (bit 17, A5 of 5 words) is not used.
 	// Word 20 comes just after the words al_open waited for: every core
 	// since 3.0 sets bit 16 in it, so once bit 16 is there the word is new.
 	for (int i = 0; i < 40 && !(al.mb[20] & 0x10000); i++) usleep(500);
 	e = getenv("MC_NODEBLOCK");
-	int dbk_core = (al.mb[20] & 0x20000) != 0, dbk_off = e && atoi(e);
+	int dbk_core = (al.mb[20] & 0x40000) != 0, dbk_off = e && atoi(e);
 	acc.hooks.deblock = dbk_core && !dbk_off;
 	acc_attach(ctx);
 	memset(&zd, 0, sizeof(zd));

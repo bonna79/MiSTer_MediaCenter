@@ -389,13 +389,93 @@ def s5(v):
 
 
 def dbk_params(words):
-    """Command A5 (5 words): strengths and qp of a macroblock."""
+    """Command A5 (3 words): offsets, neighbours used and qp of a macroblock;
+    the strengths are worked out by dbk_strengths()."""
     w0 = words[0]
-    p = {'strong': (w0 & 1, (w0 >> 1) & 1), 'offa': s5(w0 >> 2), 'offb': s5(w0 >> 7)}
+    p = {'avail': (w0 & 1, (w0 >> 1) & 1), 'offa': s5(w0 >> 2), 'offb': s5(w0 >> 7)}
     q = [words[1] & 63, (words[1] >> 6) & 63, (words[1] >> 12) & 63, (words[1] >> 18) & 63, (words[1] >> 24) & 63,
          words[2] & 63, (words[2] >> 6) & 63, (words[2] >> 12) & 63, (words[2] >> 18) & 63]
     p['qp'] = [q[0:3], q[3:6], q[6:9]]          # [Y, Cb, Cr][left, top, inside]
-    p['bs'] = [[[(words[3 + d] >> ((e * 4 + s) * 2)) & 3 for s in range(4)] for e in range(4)] for d in range(2)]
+    return p
+
+
+def blk_idx(x, y):
+    """4x4 block number (FFmpeg order) of the block at column x, row y."""
+    return (x & 1) | (y & 1) << 1 | (x >> 1) << 2 | (y >> 1) << 3
+
+
+def mb_info(words, slots):
+    """What the strengths need from a command A3: intra, 8x8 transform, the
+    4x4 blocks with coefficients, the reference of each 8x8 as a slot (None:
+    list not used) and the vectors."""
+    typ = (words[0] >> 16) & 0xF
+    m = {'intra': typ != 0, 't8': typ == 2, 'nz': [0] * 16,
+         'ref': [[None] * 4, [None] * 4], 'mv': [[(0, 0)] * 16, [(0, 0)] * 16]}
+    if typ == 0:
+        mask = words[1]
+        m['t8'] = bool((mask >> 24) & 1)
+        m['nz'] = [(mask >> ((b & ~3) if m['t8'] else b)) & 1 for b in range(16)]
+        for i in range(4):
+            for l in (0, 1):
+                r = (words[2 + i] >> (7 * l)) & 0x7F
+                m['ref'][l][i] = None if r & 0x40 else slots[l][r & 0x3F]
+        m['mv'] = [[(s16(words[6 + l * 16 + b]), s16(words[6 + l * 16 + b] >> 16)) for b in range(16)]
+                   for l in (0, 1)]
+    return m
+
+
+def mv_differ(A, a, B, b, two):
+    """check_mv of FFmpeg's loop filter: 1 if blocks a of A and b of B
+    predict differently (other reference, or a vector 4 quarter pels apart)."""
+    def far(la, lb):
+        (ax, ay), (bx, by) = A['mv'][la][a], B['mv'][lb][b]
+        return abs(ax - bx) >= 4 or abs(ay - by) >= 4
+    r0a, r1a = A['ref'][0][a >> 2], A['ref'][1][a >> 2]
+    r0b, r1b = B['ref'][0][b >> 2], B['ref'][1][b >> 2]
+    v = r0a != r0b or (r0a is not None and far(0, 0))
+    if not two:
+        return int(v)
+    v = v or r1a != r1b or far(1, 1)
+    if not v:
+        return 0
+    if r0a != r1b or r1a != r0b:
+        return 1
+    return int(far(0, 1) or far(1, 0))
+
+
+def dbk_strengths(p, m, left, top, two):
+    """The 32 strengths of a macroblock (as ff_h264_filter_mb, progressive):
+    p['bs'][dir][edge][segment] and p['strong'] (edge 0 strength 4)."""
+    bs = [[[0] * 4 for _ in range(4)] for _ in range(2)]
+    for d in range(2):
+        nb = top if d else left
+        for e in range(4):
+            for i in range(4):
+                x, y = (i, e) if d else (e, i)
+                b = blk_idx(x, y)
+                if e == 0:
+                    if not p['avail'][d]:
+                        continue
+                    pb = blk_idx(x, 3) if d else blk_idx(3, y)
+                    if m['intra'] or nb['intra']:
+                        v = 4
+                    elif m['nz'][b] or nb['nz'][pb]:
+                        v = 2
+                    else:
+                        v = mv_differ(m, b, nb, pb, two)
+                else:
+                    pb = blk_idx(x, y - 1) if d else blk_idx(x - 1, y)
+                    if m['t8'] and e & 1:
+                        v = 0
+                    elif m['intra']:
+                        v = 3
+                    elif m['nz'][b] or m['nz'][pb]:
+                        v = 2
+                    else:
+                        v = mv_differ(m, b, m, pb, two)
+                bs[d][e][i] = v
+    p['strong'] = (int(bs[0][0][0] == 4), int(bs[1][0][0] == 4))
+    p['bs'] = [[[min(v, 3) for v in seg] for seg in edge] for edge in bs]
     return p
 
 
@@ -503,6 +583,7 @@ class Engine:
         self.frames = {}
         self.cur = None
         self.refs = [[], []]
+        self.two = 0
         self.stats = {}
 
     def count(self, k):
@@ -694,10 +775,12 @@ def run(prefix, out=None):
     fo = open(out + '.yuv', 'wb') if out else None
     pend = None
     dparams = {}
+    info = {}                 # mb_info of the macroblocks of the picture
     while i < len(cmd):
         w = int(cmd[i])
         tag = w >> 24
         if tag == 0xA1:
+            info = {}
             eng.pic(w & 0xFF, int(cmd[i + 1]) & 0xFF, (int(cmd[i + 1]) >> 8) & 0xFF)
             i += 2
         elif tag == 0xA2:
@@ -710,6 +793,7 @@ def run(prefix, out=None):
             eng.cd = (w >> 20) & 15
             i += 1
             eng.refs = [[], []]
+            eng.two = two
             for l, cnt in enumerate((n0, n1 if two else 0)):
                 for _ in range(cnt):
                     a, b, c = (int(v) for v in cmd[i:i + 3])
@@ -717,13 +801,18 @@ def run(prefix, out=None):
                     eng.refs[l].append((a & 0xFF, s9(a >> 8), s8(a >> 17),
                                         ((s9(b), s8(b >> 9)), (s9(c), s8(c >> 9)))))
         elif tag == 0xA5:     # deblocking of the next macroblock
-            pend = dbk_params([int(v) for v in cmd[i:i + 5]])
-            i += 5
+            pend = dbk_params([int(v) for v in cmd[i:i + 3]])
+            i += 3
         elif tag == 0xA3:
+            words = [int(v) for v in cmd[i:i + 600]]
+            mbx, mby = w & 0xFF, (w >> 8) & 0xFF
+            slots = [[r[0] for r in eng.refs[l]] for l in (0, 1)]
+            info[(mbx, mby)] = mb_info(words, slots)
             if pend:
-                dparams[(w & 0xFF, (w >> 8) & 0xFF)] = pend
+                dparams[(mbx, mby)] = dbk_strengths(pend, info[(mbx, mby)], info.get((mbx - 1, mby)),
+                                                    info.get((mbx, mby - 1)), eng.two)
                 pend = None
-            i += eng.mb([int(v) for v in cmd[i:i + 600]])
+            i += eng.mb(words)
         elif tag == 0xA0:     # padding
             i += 1
         elif tag == 0xA4:

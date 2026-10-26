@@ -69,9 +69,9 @@ reg  [8:0] a_iw[4];
 reg [31:0] a_mv[16], a_mv1[16];
 reg  [7:0] a_q_slot[4], a_q_slot1[4];
 reg [50:0] a_q_wt[4], a_q_wt1[4];
-reg [159:0] a_dbk;            // its command A5 (deblocking), if a_dbk_on
+reg  [95:0] a_dbk;            // its command A5 (deblocking), if a_dbk_on
 reg        a_dbk_on;
-reg  [1:0] dcnt;              // A5 words read after the first
+reg        dcnt;              // A5 words read after the first
 
 reg  [7:0] wmb, hmb;          // picture size in macroblocks
 reg  [7:0] cur_slot;
@@ -86,8 +86,10 @@ reg  [3:0] cmode, i16mode;
 reg [13:0] qref[4];           // reference of each 8x8: list 0 bits 0-5, list 1 bits 7-12, bits 6 and 13 = list unused
 reg  [8:0] iw[4];             // implicit weight of list 0 of each 8x8
 reg [31:0] mv[16], mv1[16];
-reg [159:0] b_dbk;
+reg  [95:0] b_dbk;
 reg        b_dbk_on;
+reg [15:0] b_nzm;             // its luma blocks with coefficients and 8x8 transform (for acc_bs)
+reg        b_t8;
 
 // reference lists
 reg  [5:0] n0, n1;
@@ -450,6 +452,23 @@ reg        pbuf;              // recon buffer B predicts into
 reg  [1:0] lbk;
 reg        dbk_start, dbk_fin;
 wire       dbk_busy;
+
+// The strengths of the edges (acc_bs), worked out while B rebuilds the
+// macroblock, from B's copy of its command (A3) and A5's neighbour bits.
+reg        bs_start;
+wire       bs_busy;
+wire [31:0] bs_v, bs_h;
+wire  [1:0] bs_strong;
+acc_bs bs
+(
+	.clk(clk), .reset(reset), .start(bs_start), .mbx(mbx), .mtype(mtype), .t8(b_t8), .nzm(b_nzm),
+	.qref({qref[3], qref[2], qref[1], qref[0]}),
+	.slot0({q_slot[3], q_slot[2], q_slot[1], q_slot[0]}), .slot1({q_slot1[3], q_slot1[2], q_slot1[1], q_slot1[0]}),
+	.mv0({mv[15], mv[14], mv[13], mv[12], mv[11], mv[10], mv[9], mv[8], mv[7], mv[6], mv[5], mv[4], mv[3], mv[2], mv[1], mv[0]}),
+	.mv1({mv1[15], mv1[14], mv1[13], mv1[12], mv1[11], mv1[10], mv1[9], mv1[8], mv1[7], mv1[6], mv1[5], mv1[4], mv1[3], mv1[2], mv1[1], mv1[0]}),
+	.two(two_lists), .avail(b_dbk_on ? b_dbk[1:0] : 2'b00),
+	.bsv(bs_v), .bsh(bs_h), .bs4(bs_strong), .busy(bs_busy)
+);
 wire       wb_we;
 wire [AW-1:0] wb_addr;
 wire [63:0] wb_din;
@@ -460,7 +479,7 @@ acc_dbk #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRI
 (
 	.clk(clk), .reset(reset),
 	.start(dbk_start), .fin(dbk_fin), .sbuf(~pbuf), .mbx(mbx), .mby(mby), .wmb(wmb), .hmb(hmb), .slot(cur_slot),
-	.prm_on(b_dbk_on), .prm(b_dbk), .busy(dbk_busy),
+	.prm_on(b_dbk_on), .prm({bs_h, bs_v, b_dbk[95:32], b_dbk[31:2], bs_strong}), .busy(dbk_busy),
 	.rc_addr(rc_addr), .rc_word(wb_word),
 	.wb_we(wb_we), .wb_addr(wb_addr), .wb_din(wb_din), .mem_busy(mem_busy), .mc_rd(mc_rd)
 );
@@ -638,6 +657,7 @@ always @(posedge clk) begin
 	pic_done <= 0;
 	dbk_start <= 0;
 	dbk_fin <= 0;
+	bs_start <= 0;
 
 	resid_clr <= 0;
 
@@ -740,7 +760,7 @@ always @(posedge clk) begin
 		S_DBK: if (cmd_valid) begin             // always ready here
 			a_dbk[32 + dcnt * 32 +: 32] <= cmd_data;
 			dcnt <= dcnt + 1'd1;
-			if (dcnt == 3) begin a_dbk_on <= 1; sa <= S_CMD; end
+			if (dcnt == 1) begin a_dbk_on <= 1; sa <= S_CMD; end
 		end
 
 		S_FIN: if (!dbk_fin && !dbk_busy) begin
@@ -854,7 +874,7 @@ always @(posedge clk) begin
 
 		// macroblock to memory, one word per write
 		// hand the macroblock to B once B is idle and the transform is done
-		S_HAND: if (b_free && !idct_busy && !idct_go && !idct_rv) begin
+		S_HAND: if (b_free && !bs_busy && !idct_busy && !idct_go && !idct_rv) begin
 			mbx <= a_mbx;
 			mby <= a_mby;
 			mtype <= a_mtype;
@@ -877,6 +897,9 @@ always @(posedge clk) begin
 			end
 			b_dbk <= a_dbk;
 			b_dbk_on <= a_dbk_on;
+			b_nzm <= cmask[15:0];
+			b_t8 <= t8;
+			bs_start <= 1;
 			a_dbk_on <= 0;
 			bbuf <= abuf;
 			abuf <= ~abuf;
@@ -1079,7 +1102,7 @@ always @(posedge clk) begin
 				lbv[{mbx, lbk[0]}] <= cbot_v[lbk[0] * 32 +: 32];
 			end
 			if (lbk != 3) lbk <= lbk + 1'd1;
-			else if (!dbk_busy && !dbk_start) begin
+			else if (!dbk_busy && !dbk_start && !bs_busy) begin
 				for (i = 0; i < 16; i = i + 1) lefty[i] <= rcol[3][i * 8 +: 8];
 				for (i = 0; i < 8; i = i + 1) begin leftu[i] <= crt_u[i * 8 +: 8]; leftv[i] <= crt_v[i * 8 +: 8]; end
 				cornery <= topy[15];

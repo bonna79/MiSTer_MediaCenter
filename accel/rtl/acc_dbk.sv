@@ -2,9 +2,9 @@
 // rebuilt macroblock (acc_recon) and the picture in DDR: it takes the place
 // of the old writer of acc_engine.
 //
-// The strengths (bS) and qp of each macroblock come from the ARM (command A5,
-// accel/doc/comandi.md: FFmpeg's own loop filter, run in "capture" mode);
-// a macroblock without A5 is not filtered. Intra prediction keeps using the
+// The qp of each macroblock come from the ARM (command A5, accel/doc/
+// comandi.md), the strengths (bS) from acc_bs, which works them out from the
+// macroblock commands; a macroblock without A5 is not filtered. Intra prediction keeps using the
 // unfiltered pixels (acc_engine's own line buffers); the pictures in DDR,
 // used as references, are filtered.
 //
@@ -44,7 +44,7 @@ module acc_dbk #(
 	input             sbuf,
 	input       [7:0] mbx, mby, wmb, hmb, slot,
 	input             prm_on,     // its command A5 (else not filtered)
-	input     [159:0] prm,        // A5 words 0..4
+	input     [159:0] prm,        // A5 words 0..2 (bits 1:0 of word 0: edge 0 strength 4), strengths vertical, horizontal
 	output            busy,
 
 	output reg  [6:0] rc_addr,    // acc_recon read port (data next clock)
