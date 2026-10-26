@@ -1062,6 +1062,112 @@ static void main_idle(int on)
 		fprintf(stderr, "mediacenter: Main not told it can rest (%d)\n", on);
 }
 
+// Programs that take the CPU away from the decoder are paused while a video
+// plays (1) and started again after it (0): MiSTer Remote (remote.sh, from
+// update_all) catalogues the games for minutes after power-on and took a
+// fifth of the CPU, enough to make 1080p stutter. MC_NOPAUSE=1: left alone.
+// mediacenter.sh starts them again also if the player does not end normally.
+static const char *const bg_names[] = { "remote.sh" };
+static pid_t bg_pids[8];
+static int bg_count;
+
+static void bg_pause(int on)
+{
+	if (!on)
+	{
+		for (int i = 0; i < bg_count; i++)
+			if (kill(bg_pids[i], SIGCONT) == 0)
+				printf("mediacenter: ripartito dopo il video: pid %d\n", (int)bg_pids[i]);
+		bg_count = 0;
+		return;
+	}
+	const char *e = getenv("MC_NOPAUSE");
+	if (bg_count || (e && atoi(e))) return;
+	DIR *d = opendir("/proc");
+	if (!d) return;
+	for (struct dirent *de; (de = readdir(d)) && bg_count < (int)(sizeof(bg_pids) / sizeof(bg_pids[0]));)
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= 1 || pid == getpid()) continue;
+		char path[64], comm[32] = "";
+		snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+		FILE *f = fopen(path, "re");
+		if (!f) continue;
+		if (fgets(comm, sizeof(comm), f)) comm[strcspn(comm, "\n")] = 0;
+		fclose(f);
+		for (size_t k = 0; k < sizeof(bg_names) / sizeof(bg_names[0]); k++)
+			if (!strcmp(comm, bg_names[k]) && kill(pid, SIGSTOP) == 0)
+			{
+				bg_pids[bg_count++] = pid;
+				printf("mediacenter: in pausa durante il video: %s (pid %d)\n", comm, pid);
+			}
+	}
+	closedir(d);
+}
+
+// Diag: every 10 s of a video, the other programs that took more than 5% of
+// the CPU (both cores = 100%, as top shows it), to find what slows the
+// decoder (MC_DIAG=0: off).
+#define CPU_PIDS 1024
+static struct { int pid; unsigned long long ticks; } cpu_prev[CPU_PIDS], cpu_cur[CPU_PIDS];
+static int cpu_nprev;
+static double cpu_t;
+
+static void cpu_diag(double t, int reset)
+{
+	if (reset) { cpu_nprev = 0; cpu_t = 0; }
+	if (!dd.on || (cpu_t && t - cpu_t < 10)) return;
+	DIR *d = opendir("/proc");
+	if (!d) return;
+	int n = 0;
+	static long hz;
+	static int ncpu;
+	if (!hz) { hz = sysconf(_SC_CLK_TCK); ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN); }
+	if (hz <= 0) hz = 100;
+	if (ncpu <= 0) ncpu = 1;
+	char line[512] = "";
+	int len = 0, shown = 0;
+	for (struct dirent *de; (de = readdir(d)) && n < CPU_PIDS;)
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= 0) continue;
+		char path[64], buf[512];
+		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0) continue;
+		ssize_t r = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (r <= 0) continue;
+		buf[r] = 0;
+		// pid (comm) state ppid ... utime is field 14, stime 15
+		char *open_p = strchr(buf, '('), *close_p = strrchr(buf, ')');
+		if (!open_p || !close_p) continue;
+		unsigned long long ut = 0, st = 0;
+		if (sscanf(close_p + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2) continue;
+		cpu_cur[n].pid = pid;
+		cpu_cur[n].ticks = ut + st;
+		n++;
+		if (!cpu_t || pid == getpid()) continue;
+		long long before = -1;  // started since the last look: next time
+		for (int i = 0; i < cpu_nprev; i++)
+			if (cpu_prev[i].pid == pid) { before = (long long)cpu_prev[i].ticks; break; }
+		if (before < 0) continue;
+		double pct = 100.0 * (double)(ut + st - (unsigned long long)before) / ((t - cpu_t) * hz * ncpu);
+		if (pct >= 5 && len < (int)sizeof(line) - 64)
+		{
+			*close_p = 0;
+			len += snprintf(line + len, sizeof(line) - len, "%s%s %.0f%%", shown ? ", " : "", open_p + 1, pct);
+			shown++;
+		}
+	}
+	closedir(d);
+	if (cpu_t)
+		printf("mediacenter: diag altri programmi %.0f s: %s\n", mc.clock, shown ? line : "nessuno sopra il 5%");
+	memcpy(cpu_prev, cpu_cur, n * sizeof(cpu_cur[0]));
+	cpu_nprev = n;
+	cpu_t = t;
+}
+
 static void screen_rebuild(void)
 {
 	free(ovl_a); free(ovl_v); free(full_line);
@@ -1832,6 +1938,8 @@ static int media_play(int in_playlist)
 	if (mc.audio_only) draw_audio_screen();
 	dec_diag_reset();
 	main_idle(1);
+	bg_pause(1);
+	cpu_diag(now_seconds(), 1);
 	vt_start();
 	frames_shown = frames_dropped = 0;
 	draw_convert = draw_present = 0;
@@ -1852,6 +1960,7 @@ static int media_play(int in_playlist)
 		double t = now_seconds();
 		double elapsed = t - last;
 		last = t;
+		cpu_diag(t, 0);
 		if (elapsed > 0.5) elapsed = 0.5;
 
 		for (int code; (code = input_key(t));)
@@ -2065,6 +2174,7 @@ static int media_play(int in_playlist)
 	vt_end();
 	fmt_close();
 	main_idle(0);
+	bg_pause(0);
 	if (mc.vstream >= 0 && played > 1)
 	{
 		double fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
