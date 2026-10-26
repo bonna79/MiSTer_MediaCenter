@@ -529,6 +529,7 @@ Apri una segnalazione nella pagina [Issues](../../issues) e allega:
 | `MC_DEBUG=1` | Scrive nel log gli eventi della navigazione nei DVD |
 | `MC_FULLQUALITY=1` | Disattiva la modalità leggera dei video H.264/HEVC in alta definizione (deblocking spento, oltre le 720 righe metà delle righe ingrandite dallo scaler FPGA e, sopra i 30 fps, solo le immagini di riferimento) |
 | `MC_ACC_RING=so` | Acceleratore: l'anello dei comandi in una zona fissa della memoria invece che nelle pagine del lettore (per confrontare i tempi) |
+| `MC_ACC_COPY=1` | Acceleratore: ogni immagine viene copiata nell'anello dei comandi, come prima, invece di essere scritta direttamente (per confrontare i tempi) |
 | `MC_TEST=...` | Prova senza schermo né controller: tasti simulati e immagini salvate in `/tmp/mc_<secondi>.ppm`. Con un file `.cue` riproduce un'immagine di Super Video CD come se fosse nel lettore |
 
 Per misurare la velocità di decodifica usa `/media/fat/linux/mediacenter --bench <file>` oppure `--bench /dev/sr0`. Analizza al massimo il primo minuto del file (Ctrl+C lo ferma prima). Se il risultato supera il 100% del tempo reale, il file si può riprodurre.

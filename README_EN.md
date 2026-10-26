@@ -531,6 +531,7 @@ Open a report on the [Issues](../../issues) page and attach:
 | `MC_DEBUG=1` | Logs DVD navigation events |
 | `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking, above 720 lines half of the lines enlarged by the FPGA scaler and, above 30 fps, only reference pictures) |
 | `MC_ACC_RING=so` | Accelerator: the command ring in a fixed memory area instead of the player's pages (to compare times) |
+| `MC_ACC_COPY=1` | Accelerator: every picture is copied into the command ring, as before, instead of being written straight into it (to compare times) |
 | `MC_TEST=...` | Runs without screen or controller: simulated keys, pictures saved to `/tmp/mc_<seconds>.ppm`. With a `.cue` file it plays a Super Video CD image as if it were in the drive |
 
 To measure decoding speed use `/media/fat/linux/mediacenter --bench <file>` or `--bench /dev/sr0`. It analyzes at most the first minute of the file (Ctrl+C stops it earlier). If the result is above 100% of real time, the file can be played.

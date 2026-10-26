@@ -7,6 +7,11 @@
 // decoding order when they start; with two decoding threads two pictures are
 // written at the same time, so a finished picture waits here until all the
 // earlier ones are sent (acc_send, the ring buffer to the FPGA).
+// The picture whose turn it is (all the earlier ones sent) is written
+// straight into the ring instead (acc.ring, when the link can): no copy, and
+// the FPGA starts on it while it is still being read. A picture that was
+// written into its own buffer while waiting for its turn has what it already
+// wrote copied once into the ring, and goes on in the ring.
 //
 // Every picture the decoder allocates gets a slot of the FPGA memory (4 MB,
 // 64 slots): the engine rebuilds it there and the zero-copy block shows it.
@@ -16,6 +21,7 @@
 
 #define ACC_SLOTS 64
 #define ACC_INFLIGHT 16                     // pictures being written at once (at most)
+#define ACC_LOOK (1 << 14)                  // words: a picture waiting for its turn looks again this often
 
 struct mc_acc_pic {
 	uint32_t *p, *end;                       // FFmpeg's part (h264_mcacc.c)
@@ -24,6 +30,9 @@ struct mc_acc_pic {
 	unsigned seq;                            // decoding order
 	unsigned session;
 	int done;
+	int direct;                              // being written straight into the ring
+	uint32_t start;                          // direct: where the picture starts in the ring (link's count)
+	size_t copied;                           // direct: words copied from its own buffer first
 };
 
 struct mc_acc_hooks {
@@ -63,9 +72,22 @@ static struct {
 	int dummy_ls, dummy_cs, dummy_h;         // its layout: Y, U and V planes
 	// sends a finished picture's commands (an even number of words)
 	int (*send)(const uint32_t *w, size_t n, unsigned seq);
+	// the ring written straight by the picture whose turn it is (the link;
+	// NULL: every picture is copied with send). ring_ok: possible now.
+	// ring_take: copies the n words already written, makes room for `words`
+	// more and gives where they go (*p) and the end of the room (*end);
+	// *start: where the picture starts. ring_room: the words up to *p are
+	// done, room for `words` more (a new *p and *end). ring_end: the
+	// picture's last word is before p (an even number of words). Those
+	// return -1 when the core does not take the commands.
+	int (*ring_ok)(void);
+	int (*ring_take)(const uint32_t *w, size_t n, size_t words, uint32_t **p, uint32_t **end, uint32_t *start);
+	int (*ring_room)(uint32_t **p, uint32_t **end, size_t words);
+	uint32_t (*ring_end)(uint32_t *p);       // the link's count after the picture
+	int copy_only;                           // MC_ACC_COPY=1: every picture copied, as before
 	// counters
 	unsigned pics_sent, slot_waits, pics_dropped;
-	uint64_t words_sent;
+	uint64_t words_sent, words_direct;
 	double send_time;
 } acc = { .lock = PTHREAD_MUTEX_INITIALIZER };
 
@@ -190,6 +212,28 @@ static void acc_spare(struct mc_acc_pic *p)
 	}
 }
 
+// The picture is now written straight into the ring if it is its turn (all
+// the earlier pictures sent) and the link can: what it already wrote into
+// its own buffer is copied first. Room for `words` more. acc.lock held.
+static void acc_to_ring(struct mc_acc_pic *p, size_t words)
+{
+	if (p->direct || p->seq != acc.next_send || p->session != acc.session || acc.failed || acc.copy_only ||
+		!acc.ring_ok || !acc.ring_ok()) return;
+	size_t n = p->p - p->data;
+	uint32_t *w, *end;
+	double t = acc_now();
+	if (acc.ring_take(p->data, n, words, &w, &end, &p->start) < 0)
+	{
+		acc_fail(NULL, "the FPGA does not answer");
+		return;
+	}
+	acc.send_time += acc_now() - t;
+	p->copied = n;
+	p->direct = 1;
+	p->p = w;
+	p->end = end;
+}
+
 static struct mc_acc_pic *acc_begin(void *o, const AVFrame *f, int mb_w, int mb_h)
 {
 	(void)o;
@@ -211,6 +255,8 @@ static struct mc_acc_pic *acc_begin(void *o, const AVFrame *f, int mb_w, int mb_
 	p->seq = acc.next_seq++;
 	p->session = acc.session;
 	p->done = 0;
+	p->direct = 0;
+	p->copied = 0;
 	acc.inflight[p->seq % ACC_INFLIGHT] = p;
 	acc_buf_t *b = acc_buf_of(f);
 	if (b)
@@ -218,9 +264,11 @@ static struct mc_acc_pic *acc_begin(void *o, const AVFrame *f, int mb_w, int mb_
 		b->seq = p->seq;
 		b->session = p->session;
 	}
-	pthread_mutex_unlock(&acc.lock);
 	p->p = p->data;
-	p->end = p->data + p->cap;
+	p->end = p->data + (p->cap < ACC_LOOK ? p->cap : ACC_LOOK);
+	// its turn already: straight into the ring
+	acc_to_ring(p, 2);
+	pthread_mutex_unlock(&acc.lock);
 	*p->p++ = 0xA1000000u | (b ? b->slot : 255);
 	*p->p++ = (uint32_t)mb_w | (uint32_t)mb_h << 8;
 	return p;
@@ -229,21 +277,48 @@ static struct mc_acc_pic *acc_begin(void *o, const AVFrame *f, int mb_w, int mb_
 static void acc_grow(void *o, struct mc_acc_pic *p, int words)
 {
 	(void)o;
+	if (p->direct)
+	{
+		// in the ring: the words so far go to the FPGA, room for more
+		if (acc.ring_room(&p->p, &p->end, (size_t)words) == 0) return;
+		acc_fail(NULL, "the FPGA does not answer");
+		// the rest of the picture goes nowhere: back into its own buffer
+		pthread_mutex_lock(&acc.lock);
+		p->direct = 0;
+		p->p = p->data + 2;
+		p->end = p->data + p->cap;
+		pthread_mutex_unlock(&acc.lock);
+		return;
+	}
+	// its own buffer: is it its turn now?
+	if (!acc.copy_only && acc.ring_ok)
+	{
+		pthread_mutex_lock(&acc.lock);
+		acc_to_ring(p, (size_t)words + 2);
+		pthread_mutex_unlock(&acc.lock);
+		if (p->direct) return;
+	}
 	size_t used = p->p - p->data;
 	size_t cap = p->cap;
 	while (cap - used < (size_t)words + 2) cap *= 2;
-	uint32_t *d = (uint32_t *)realloc(p->data, cap * 4);
-	if (!d)
+	if (cap != p->cap)
 	{
-		// nothing more fits: the rest of this picture is lost
-		acc_fail(NULL, "out of memory for the commands");
-		p->p = p->data + 2;
-		return;
+		uint32_t *d = (uint32_t *)realloc(p->data, cap * 4);
+		if (!d)
+		{
+			// nothing more fits: the rest of this picture is lost
+			acc_fail(NULL, "out of memory for the commands");
+			p->p = p->data + 2;
+			p->end = p->data + p->cap;
+			return;
+		}
+		p->data = d;
+		p->cap = cap;
+		p->p = d + used;
 	}
-	p->data = d;
-	p->cap = cap;
-	p->p = d + used;
-	p->end = d + cap;
+	// looks again for its turn after ACC_LOOK more words
+	p->end = p->p + ((size_t)words + 2 > ACC_LOOK ? (size_t)words + 2 : ACC_LOOK);
+	if (p->end > p->data + p->cap) p->end = p->data + p->cap;
 }
 
 // A picture's commands are complete: send it and the ones after it that
@@ -251,10 +326,27 @@ static void acc_grow(void *o, struct mc_acc_pic *p, int words)
 static void acc_end(void *o, struct mc_acc_pic *p)
 {
 	(void)o;
-	if ((p->p - p->data) & 1) *p->p++ = 0xA0000000u; // even: the FPGA reads 64-bit words
+	// even: the FPGA reads 64-bit words (in the ring every picture starts on one)
+	if (p->direct ? ((uintptr_t)p->p >> 2) & 1 : (p->p - p->data) & 1) *p->p++ = 0xA0000000u;
 	pthread_mutex_lock(&acc.lock);
 	p->done = 1;
-	if (p->session != acc.session)
+	if (p->direct)
+	{
+		// written in the ring: the last words go to the FPGA, the next
+		// pictures may go now
+		double t = acc_now();
+		uint32_t after = acc.ring_end(p->p);
+		acc.send_time += acc_now() - t;
+		size_t n = (uint32_t)(after - p->start) / 4;
+		acc.pics_sent++;
+		acc.words_sent += n;
+		acc.words_direct += n - p->copied;
+		p->direct = 0;
+		if (acc.inflight[acc.next_send % ACC_INFLIGHT] == p) acc.inflight[acc.next_send % ACC_INFLIGHT] = NULL;
+		acc_spare(p);
+		acc.next_send++;
+	}
+	else if (p->session != acc.session)
 	{
 		// from before a seek: dropped
 		if (acc.inflight[p->seq % ACC_INFLIGHT] == p) acc.inflight[p->seq % ACC_INFLIGHT] = NULL;
@@ -304,8 +396,10 @@ static void acc_attach(AVCodecContext *ctx)
 	acc.slots_used = 0;
 	acc.slots_peak = 0;
 	acc.pics_sent = acc.slot_waits = acc.pics_dropped = 0;
-	acc.words_sent = 0;
+	acc.words_sent = acc.words_direct = 0;
 	acc.send_time = 0;
+	const char *e = getenv("MC_ACC_COPY");
+	acc.copy_only = e && atoi(e);
 	acc.on = 1;
 	mc_acc_hooks = &acc.hooks;
 }
@@ -321,7 +415,20 @@ static void acc_restart(void)
 			acc_spare(acc.inflight[i]);
 			acc.inflight[i] = NULL;
 		}
-		else if (acc.inflight[i]) acc.inflight[i] = NULL; // its end() returns it
+		else if (acc.inflight[i])
+		{
+			// its end() returns it. One written in the ring goes on in its
+			// own buffer: the ring starts again with the core's new session.
+			// The decoder is flushed, so its thread is not writing now.
+			struct mc_acc_pic *q = acc.inflight[i];
+			if (q->direct)
+			{
+				q->direct = 0;
+				q->p = q->data + 2;
+				q->end = q->data + q->cap;
+			}
+			acc.inflight[i] = NULL;
+		}
 	acc.next_send = acc.next_seq;
 	pthread_mutex_unlock(&acc.lock);
 }
