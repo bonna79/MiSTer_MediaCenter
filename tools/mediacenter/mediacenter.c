@@ -1066,6 +1066,8 @@ static void main_idle(int on)
 // plays (1) and started again after it (0): MiSTer Remote (remote.sh, from
 // update_all) catalogues the games for minutes after power-on and took a
 // fifth of the CPU, enough to make 1080p stutter. MC_NOPAUSE=1: left alone.
+// They are looked for again every 10 s while a video plays: MiSTer Remote
+// starts only once the wifi is up, half a minute after power-on.
 // mediacenter.sh starts them again also if the player does not end normally.
 static const char *const bg_names[] = { "remote.sh" };
 static pid_t bg_pids[8];
@@ -1082,13 +1084,16 @@ static void bg_pause(int on)
 		return;
 	}
 	const char *e = getenv("MC_NOPAUSE");
-	if (bg_count || (e && atoi(e))) return;
+	if (e && atoi(e)) return;
 	DIR *d = opendir("/proc");
 	if (!d) return;
 	for (struct dirent *de; (de = readdir(d)) && bg_count < (int)(sizeof(bg_pids) / sizeof(bg_pids[0]));)
 	{
 		int pid = atoi(de->d_name);
 		if (pid <= 1 || pid == getpid()) continue;
+		int paused = 0;
+		for (int i = 0; i < bg_count; i++) paused |= bg_pids[i] == pid;
+		if (paused) continue;
 		char path[64], comm[32] = "";
 		snprintf(path, sizeof(path), "/proc/%d/comm", pid);
 		FILE *f = fopen(path, "re");
@@ -1107,11 +1112,14 @@ static void bg_pause(int on)
 
 // Diag: every 10 s of a video, the other programs that took more than 5% of
 // the CPU (both cores = 100%, as top shows it), to find what slows the
-// decoder (MC_DIAG=0: off).
+// decoder (MC_DIAG=0: off). Also the CPU all the other programs took
+// together, from /proc/stat, which counts the short ones that come and go
+// between two looks too.
 #define CPU_PIDS 1024
 static struct { int pid; unsigned long long ticks; } cpu_prev[CPU_PIDS], cpu_cur[CPU_PIDS];
 static int cpu_nprev;
 static double cpu_t;
+static unsigned long long cpu_all_prev, cpu_busy_prev, cpu_own_prev;
 
 static void cpu_diag(double t, int reset)
 {
@@ -1127,6 +1135,19 @@ static void cpu_diag(double t, int reset)
 	if (ncpu <= 0) ncpu = 1;
 	char line[512] = "";
 	int len = 0, shown = 0;
+	unsigned long long own = 0, all = 0, busy = 0;
+	FILE *ps = fopen("/proc/stat", "re");
+	if (ps)
+	{
+		// cpu  user nice system idle iowait irq softirq steal
+		unsigned long long v[8] = { 0 };
+		if (fscanf(ps, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) >= 4)
+		{
+			for (int i = 0; i < 8; i++) all += v[i];
+			busy = all - v[3] - v[4];
+		}
+		fclose(ps);
+	}
 	for (struct dirent *de; (de = readdir(d)) && n < CPU_PIDS;)
 	{
 		int pid = atoi(de->d_name);
@@ -1147,6 +1168,7 @@ static void cpu_diag(double t, int reset)
 		cpu_cur[n].pid = pid;
 		cpu_cur[n].ticks = ut + st;
 		n++;
+		if (pid == getpid()) own = ut + st;
 		if (!cpu_t || pid == getpid()) continue;
 		long long before = -1;  // started since the last look: next time
 		for (int i = 0; i < cpu_nprev; i++)
@@ -1162,7 +1184,19 @@ static void cpu_diag(double t, int reset)
 	}
 	closedir(d);
 	if (cpu_t)
-		printf("mediacenter: diag altri programmi %.0f s: %s\n", mc.clock, shown ? line : "nessuno sopra il 5%");
+	{
+		char tot[48] = "";
+		if (all > cpu_all_prev && busy >= cpu_busy_prev && cpu_all_prev)
+		{
+			long long other = (long long)(busy - cpu_busy_prev) - (long long)(own - cpu_own_prev);
+			if (other < 0) other = 0;
+			snprintf(tot, sizeof(tot), " (altri in tutto %.0f%%)", 100.0 * (double)other / (double)(all - cpu_all_prev));
+		}
+		printf("mediacenter: diag altri programmi %.0f s: %s%s\n", mc.clock, shown ? line : "nessuno sopra il 5%", tot);
+	}
+	cpu_all_prev = all;
+	cpu_busy_prev = busy;
+	cpu_own_prev = own;
 	memcpy(cpu_prev, cpu_cur, n * sizeof(cpu_cur[0]));
 	cpu_nprev = n;
 	cpu_t = t;
@@ -1954,13 +1988,14 @@ static int media_play(int in_playlist)
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5);
 
 	int result = END_DONE;
-	double last = now_seconds(), osd_built = 0;
+	double last = now_seconds(), osd_built = 0, bg_look = last;
 	while (!quit_requested)
 	{
 		double t = now_seconds();
 		double elapsed = t - last;
 		last = t;
 		cpu_diag(t, 0);
+		if (t - bg_look >= 10) { bg_look = t; bg_pause(1); }
 		if (elapsed > 0.5) elapsed = 0.5;
 
 		for (int code; (code = input_key(t));)
