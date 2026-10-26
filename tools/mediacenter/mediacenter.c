@@ -1111,6 +1111,12 @@ static double crt_frame_time(void)
 }
 
 // Draws the picture into the next page and shows it.
+// Set while fb_present_paged draws the same picture again (the controls
+// changed): such a switch is left out of the time between pictures.
+static int fb_redraw;
+// When a video picture was last drawn (draw_video_frame).
+static double video_drawn_t;
+
 static void fb_present_paged(void)
 {
 	fb_page_waited = 0;
@@ -1150,8 +1156,11 @@ static void fb_present_paged(void)
 	char cmd[32];
 	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 page %d %d\n", fb_page, pic_fields);
 	double t = now_seconds();
-	if (t - last_flip < 0.2) interval = 0.9 * interval + 0.1 * (t - last_flip);
-	last_flip = t;
+	if (!fb_redraw)
+	{
+		if (t - last_flip < 0.2) interval = 0.9 * interval + 0.1 * (t - last_flip);
+		last_flip = t;
+	}
 	double keep = 0.03;
 	if (interval >= 0.03)
 	{
@@ -1819,6 +1828,7 @@ static void draw_video_frame(AVFrame *f)
 			if (dvd_yuv) overlay_soften = 1;
 			have_frame = 1;
 			fb_present_paged();
+			video_drawn_t = now_seconds();
 			draw_present += now_seconds() - t_start;
 			draw_count++;
 			loop_diag_drawn(now_seconds() - t_start);
@@ -2322,7 +2332,19 @@ static int media_play(int in_playlist)
 		}
 		else if (p.dirty)
 		{
-			fb_present();
+			// A picture of the FPGA accelerator: the core draws all of it,
+			// the band under the controls first without them, and the ARM
+			// blends the controls after; drawn again on the page on screen
+			// that band would flash. While pictures keep coming the next one
+			// brings the controls; otherwise it is drawn on a new page.
+			int accp = have_frame && fb_present_yuv && yuv_last && acc.on && acc_buf_of(yuv_last);
+			if (!accp) fb_present();
+			else if (!(p.state == ST_PLAY && t - video_drawn_t < 0.1))
+			{
+				fb_redraw = 1;
+				fb_present_paged();
+				fb_redraw = 0;
+			}
 		}
 		p.dirty = 0;
 
