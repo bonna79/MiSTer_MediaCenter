@@ -1233,8 +1233,9 @@ static void main_idle(int on)
 // plays (1) and started again after it (0): MiSTer Remote (remote.sh, from
 // update_all) catalogues the games for minutes after power-on and took a
 // fifth of the CPU, enough to make 1080p stutter. MC_NOPAUSE=1: left alone.
-// They are looked for again every 10 s while a video plays: MiSTer Remote
-// starts only once the wifi is up, half a minute after power-on.
+// They are looked for again while a video plays, every second in its first
+// 20 s and every 10 s after: MiSTer Remote starts only once the wifi is up,
+// half a minute after power-on, and may start just as the video does.
 // mediacenter.sh starts them again also if the player does not end normally.
 static const char *const bg_names[] = { "remote.sh" };
 static pid_t bg_pids[8];
@@ -1281,17 +1282,26 @@ static void bg_pause(int on)
 // the CPU (both cores = 100%, as top shows it), to find what slows the
 // decoder (MC_DIAG=0: off). Also the CPU all the other programs took
 // together, from /proc/stat, which counts the short ones that come and go
-// between two looks too.
+// between two looks too. In the first 20 s, right after power-on the
+// busiest time, it looks every 2 s and names the 3 busiest programs even
+// under 5%, with how many programs were started in between (also from
+// /proc/stat: the short ones never show by name).
 #define CPU_PIDS 1024
 static struct { int pid; unsigned long long ticks; } cpu_prev[CPU_PIDS], cpu_cur[CPU_PIDS];
 static int cpu_nprev;
 static double cpu_t;
-static unsigned long long cpu_all_prev, cpu_busy_prev, cpu_own_prev;
+static unsigned long long cpu_all_prev, cpu_busy_prev, cpu_own_prev, cpu_forks_prev;
+static double cpu_start;
 
 static void cpu_diag(double t, int reset)
 {
-	if (reset) { cpu_nprev = 0; cpu_t = 0; }
-	if (!dd.on || (cpu_t && t - cpu_t < 10)) return;
+	if (reset) { cpu_nprev = 0; cpu_t = 0; cpu_start = t; }
+	int early = t - cpu_start < 20;
+	if (!dd.on || (cpu_t && t - cpu_t < (early ? 2 : 10))) return;
+	// early: the 3 busiest, whatever their share
+	char top_name[3][20] = { "" };
+	double top_pct[3] = { 0 };
+	unsigned long long forks = 0;
 	DIR *d = opendir("/proc");
 	if (!d) return;
 	int n = 0;
@@ -1313,6 +1323,10 @@ static void cpu_diag(double t, int reset)
 			for (int i = 0; i < 8; i++) all += v[i];
 			busy = all - v[3] - v[4];
 		}
+		// "processes N": programs started since power-on
+		char sl[256];
+		while (fgets(sl, sizeof(sl), ps))
+			if (sscanf(sl, "processes %llu", &forks) == 1) break;
 		fclose(ps);
 	}
 	for (struct dirent *de; (de = readdir(d)) && n < CPU_PIDS;)
@@ -1342,6 +1356,21 @@ static void cpu_diag(double t, int reset)
 			if (cpu_prev[i].pid == pid) { before = (long long)cpu_prev[i].ticks; break; }
 		if (before < 0) continue;
 		double pct = 100.0 * (double)(ut + st - (unsigned long long)before) / ((t - cpu_t) * hz * ncpu);
+		if (early)
+		{
+			for (int k = 0; k < 3; k++)
+				if (pct > top_pct[k])
+				{
+					for (int j = 2; j > k; j--) { top_pct[j] = top_pct[j - 1]; memcpy(top_name[j], top_name[j - 1], sizeof(top_name[j])); }
+					top_pct[k] = pct;
+					size_t nl = (size_t)(close_p - open_p - 1);
+					if (nl >= sizeof(top_name[k])) nl = sizeof(top_name[k]) - 1;
+					memcpy(top_name[k], open_p + 1, nl);
+					top_name[k][nl] = 0;
+					break;
+				}
+			continue;
+		}
 		if (pct >= 5 && len < (int)sizeof(line) - 64)
 		{
 			*close_p = 0;
@@ -1359,11 +1388,20 @@ static void cpu_diag(double t, int reset)
 			if (other < 0) other = 0;
 			snprintf(tot, sizeof(tot), " (altri in tutto %.0f%%)", 100.0 * (double)other / (double)(all - cpu_all_prev));
 		}
-		printf("mediacenter: diag altri programmi %.0f s: %s%s\n", mc.clock, shown ? line : "nessuno sopra il 5%", tot);
+		if (early)
+		{
+			for (int k = 0; k < 3 && top_pct[k] >= 0.5; k++)
+				len += snprintf(line + len, sizeof(line) - len, "%s%s %.0f%%", k ? ", " : "", top_name[k], top_pct[k]);
+			printf("mediacenter: diag altri programmi %.0f s: %s%s, programmi partiti %llu\n", t - cpu_start,
+				len ? line : "nessuno", tot, cpu_forks_prev && forks >= cpu_forks_prev ? forks - cpu_forks_prev : 0ULL);
+		}
+		else
+			printf("mediacenter: diag altri programmi %.0f s: %s%s\n", mc.clock, shown ? line : "nessuno sopra il 5%", tot);
 	}
 	cpu_all_prev = all;
 	cpu_busy_prev = busy;
 	cpu_own_prev = own;
+	cpu_forks_prev = forks;
 	memcpy(cpu_prev, cpu_cur, n * sizeof(cpu_cur[0]));
 	cpu_nprev = n;
 	cpu_t = t;
@@ -2161,7 +2199,7 @@ static int media_play(int in_playlist)
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5);
 
 	int result = END_DONE;
-	double last = now_seconds(), osd_built = 0, bg_look = last;
+	double last = now_seconds(), osd_built = 0, bg_look = last, bg_t0 = last;
 	while (!quit_requested)
 	{
 		double t = now_seconds();
@@ -2169,7 +2207,8 @@ static int media_play(int in_playlist)
 		last = t;
 		if (p.state == ST_PLAY) loop_diag_round(t, elapsed);
 		cpu_diag(t, 0);
-		if (t - bg_look >= 10) { bg_look = t; bg_pause(1); }
+		// every second in the first 20 s of the video, then every 10 s
+		if (t - bg_look >= (t - bg_t0 < 20 ? 1 : 10)) { bg_look = t; bg_pause(1); }
 		if (elapsed > 0.5) elapsed = 0.5;
 
 		for (int code; (code = input_key(t));)
