@@ -2946,6 +2946,103 @@ static int browse_data_disc(const char *device)
 	return 0;
 }
 
+static int wait_key_for(double secs);
+
+// Power-on: the MiSTer's start-up scripts (rcS and the S.. scripts it
+// starts: USB mounting, udev, dbus, network) run for some 30-40 s after the
+// Main is up. A video started meanwhile shared the CPU with them and
+// stuttered for its first minute, so it waits for them to end.
+// The rcS that started us, if any, never ends while we run: not counted.
+static int boot_scripts_running(void)
+{
+	int mine[16], n = 0;
+	for (int pid = getppid(); pid > 1 && n < 16;)
+	{
+		mine[n++] = pid;
+		char name[32];
+		int pp = 0;
+		if (!proc_name(pid, name, sizeof(name), &pp)) break;
+		pid = pp;
+	}
+	DIR *d = opendir("/proc");
+	if (!d) return 0;
+	int found = 0;
+	for (struct dirent *de; !found && (de = readdir(d));)
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= 1) continue;
+		char name[32];
+		if (!proc_name(pid, name, sizeof(name), NULL) || strcmp(name, "rcS")) continue;
+		// an ended one not yet collected by init is a zombie: state Z
+		char path[64], st[256];
+		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		ssize_t r = fd >= 0 ? read(fd, st, sizeof(st) - 1) : -1;
+		if (fd >= 0) close(fd);
+		if (r <= 0) continue;
+		st[r] = 0;
+		char *c = strrchr(st, ')');
+		if (c && c[1] == ' ' && c[2] == 'Z') continue;
+		found = 1;
+		for (int i = 0; i < n; i++) if (mine[i] == pid) found = 0;
+	}
+	closedir(d);
+	return found;
+}
+
+// Returns 1 when B (Back) was pressed: the video is not started.
+// MC_NOBOOTWAIT=1 starts it at once as before.
+static int boot_wait(void)
+{
+	const char *e = getenv("MC_NOBOOTWAIT");
+	if (e && atoi(e)) return 0;
+	double up = 0;
+	FILE *f = fopen("/proc/uptime", "re");
+	if (f) { if (fscanf(f, "%lf", &up) != 1) up = 0; fclose(f); }
+	if (up <= 0 || up > 180) return 0;
+	if (!boot_scripts_running())
+	{
+		printf("mediacenter: avvio della MiSTer gia' finito (accesa da %.0f s)\n", up);
+		return 0;
+	}
+	if (reopen_screen()) return 0;
+	printf("mediacenter: la MiSTer sta finendo l'avvio (accesa da %.0f s): il video aspetta\n", up);
+	double t0 = now_seconds(), ended = 0, look = -1;
+	int shown = -1, back = 0;
+	const char *why = "massimo 60 s";
+	while (!quit_requested)
+	{
+		double t = now_seconds();
+		if (!ended && t - look >= 0.5)
+		{
+			look = t;
+			if (!boot_scripts_running()) ended = t;
+		}
+		if (ended && t - ended >= 2) { why = "avvio finito"; break; }
+		if (t - t0 >= 60) break;
+		int s = (int)(t - t0);
+		if (s != shown)
+		{
+			shown = s;
+			menu_begin();
+			if (fb_mem)
+			{
+				int sx = menu_sx(), sy = menu_sy();
+				char line[64];
+				text_centre(fb_h / 2 - 24 * sy, sx, sy, 1, "La MiSTer sta finendo l'avvio", fb_rgb(255, 200, 80));
+				snprintf(line, sizeof(line), "Il video parte da solo  (%d s)", s);
+				text_centre(fb_h / 2 - 4 * sy, sx, sy, 1, line, fb_rgb(255, 255, 255));
+				text_centre(fb_h - 14 * sy, sx, sy, 1, "B Indietro", fb_rgb(230, 230, 230));
+			}
+			menu_end();
+		}
+		int code = wait_key_for(0.1);
+		if (code == KEY_ESC || code == KEY_BACKSPACE) { back = 1; why = "B premuto"; break; }
+	}
+	printf("mediacenter: attesa fine avvio %.1f s (%s)\n", now_seconds() - t0, why);
+	return back;
+}
+
 static int play_disc_in_drive(const char *device)
 {
 	char path[32];
@@ -2973,7 +3070,7 @@ static int play_disc_in_drive(const char *device)
 		printf("mediacenter: %s, %d track(s)\n", kind, track_last);
 		if (reopen_screen()) return -1;
 		svcd_kind = strcmp(kind, "Video CD") ? "Super Video CD" : "Video CD";
-		svcd_play();
+		if (!boot_wait()) svcd_play();
 		svcd_kind = "Super Video CD";
 		close(cd_fd);
 		cd_fd = -1;
@@ -2987,12 +3084,13 @@ static int play_disc_in_drive(const char *device)
 		if (dvd_detect(device))
 		{
 			if (reopen_screen()) return -1;
-			dvd_play(device);
+			if (!boot_wait()) dvd_play(device);
 			return 0;
 		}
 		return browse_data_disc(device);
 	}
 
+	if (boot_wait()) return 0;
 	// The Video CD player opens the framebuffer and the controls itself and
 	// releases them when it ends.
 	fb_close();
@@ -3086,6 +3184,7 @@ static int play_cue_image(const char *cue)
 
 static int play_file(const char *path, int in_playlist)
 {
+	if (boot_wait()) return END_BACK;
 	if (is_dvd_path(path)) return dvd_play(path);
 	if (has_ext(path, (const char *const[]){ "cue", NULL }))
 	{
