@@ -1292,10 +1292,14 @@ static int cpu_nprev;
 static double cpu_t;
 static unsigned long long cpu_all_prev, cpu_busy_prev, cpu_own_prev, cpu_forks_prev;
 static double cpu_start;
+// early: names of the programs started, "name<parent", seen by spawn_scan
+static struct { char name[40]; int count; } spawn[16];
+static int spawn_n, spawn_maxpid;
+static double spawn_t;
 
 static void cpu_diag(double t, int reset)
 {
-	if (reset) { cpu_nprev = 0; cpu_t = 0; cpu_start = t; }
+	if (reset) { cpu_nprev = 0; cpu_t = 0; cpu_start = t; spawn_n = 0; spawn_maxpid = 0; spawn_t = 0; }
 	int early = t - cpu_start < 20;
 	if (!dd.on || (cpu_t && t - cpu_t < (early ? 2 : 10))) return;
 	// early: the 3 busiest, whatever their share
@@ -1392,8 +1396,21 @@ static void cpu_diag(double t, int reset)
 		{
 			for (int k = 0; k < 3 && top_pct[k] >= 0.5; k++)
 				len += snprintf(line + len, sizeof(line) - len, "%s%s %.0f%%", k ? ", " : "", top_name[k], top_pct[k]);
-			printf("mediacenter: diag altri programmi %.0f s: %s%s, programmi partiti %llu\n", t - cpu_start,
-				len ? line : "nessuno", tot, cpu_forks_prev && forks >= cpu_forks_prev ? forks - cpu_forks_prev : 0ULL);
+			// the names seen, most started first ("name<parent")
+			char names[320] = "";
+			int nl = 0;
+			for (int k = 0; k < 6 && spawn_n; k++)
+			{
+				int b = 0;
+				for (int i = 1; i < spawn_n; i++) if (spawn[i].count > spawn[b].count) b = i;
+				if (!spawn[b].count) break;
+				nl += snprintf(names + nl, sizeof(names) - nl, "%s%s x%d", k ? ", " : " (", spawn[b].name, spawn[b].count);
+				spawn[b].count = 0;
+			}
+			if (nl) snprintf(names + nl, sizeof(names) - nl, ")");
+			spawn_n = 0;
+			printf("mediacenter: diag altri programmi %.0f s: %s%s, programmi partiti %llu%s\n", t - cpu_start,
+				len ? line : "nessuno", tot, cpu_forks_prev && forks >= cpu_forks_prev ? forks - cpu_forks_prev : 0ULL, names);
 		}
 		else
 			printf("mediacenter: diag altri programmi %.0f s: %s%s\n", mc.clock, shown ? line : "nessuno sopra il 5%", tot);
@@ -1405,6 +1422,106 @@ static void cpu_diag(double t, int reset)
 	memcpy(cpu_prev, cpu_cur, n * sizeof(cpu_cur[0]));
 	cpu_nprev = n;
 	cpu_t = t;
+}
+
+// The name of a program and its parent from /proc/<pid>/stat; 0 if gone.
+static int proc_name(int pid, char *name, size_t len, int *ppid)
+{
+	char path[64], buf[256];
+	snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return 0;
+	ssize_t r = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (r <= 0) return 0;
+	buf[r] = 0;
+	char *o = strchr(buf, '('), *c = strrchr(buf, ')');
+	if (!o || !c) return 0;
+	size_t nl = (size_t)(c - o - 1);
+	if (nl >= len) nl = len - 1;
+	memcpy(name, o + 1, nl);
+	name[nl] = 0;
+	if (ppid && sscanf(c + 2, "%*c %d", ppid) != 1) *ppid = 0;
+	return 1;
+}
+
+// Diag, first 20 s of a video: every 0.1 s, the programs started since the
+// last look (higher pids), counted by name and parent for the "altri
+// programmi" lines; most of them last less than the 2 s between those.
+static void spawn_scan(double t)
+{
+	if (!dd.on || t - cpu_start >= 20 || t - spawn_t < 0.1) return;
+	spawn_t = t;
+	DIR *d = opendir("/proc");
+	if (!d) return;
+	int first = !spawn_maxpid, top = spawn_maxpid;
+	for (struct dirent *de; (de = readdir(d));)
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= spawn_maxpid) continue;
+		if (pid > top) top = pid;
+		if (first) continue;    // the first look only notes the highest pid
+		char name[20], parent[20] = "?", key[40];
+		int ppid = 0;
+		if (!proc_name(pid, name, sizeof(name), &ppid)) continue;
+		if (ppid > 0) proc_name(ppid, parent, sizeof(parent), NULL);
+		snprintf(key, sizeof(key), "%s<%s", name, parent);
+		int i = 0;
+		while (i < spawn_n && strcmp(spawn[i].name, key)) i++;
+		if (i == spawn_n)
+		{
+			if (spawn_n == (int)(sizeof(spawn) / sizeof(spawn[0]))) continue;
+			snprintf(spawn[spawn_n].name, sizeof(spawn[0].name), "%s", key);
+			spawn[spawn_n++].count = 0;
+		}
+		spawn[i].count++;
+	}
+	closedir(d);
+	spawn_maxpid = top;
+}
+
+// While a video plays the player comes before the other programs (1), and
+// back to normal after it (0): right after power-on the start-up scripts
+// took up to 39% of the CPU and the 1080p stuttered for 25 s. All the
+// player's threads (decoder ones included) go to nice -10, the loop that
+// reads the file and sends the sound and aplay, its sound, to -15 so they
+// stay ahead of the decoders. Looked at again with bg_pause, for the threads
+// and the aplay started later (a new audio track). MC_NOPRIO=1: left alone.
+static void prio_apply(int on)
+{
+	const char *e = getenv("MC_NOPRIO");
+	if (on && e && atoi(e)) return;
+	static int said;
+	int me = getpid(), main_tid = (int)syscall(SYS_gettid), n = 0;
+	DIR *d = opendir("/proc/self/task");
+	if (d)
+	{
+		for (struct dirent *de; (de = readdir(d));)
+		{
+			int tid = atoi(de->d_name);
+			if (tid <= 0) continue;
+			int want = !on ? 0 : tid == main_tid ? -15 : -10;
+			if (getpriority(PRIO_PROCESS, (id_t)tid) != want && !setpriority(PRIO_PROCESS, (id_t)tid, want)) n++;
+		}
+		closedir(d);
+	}
+	// aplay, started by popen: our child, or the child of its shell
+	d = opendir("/proc");
+	if (d)
+	{
+		for (struct dirent *de; (de = readdir(d));)
+		{
+			int pid = atoi(de->d_name), ppid = 0, pp2 = 0;
+			char name[20], pname[20];
+			if (pid <= 1 || pid == me || !proc_name(pid, name, sizeof(name), &ppid) || strcmp(name, "aplay")) continue;
+			if (ppid != me && !(proc_name(ppid, pname, sizeof(pname), &pp2) && pp2 == me)) continue;
+			int want = on ? -15 : 0;
+			if (getpriority(PRIO_PROCESS, (id_t)pid) != want && !setpriority(PRIO_PROCESS, (id_t)pid, want)) n++;
+		}
+		closedir(d);
+	}
+	if (on && n && !said++) printf("mediacenter: precedenza al video sugli altri programmi (%d processi e thread)\n", n);
+	if (!on) said = 0;
 }
 
 static void screen_rebuild(void)
@@ -2197,6 +2314,7 @@ static int media_play(int in_playlist)
 	// The loop that reads the file and sends the sound runs ahead of the
 	// video decoding threads, so the sound keeps flowing on a heavy stream.
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5);
+	prio_apply(1);
 
 	int result = END_DONE;
 	double last = now_seconds(), osd_built = 0, bg_look = last, bg_t0 = last;
@@ -2207,8 +2325,9 @@ static int media_play(int in_playlist)
 		last = t;
 		if (p.state == ST_PLAY) loop_diag_round(t, elapsed);
 		cpu_diag(t, 0);
+		spawn_scan(t);
 		// every second in the first 20 s of the video, then every 10 s
-		if (t - bg_look >= (t - bg_t0 < 20 ? 1 : 10)) { bg_look = t; bg_pause(1); }
+		if (t - bg_look >= (t - bg_t0 < 20 ? 1 : 10)) { bg_look = t; bg_pause(1); prio_apply(1); }
 		if (elapsed > 0.5) elapsed = 0.5;
 
 		for (int code; (code = input_key(t));)
@@ -2474,6 +2593,7 @@ static int media_play(int in_playlist)
 				ld.s_slow, 1000 * dd.budget, 1000 * ld.s_draw / ld.s_drawn, 1000 * ld.s_wait / ld.s_drawn, ld.s_empty);
 		av_report();
 	}
+	prio_apply(0);
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
 	audio_close();
 	exit_question = "Uscire dal Video CD?";
