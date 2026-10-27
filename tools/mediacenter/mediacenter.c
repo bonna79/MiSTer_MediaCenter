@@ -1520,7 +1520,17 @@ static void prio_apply(int on)
 		}
 		closedir(d);
 	}
-	if (on && n && !said++) printf("mediacenter: precedenza al video sugli altri programmi (%d processi e thread)\n", n);
+	// with autogroup scheduling the kernel shares the CPU between sessions
+	// first, whatever the nice of their programs: our session's share too
+	int ag = -1, fd = open("/proc/self/autogroup", O_WRONLY | O_CLOEXEC);
+	if (fd >= 0)
+	{
+		ag = dprintf(fd, "%d", on ? -10 : 0) > 0;
+		close(fd);
+	}
+	if (on && n && !said++)
+		printf("mediacenter: precedenza al video sugli altri programmi (%d processi e thread, gruppo %s)\n", n,
+			ag < 0 ? "non usato" : ag ? "si" : "no");
 	if (!on) said = 0;
 }
 
