@@ -1799,6 +1799,97 @@ static void yuv_band(uint8_t *row_buf, int y)
 	}
 }
 
+// The controls over a picture of the FPGA accelerator: the picture is only
+// in the frame buffer (no cache, slow to read), so each row of the band is
+// read back in 64-byte blocks into row_buf, blended there 16 pixels at a
+// time with NEON (same bytes as yuv_band) and written back.
+// Time spent, for "diag comandi sopra l'acceleratore".
+static struct { int pics, w_pics; double read, blend, w_read, w_blend; } od;
+
+#if defined(__arm__)
+#pragma GCC push_options
+#pragma GCC target("fpu=neon")
+// x / 255 rounded down, exact for x <= 65407 (all values used here)
+static inline uint16x8_t div255_16(uint16x8_t x)
+{
+	return vshrq_n_u16(vaddq_u16(vaddq_u16(x, vdupq_n_u16(1)), vshrq_n_u16(x, 8)), 8);
+}
+// (p * (255 - a) + q * a + 127) / 255 on 8 lanes
+static inline uint8x8_t mix255(uint8x8_t p, uint8x8_t q, uint8x8_t a)
+{
+	uint16x8_t n = vmull_u8(p, vsub_u8(vdup_n_u8(255), a));
+	n = vmlal_u8(n, q, a);
+	n = vaddq_u16(n, vdupq_n_u16(127));
+	return vmovn_u16(div255_16(n));
+}
+// 16 + v * 219 / 255 on 8 lanes
+static inline uint8x8_t grey_y(uint8x8_t v)
+{
+	return vadd_u8(vmovn_u16(div255_16(vmull_u8(v, vdup_n_u8(219)))), vdup_n_u8(16));
+}
+#endif
+
+static void fb_read_row(uint8_t *dst, const uint8_t *src, int n)
+{
+	int i = 0;
+#if defined(__arm__)
+	const uint8_t *s = src;
+	uint8_t *d = dst;
+	for (; i + 64 <= n; i += 64)
+		__asm__ volatile(
+			"vld1.8 {d0-d3}, [%0]!\n\t"
+			"vld1.8 {d4-d7}, [%0]!\n\t"
+			"vst1.8 {d0-d3}, [%1]!\n\t"
+			"vst1.8 {d4-d7}, [%1]!\n\t"
+			: "+r"(s), "+r"(d) : : "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "memory");
+#endif
+	if (i < n) memcpy(dst + i, src + i, (size_t)(n - i));
+}
+
+static void yuv_band_fast(uint8_t *row_buf, int y)
+{
+	int x = 0;
+#if defined(__arm__)
+	const uint8_t *a = ovl_a + (size_t)(y - ovl_y) * fb_w;
+	const uint8_t *v = ovl_v + (size_t)(y - ovl_y) * fb_w;
+	for (; x + 16 <= fb_w; x += 16)
+	{
+		// 8 pairs Y0 U Y1 V; coverage and grey of the even and odd pixels
+		uint8x8x4_t p = vld4_u8(row_buf + 2 * x);
+		uint8x8x2_t aa = vld2_u8(a + x), vv = vld2_u8(v + x);
+		p.val[0] = mix255(p.val[0], grey_y(vv.val[0]), aa.val[0]);
+		p.val[2] = mix255(p.val[2], grey_y(vv.val[1]), aa.val[1]);
+		uint8x8_t ac = vrhadd_u8(aa.val[0], aa.val[1]); // (a0 + a1 + 1) / 2
+		p.val[1] = mix255(p.val[1], vdup_n_u8(128), ac);
+		p.val[3] = mix255(p.val[3], vdup_n_u8(128), ac);
+		vst4_u8(row_buf + 2 * x, p);
+	}
+	if (x + 1 < fb_w)
+	{
+		// the last pixels: yuv_band's own loop from x
+		for (; x + 1 < fb_w; x += 2)
+		{
+			if (!a[x] && !a[x + 1]) continue;
+			uint8_t *q = row_buf + 2 * x;
+			for (int k = 0; k < 2; k++)
+			{
+				unsigned al = a[x + k], vy = 16 + v[x + k] * 219 / 255;
+				q[2 * k] = (uint8_t)((q[2 * k] * (255 - al) + vy * al + 127) / 255);
+			}
+			unsigned acs = (a[x] + a[x + 1] + 1) / 2;
+			q[1] = (uint8_t)((q[1] * (255 - acs) + 128 * acs + 127) / 255);
+			q[3] = (uint8_t)((q[3] * (255 - acs) + 128 * acs + 127) / 255);
+		}
+	}
+#else
+	(void)x;
+	yuv_band(row_buf, y);
+#endif
+}
+#if defined(__arm__)
+#pragma GCC pop_options
+#endif
+
 // Picture line l of a DVD picture packed as YUYV. An interlaced picture's
 // 4:2:0 colour rows alternate between its two fields: line l takes the row
 // of its own field (2 * (l / 4) + l % 2), or the colour of fast motion
@@ -1917,13 +2008,22 @@ static void yuv_draw(void)
 	{
 		if (!core_rows) fb_blank(fb_mem, (size_t)fb_stride * fb_h);
 		else if (ovl_shown && ovl_a)
+		{
+			double tr = 0, tb = 0;
 			for (int y = ovl_y > 0 ? ovl_y : 0; y < fb_h; y++)
 			{
 				uint8_t *out = fb_mem + (size_t)y * fb_stride;
-				memcpy(row_buf, out, (size_t)fb_w * 2);
-				yuv_band(row_buf, y);
+				double t0 = now_seconds();
+				fb_read_row(row_buf, out, fb_w * 2);
+				double t1 = now_seconds();
+				yuv_band_fast(row_buf, y);
 				memcpy(out, row_buf, (size_t)fb_w * 2);
+				tb += now_seconds() - t1;
+				tr += t1 - t0;
 			}
+			od.pics++; od.read += tr; od.blend += tb;
+			od.w_pics++; od.w_read += tr; od.w_blend += tb;
+		}
 		return;
 	}
 	for (int y = core_rows; y < fb_h; y++)

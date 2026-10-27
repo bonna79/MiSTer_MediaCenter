@@ -141,6 +141,7 @@ static void zcp_open(AVCodecContext *ctx, int width, int half)
 	zcp_on = 1;
 	ctx->get_buffer2 = zcp_get_buffer;
 	memset(&zd, 0, sizeof(zd));
+	memset(&od, 0, sizeof(od));
 	fprintf(stderr, "mediacenter: zero-copy on (the core draws pictures handed over %d pictures before)\n", zcp_age);
 }
 
@@ -262,6 +263,11 @@ static void zcp_diag(double t)
 			"dal ARM %d troppo recenti e %d per altri motivi\n",
 			mc.clock, zd.w_core, zd.w_core ? 1000 * zd.w_wait / zd.w_core : 0, zd.w_core ? zd.w_cycles / zd.w_core / 108000.0 : 0,
 			zd.w_young, zd.w_other);
+	if (dd.on && od.w_pics)
+		printf("mediacenter: diag comandi sopra l'acceleratore %.0f s: %d immagini, rilettura %.1f ms, mescolamento e scrittura %.1f ms per immagine\n",
+			mc.clock, od.w_pics, 1000 * od.w_read / od.w_pics, 1000 * od.w_blend / od.w_pics);
+	od.w_pics = 0;
+	od.w_read = od.w_blend = 0;
 	zd.w_core = zd.w_young = zd.w_other = 0;
 	zd.w_wait = zd.w_cycles = 0;
 	zd.w_start = t;
@@ -273,6 +279,9 @@ static void zcp_report(void)
 	printf("mediacenter: diag zero-copy: %d immagini disegnate dal core (attesa media %.1f ms, lavoro del core %.1f ms), "
 		"dal ARM %d troppo recenti e %d per altri motivi, pagine spostate %d\n",
 		zd.core, zd.core ? 1000 * zd.wait / zd.core : 0, zd.core ? zd.cycles / zd.core / 108000.0 : 0, zd.young, zd.other, zd.moved);
+	if (od.pics)
+		printf("mediacenter: diag comandi sopra l'acceleratore: %d immagini, rilettura %.1f ms, mescolamento e scrittura %.1f ms per immagine\n",
+			od.pics, 1000 * od.read / od.pics, 1000 * od.blend / od.pics);
 }
 
 // Has the core draw lines 0..rows-1 of the frame buffer page at fb_mem from
