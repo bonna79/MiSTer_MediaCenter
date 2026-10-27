@@ -434,9 +434,14 @@ static int media_open(const char *path)
 		// the Video CD player.
 		if (svcd_on && st->codecpar->codec_id == AV_CODEC_ID_MPEG1VIDEO) w = h * 4.0 / 3.0;
 		video_aspect = fb_aspect = (h > 0 && w > 0) ? w / h : 4.0 / 3.0;
-		printf("mediacenter: %s, video %s %dx%d aspect %.3f, audio %s, %.0f s\n", path,
+		printf("mediacenter: %s, video %s %dx%d aspect %.3f, audio %s, %.0f s", path,
 			avcodec_get_name(st->codecpar->codec_id), mc.vdec->width, mc.vdec->height, video_aspect,
 			mc.adec ? avcodec_get_name(mc.adec->codec_id) : "none", mc.duration);
+		// the bitrate the file declares: all streams, and the video alone
+		// when the file says it
+		if (mc.fmt->bit_rate > 0) printf(", bitrate %.2f Mbit/s", mc.fmt->bit_rate / 1e6);
+		if (st->codecpar->bit_rate > 0) printf(" (video %.2f Mbit/s)", st->codecpar->bit_rate / 1e6);
+		printf("\n");
 	}
 	else
 	{
@@ -657,6 +662,10 @@ static struct
 	int n, over, skipped;
 	double w_sum, w_max, w_start; // current 10 s window
 	int w_n, w_over, w_skipped, w_shown, w_dropped;
+	// video bitrate: bytes of the packets sent to the decoder over their
+	// running time (one picture each), per window and its highest value
+	double bytes, w_bytes, rate_max;
+	int pkts, w_pkts;
 	// peaks: pictures over twice the time per picture, and the longest run
 	// of pictures in a row over the time per picture
 	int peaks, run, run_max, w_peaks, w_run_max;
@@ -673,10 +682,14 @@ static void dec_diag_reset(void)
 
 static int frames_shown, frames_dropped; // reported in the log
 
-static void dec_diag_add(double t0, double t1, int skipping)
+static void dec_diag_add(double t0, double t1, int skipping, int size)
 {
 	if (!dd.on) return;
 	if (!dd.w_start) dd.w_start = t0;
+	dd.bytes += size;
+	dd.w_bytes += size;
+	dd.pkts++;
+	dd.w_pkts++;
 	if (skipping)
 	{
 		dd.skipped++;
@@ -699,11 +712,16 @@ static void dec_diag_add(double t0, double t1, int skipping)
 	}
 	if (t1 - dd.w_start >= 10)
 	{
+		double rate = dd.w_pkts ? 8 * dd.w_bytes / (dd.w_pkts * dd.budget) : 0;
+		if (rate > dd.rate_max) dd.rate_max = rate;
 		printf("mediacenter: diag decoder %.0f s: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms, "
-			"%d saltate per recuperare; mostrate %d, scartate in ritardo %d; picchi oltre %.1f ms %d, serie piu' lunga oltre %.1f ms %d\n",
+			"%d saltate per recuperare; mostrate %d, scartate in ritardo %d; picchi oltre %.1f ms %d, serie piu' lunga oltre %.1f ms %d; "
+			"bitrate video %.2f Mbit/s\n",
 			mc.clock, dd.w_n, dd.w_n ? 1000 * dd.w_sum / dd.w_n : 0, 1000 * dd.w_max, dd.w_over, 1000 * dd.budget,
 			dd.w_skipped, frames_shown - dd.w_shown, frames_dropped - dd.w_dropped,
-			2000 * dd.budget, dd.w_peaks, 1000 * dd.budget, dd.w_run_max);
+			2000 * dd.budget, dd.w_peaks, 1000 * dd.budget, dd.w_run_max, rate / 1e6);
+		dd.w_bytes = 0;
+		dd.w_pkts = 0;
 		dd.w_peaks = dd.w_run_max = 0;
 		dd.w_shown = frames_shown;
 		dd.w_dropped = frames_dropped;
@@ -841,7 +859,7 @@ static void *video_thread(void *arg)
 			pthread_mutex_unlock(&vt.lock);
 			av_frame_unref(frame);
 		}
-		if (pkt) dec_diag_add(dec_t0, now_seconds(), skip != skip_base);
+		if (pkt) dec_diag_add(dec_t0, now_seconds(), skip != skip_base, pkt->size);
 
 		pthread_mutex_lock(&vt.lock);
 		if (!pkt) vt.drained = 1;
@@ -2409,6 +2427,9 @@ static int media_play(int in_playlist)
 		if (dd.on && dd.n)
 			printf("mediacenter: diag picchi: %d immagini decodificate oltre %.1f ms, serie piu' lunga oltre %.1f ms %d\n",
 				dd.peaks, 2000 * dd.budget, 1000 * dd.budget, dd.run_max);
+		if (dd.on && dd.pkts)
+			printf("mediacenter: diag bitrate video: medio %.2f Mbit/s, massimo in 10 s %.2f Mbit/s\n",
+				8 * dd.bytes / (dd.pkts * dd.budget) / 1e6, dd.rate_max / 1e6);
 		if (dd.on && ld.s_drawn)
 			printf("mediacenter: diag ciclo: %d giri oltre %.1f ms; disegno medio %.1f ms, di cui attesa pagina libera %.1f ms; coda vuota %d volte\n",
 				ld.s_slow, 1000 * dd.budget, 1000 * ld.s_draw / ld.s_drawn, 1000 * ld.s_wait / ld.s_drawn, ld.s_empty);
