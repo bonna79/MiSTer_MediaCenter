@@ -176,12 +176,13 @@ reg [12:0] mk_y;          // 6n
 reg [11:0] mk_c;          // 3n
 reg [63:0] ye_q, yo_q, ue_q, uo_q, ve_q, vo_q, ov_q;
 reg        mk_blend;      // the line being made has the controls
-reg        s2_v = 0, s3_v = 0, s4_v = 0;   // the steps after p1 (see "the controls")
-reg  [8:0] s2_n, s3_n, s4_n;
-reg [63:0] s2_d, s2_ov, s3_d;
-reg        s3_b, s4_b;
-reg [135:0] s3_p;         // 8 x 17 bits: (g - p) * a, signed
-reg [127:0] s3_k;         // 8 x 16 bits: 255 * p + 127
+reg        s2_v = 0, sa_v = 0, s3_v = 0, s4_v = 0;   // the steps after p1 (see "the controls")
+reg  [8:0] s2_n, sa_n, s3_n, s4_n;
+reg [63:0] s2_d, s2_ov, sa_d, sa_a, s3_d;
+reg        sa_b, s3_b, s4_b;
+reg [71:0] sa_g;          // 8 x 9 bits: g - p, signed
+reg [127:0] sa_k, s3_k;   // 8 x 16 bits: 255 * p + 127
+reg [103:0] s3_l, s3_h;   // 8 x 13 bits: (g - p) * low and high 4 bits of a, signed
 reg [127:0] s4_s;         // 8 x 16 bits: p * (255 - a) + g * a + 127
 reg        p1_v = 0;
 reg  [8:0] p1_n;
@@ -276,8 +277,9 @@ always @(posedge clk) begin
 end
 
 // ---------------------------------------------------------------- the controls
-// Three more steps for every word (also when no line has the controls):
-// s3 the products, s4 their sums, then the division by 255 into owd.
+// Four more steps for every word (also when no line has the controls):
+// sa coverage, grey - picture and 255 * picture, s3 the products (in two
+// halves of a), s4 their sums, then the division by 255 into owd.
 always @(posedge clk) begin
 	reg  [8:0] ac0, ac1;
 	reg [63:0] A, G;
@@ -290,16 +292,29 @@ always @(posedge clk) begin
 	G = {8'd128,   s2_ov[63:56], 8'd128,   s2_ov[47:40], 8'd128,   s2_ov[31:24], 8'd128,   s2_ov[15:8]};
 	for(int i = 0; i < 8; i++) begin
 		pb = s2_d[i*8 +: 8];
-		s3_p[i*17 +: 17] <= $signed({1'b0, G[i*8 +: 8]} - {1'b0, pb}) * $signed({1'b0, A[i*8 +: 8]});
-		s3_k[i*16 +: 16] <= {pb, 8'd0} - pb + 16'd127;
+		sa_g[i*9 +: 9]   <= {1'b0, G[i*8 +: 8]} - {1'b0, pb};
+		sa_k[i*16 +: 16] <= {pb, 8'd0} - pb + 16'd127;
 	end
-	s3_v <= s2_v;
-	s3_n <= s2_n;
-	s3_d <= s2_d;
-	s3_b <= mk_blend;
+	sa_a <= A;
+	sa_v <= s2_v;
+	sa_n <= s2_n;
+	sa_d <= s2_d;
+	sa_b <= mk_blend;
 
+	for(int i = 0; i < 8; i++) begin
+		s3_l[i*13 +: 13] <= $signed(sa_g[i*9 +: 9]) * $signed({1'b0, sa_a[i*8 +: 4]});
+		s3_h[i*13 +: 13] <= $signed(sa_g[i*9 +: 9]) * $signed({1'b0, sa_a[i*8 + 4 +: 4]});
+	end
+	s3_k <= sa_k;
+	s3_v <= sa_v;
+	s3_n <= sa_n;
+	s3_d <= sa_d;
+	s3_b <= sa_b;
+
+	// the sum is never negative and never above 65535: 16 bits are enough
 	for(int i = 0; i < 8; i++)
-		s4_s[i*16 +: 16] <= s3_b ? s3_k[i*16 +: 16] + s3_p[i*17 +: 16] : {s3_d[i*8 +: 8], 8'd0};
+		s4_s[i*16 +: 16] <= s3_b ? s3_k[i*16 +: 16] + {s3_h[i*13 +: 12], 4'd0} + {{3{s3_l[i*13 + 12]}}, s3_l[i*13 +: 13]}
+		                         : {s3_d[i*8 +: 8], 8'd0};
 	s4_v <= s3_v;
 	s4_n <= s3_n;
 	s4_b <= s3_b;
@@ -313,7 +328,7 @@ always @(posedge clk) begin
 	end
 end
 
-wire mk_busy = mk_on | p1_v | s2_v | s3_v | s4_v | owe;
+wire mk_busy = mk_on | p1_v | s2_v | sa_v | s3_v | s4_v | owe;
 
 // ---------------------------------------------------------------- the bus
 // output line word for the write: always the word at wr_idx
