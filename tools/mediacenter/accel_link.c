@@ -41,6 +41,8 @@
 #define ACC_V_OFF      (348160u * 8)
 #define ACC_SLOT_PAGES ((ACC_V_OFF + 544u * ACC_C_STRIDE + 4095) / 4096)
 #define ACC_ZC_TABLES  0xC0000u      // page tables of the slots, in the zero-copy mailbox (4 KB each)
+#define ACC_OVL_BASE   0x2F800000u   // the controls for mc_zc to blend (outside Linux, unused)
+#define ACC_OVL_LEN    0x80000u
 #define ACC_CHUNK      65536         // the write pointer moves at least this often
 #define ACC_L2_REGS    0xFFFEF000u   // PL310
 #define ACC_L2_SYNC    (0x730 / 4)
@@ -474,6 +476,16 @@ static int al_wait(const acc_buf_t *b)
 	}
 }
 
+// The controls blended by the core: see acc_ovl_prepare.
+static struct
+{
+	volatile uint64_t *map;
+	uint64_t *shadow, *line;
+	int valid, failed, y, w, rows;
+	unsigned gen;
+} ao;
+static int acc_ovl_on; // this picture: the core blends the controls
+
 // Starts the link for a file (the decoder is not running yet). 0 when the
 // core answered.
 static int al_open(char *why, size_t why_len)
@@ -521,6 +533,7 @@ static int al_open(char *why, size_t why_len)
 	}
 	al.fbase = acc.next_send;
 	al.up = 1;
+	ao.valid = 0;
 	memset(&al.w, 0, sizeof(al.w));
 	al.shown = al.late = al.lost = al.ring_waits = 0;
 	al.ring_wait_t = al.wait_t = 0;
@@ -671,6 +684,81 @@ static int acc_can21(void)
 	return acc_core21;
 }
 
+// The controls blended by the core (mc_zc, when mc_acc's answer says so,
+// word 20 bit 19): the player writes them at ACC_OVL_BASE, for each line of
+// the band one 64-bit word per 4 pixels, bytes a0 g0 a1 g1 a2 g2 a3 g3
+// (coverage, and grey 16 + v * 219 / 255 as yuv_band). Only the words that
+// changed are written (a copy of what is there is kept), and only when the
+// controls changed. MC_NOCOREOSD=1: the ARM blends them (yuv_band_fast).
+// (ao and acc_ovl_on: before al_open)
+
+#if defined(__arm__)
+#pragma GCC push_options
+#pragma GCC target("fpu=neon")
+#endif
+static int acc_ovl_prepare(void)
+{
+	if (!acc.on || !al.mb || !(al.mb[20] & 0x80000) || ao.failed) return 0;
+	const char *e = getenv("MC_NOCOREOSD");
+	if (e && atoi(e)) return 0;
+	int rows = fb_h - ovl_y, ow = fb_w / 4;
+	if (ovl_y < 0 || rows <= 0 || (fb_w & 3) || (size_t)ow * 8 * rows > ACC_OVL_LEN) return 0;
+	if (!ao.map)
+	{
+		ao.map = (volatile uint64_t *)al_map(ACC_OVL_BASE, ACC_OVL_LEN, NULL);
+		ao.shadow = (uint64_t *)malloc(ACC_OVL_LEN);
+		ao.line = (uint64_t *)malloc((size_t)ACC_OVL_LEN / 64);
+		if (!ao.map || !ao.shadow || !ao.line)
+		{
+			ao.failed = 1;
+			printf("mediacenter: diag comandi sopra l'acceleratore: memoria per il core non disponibile, li mescola il ARM\n");
+			return 0;
+		}
+	}
+	if (ao.valid && ao.gen == ovl_gen && ao.y == ovl_y && ao.w == fb_w && ao.rows == rows) return 1;
+	double t0 = now_seconds();
+	int all = !ao.valid || ao.y != ovl_y || ao.w != fb_w || ao.rows != rows;
+	for (int r = 0; r < rows; r++)
+	{
+		const uint8_t *a = ovl_a + (size_t)r * fb_w, *v = ovl_v + (size_t)r * fb_w;
+		uint8_t *l = (uint8_t *)ao.line;
+		int x = 0;
+#if defined(__arm__)
+		for (; x + 8 <= fb_w; x += 8)
+		{
+			uint8x8x2_t o;
+			o.val[0] = vld1_u8(a + x);
+			o.val[1] = grey_y(vld1_u8(v + x));
+			vst2_u8(l + 2 * x, o);
+		}
+#endif
+		for (; x < fb_w; x++)
+		{
+			l[2 * x] = a[x];
+			l[2 * x + 1] = (uint8_t)(16 + v[x] * 219 / 255);
+		}
+		uint64_t *s = ao.shadow + (size_t)r * ow;
+		volatile uint64_t *m = ao.map + (size_t)r * ow;
+		for (int k = 0; k < ow; k++)
+			if (all || s[k] != ao.line[k])
+			{
+				s[k] = ao.line[k];
+				m[k] = ao.line[k];
+			}
+	}
+	ao.valid = 1;
+	ao.gen = ovl_gen;
+	ao.y = ovl_y;
+	ao.w = fb_w;
+	ao.rows = rows;
+	od.prep += now_seconds() - t0;
+	od.w_prep += now_seconds() - t0;
+	return 1;
+}
+#if defined(__arm__)
+#pragma GCC pop_options
+#endif
+
 // zcp_draw for a picture of the accelerator: waits for the core to finish
 // it, then has the zero-copy block copy its slot. 1 when drawn.
 static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows)
@@ -720,7 +808,9 @@ static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows)
 	m[7] = 2 * ACC_Y_STRIDE;
 	m[8] = u_off;
 	m[9] = v_off;
-	m[10] = ACC_C_STRIDE | (n21 ? 1u << 17 : 0);
+	m[10] = ACC_C_STRIDE | (n21 ? 1u << 17 : 0) | (acc_ovl_on ? 1u << 18 : 0);
+	m[11] = ACC_OVL_BASE;
+	m[12] = (uint32_t)ovl_y;
 	m[0] = ZCP_MAGIC;
 	__sync_synchronize();
 	unsigned seq = ++zcp_seq;

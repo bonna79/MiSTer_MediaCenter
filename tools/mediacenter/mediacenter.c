@@ -1804,7 +1804,9 @@ static void yuv_band(uint8_t *row_buf, int y)
 // read back in 64-byte blocks into row_buf, blended there 16 pixels at a
 // time with NEON (same bytes as yuv_band) and written back.
 // Time spent, for "diag comandi sopra l'acceleratore".
-static struct { int pics, w_pics; double read, blend, w_read, w_blend; } od;
+// With a core that blends them (accel_link.c, acc_ovl_prepare) only the
+// preparation of what changed is counted.
+static struct { int pics, w_pics, core, w_core; double read, blend, w_read, w_blend, prep, w_prep; } od;
 
 #if defined(__arm__)
 #pragma GCC push_options
@@ -1994,6 +1996,8 @@ static void yuv_draw(void)
 	// a picture of the FPGA accelerator is only in the FPGA's memory: the
 	// core draws all of it and the controls are blended over it here
 	int accf = have_frame && f && acc.on && acc_buf_of(f);
+	// the core blends the controls over it (accel_link.c)
+	acc_ovl_on = accf && ovl_shown && ovl_a && ovl_y < fb_h && acc_ovl_prepare();
 	// exactly 2:1 (1920 on 960, the 4:3 format): the core narrows the
 	// accelerator's pictures too, when it can (acc_can21)
 	int narrow21 = narrow && f->width == w * 2 && !(w & 31) && acc_can21();
@@ -2004,10 +2008,13 @@ static void yuv_draw(void)
 		if (zcp_draw(f, rows)) core_rows = rows;
 	}
 	else if (accf) acc_fail_layout("the picture format is not drawn by the core");
+	int core_ovl = acc_ovl_on && core_rows;
+	acc_ovl_on = 0;
+	if (core_ovl) { od.core++; od.w_core++; }
 	if (accf)
 	{
 		if (!core_rows) fb_blank(fb_mem, (size_t)fb_stride * fb_h);
-		else if (ovl_shown && ovl_a)
+		else if (ovl_shown && ovl_a && !core_ovl)
 		{
 			double tr = 0, tb = 0;
 			for (int y = ovl_y > 0 ? ovl_y : 0; y < fb_h; y++)

@@ -266,8 +266,11 @@ static void zcp_diag(double t)
 	if (dd.on && od.w_pics)
 		printf("mediacenter: diag comandi sopra l'acceleratore %.0f s: %d immagini, rilettura %.1f ms, mescolamento e scrittura %.1f ms per immagine\n",
 			mc.clock, od.w_pics, 1000 * od.w_read / od.w_pics, 1000 * od.w_blend / od.w_pics);
-	od.w_pics = 0;
-	od.w_read = od.w_blend = 0;
+	if (dd.on && od.w_core)
+		printf("mediacenter: diag comandi sopra l'acceleratore %.0f s: %d immagini mescolate dal core, preparazione %.2f ms per immagine\n",
+			mc.clock, od.w_core, 1000 * od.w_prep / od.w_core);
+	od.w_pics = od.w_core = 0;
+	od.w_read = od.w_blend = od.w_prep = 0;
 	zd.w_core = zd.w_young = zd.w_other = 0;
 	zd.w_wait = zd.w_cycles = 0;
 	zd.w_start = t;
@@ -282,6 +285,9 @@ static void zcp_report(void)
 	if (od.pics)
 		printf("mediacenter: diag comandi sopra l'acceleratore: %d immagini, rilettura %.1f ms, mescolamento e scrittura %.1f ms per immagine\n",
 			od.pics, 1000 * od.read / od.pics, 1000 * od.blend / od.pics);
+	if (od.core)
+		printf("mediacenter: diag comandi sopra l'acceleratore: %d immagini mescolate dal core, preparazione %.2f ms per immagine\n",
+			od.core, 1000 * od.prep / od.core);
 }
 
 // Has the core draw lines 0..rows-1 of the frame buffer page at fb_mem from

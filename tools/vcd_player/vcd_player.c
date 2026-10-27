@@ -449,6 +449,7 @@ static double fb_par = 1.0;
 // picture. ovl_a is the coverage and ovl_v the grey level of each pixel.
 static int ovl_y = 0, ovl_h = 0, ovl_shown = 0;
 static uint8_t *ovl_a = NULL, *ovl_v = NULL;
+static unsigned ovl_gen; // counts the changes of ovl_a and ovl_v
 static uint32_t *full_line = NULL;
 
 static void fb_layout(int w, int h)
@@ -872,6 +873,7 @@ static void osd_layout(void)
 	ovl_h = fb_h - ovl_y;
 	ovl_a = (uint8_t *)calloc((size_t)fb_w * ovl_h, 1);
 	ovl_v = (uint8_t *)calloc((size_t)fb_w * ovl_h, 1);
+	ovl_gen++;
 	full_line = (uint32_t *)malloc((size_t)fb_w * 4);
 	if (!ovl_a || !ovl_v || !full_line) ovl_y = fb_h;
 }
@@ -1011,6 +1013,7 @@ static void osd_build(const osd_info_t *info)
 	memset(ovl_v, 0, (size_t)fb_w * ovl_h);
 	osd_draw(info);
 	ovl_smooth();
+	ovl_gen++;
 }
 
 // ---------------------------------------------------------------------------
