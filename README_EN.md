@@ -5,7 +5,7 @@
 > [!WARNING]
 > **WARNING: HDMI and CRT connected together.** If you use the HDMI output to an LCD TV and the VGA→SCART output to a CRT at the same time, plug **the MiSTer, the LCD TV and the CRT into the same power strip**. With the two TVs on different wall sockets, switching the CRT on while the MiSTer is running can send an electrical surge through the MiSTer via the cable grounds. It happened in a test: HDMI turned green for a few seconds, then the picture vanished on both outputs (the sound kept playing) and the pad stopped responding; a reboot was needed. If you cannot use the same power strip, **switch the CRT on before the MiSTer**.
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.0 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.5 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
 
@@ -38,6 +38,34 @@ The package is made of these parts:
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
 The player's on-screen texts are in Italian.
+
+## What's new in version 3.5
+
+3.5 completes 3.0's accelerator: the 1080p picture is cleaner, 1080p video at 30 pictures per second plays smoothly and the menu over the video no longer slows it down.
+
+- **Deblocking filter in the FPGA:** the menu core now also runs the filter H.264 uses to hide the edges of the blocks, and works out by itself how much to filter each edge: it costs the ARM nothing. The purple, green and yellow dots seen in fast scenes with snow are gone. `MC_NODEBLOCK=1` in `mediacenter.ini` turns it off (for comparisons only).
+- **Smooth 1080p at 30 pictures per second:** HTC.mp4 (1080p 29.97, 4.5 Mbit/s) goes from 12.4% of pictures not shown in 3.0 to 0.1%. The player reuses the screen pages sooner, writes the commands straight into the memory the FPGA reads, and keeps 24 pictures decoded ahead; at the start and after a seek it waits until they are ready (one second at most).
+- **Menu over 1080p without stutter:** the player's bar, menu and text over an accelerated video are blended by the menu core while it copies the picture. Before, the ARM did it, about 5 ms per picture, and at 30 pictures per second with the menu open a few pictures were dropped. Now the ARM spends 0.3 ms.
+- **Right after power-on the video waits for start-up to end:** for the first 30–40 seconds the MiSTer is still running its start-up scripts, and a 1080p started then stuttered. Now the player shows "La MiSTer sta finendo l'avvio" with the seconds gone by and starts the video by itself when start-up is over (60 seconds at most); B goes back. If the MiSTer has been on for longer the video starts at once. `MC_NOBOOTWAIT=1` removes the wait.
+- **The video comes before the other programs** while it plays; at the end everything goes back as before. `MC_NOPRIO=1` removes it.
+- **MiSTer Remote paused during the video:** in the first minutes after power-on it catalogues the games and took 20–30% of the CPU. The player pauses it while a video plays and starts it again at the end. `MC_NOPAUSE=1` leaves it alone.
+- **Diagnostics in the log:** the video's bitrate, the decoder's peaks, the time to draw each picture, the other programs using the CPU and the controls blended by the core.
+- **New picture** reading Ver. 3.5, with the build number at the bottom.
+
+**How far 1080p goes.** With the accelerator the ARM still has to parse the H.264 stream, and its work grows with the video's bitrate. From the tests, the limits for a smooth video are about **6 Mbit/s at 30 pictures per second**, **8.5–9 Mbit/s at 25** and **9–9.5 Mbit/s at 24**: estimates worked out from the measurements, not each one tested. Beyond that the video plays but with many pictures not shown (a 1080p at 30 pictures per second and 11 Mbit/s loses about two in three; the sound stays clean). Going beyond the ARM would need the stream to be parsed in the FPGA: a goal for version 4.0.
+
+Tested on a real MiSTer on 25–28 October 2026, on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together:
+
+| Test | Result |
+| --- | --- |
+| HTC.mp4, 1080p 29.97, 4.5 Mbit/s, 147 s, with the menu opened several times | 0.1% of pictures not shown (3.0: 12.4%), no picture lost by the FPGA; menu clean on HDMI and CRT |
+| HTC.mp4 right after power-on | 18 s waiting for start-up to end, then 0.3% of pictures not shown (without the wait: 6.8%) |
+| One Piece Episode 940, 1080p 23.976 | 0.3% of pictures not shown, ARM 7.9 ms per picture on average |
+| Snow scenes of HTC.mp4 | The coloured dots seen without the deblocking filter are gone |
+| 1080p 29.97 at 6 Mbit/s | 0.3% of pictures not shown: the limit at 30 pictures per second |
+| 1080p 29.97 at 11 Mbit/s | 64.7% of pictures not shown, sound clean: beyond the limit |
+
+The technical details are in the [accelerator's technical sheet](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md).
 
 ## What's new in version 3.0
 
@@ -478,6 +506,9 @@ MC_CRT_VPOS=2
 | `MC_FIELDS=1` | Interlaced DVDs and videos: the player does not blend the two fields. The CRT gets them whole, as from a real DVD player (sharper and smoother in motion); on HDMI the Main's scaler blends them, with no combing. Recommended with a CRT. Without this line the player blends the lines for both outputs |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
 | `MC_NOACC=1` | Turns off the 3.0 H.264 accelerator: 1080p videos are decoded by the ARM as in 2.8 |
+| `MC_NOBOOTWAIT=1` | Right after power-on the video starts without waiting for the MiSTer's start-up to end |
+| `MC_NOPRIO=1` | The video does not come before the other programs |
+| `MC_NOPAUSE=1` | MiSTer Remote is not paused during the video |
 | `MC_VCD_OLD=1` | Video CDs from the drive with the old Video CD player, as in 2.8 (side bars on the CRT) |
 | `MC_NOZC=1` | 1080p videos without the accelerator: the ARM copies the picture instead of the menu core (zero-copy off) |
 | `MC_MENU_HD=1` | Lists at 1280x720 as in version 2.1, instead of drawn for the CRT |
@@ -531,6 +562,8 @@ Open a report on the [Issues](../../issues) page and attach:
 | `MC_DEBUG=1` | Logs DVD navigation events |
 | `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking, above 720 lines half of the lines enlarged by the FPGA scaler and, above 30 fps, only reference pictures) |
 | `MC_ACC_RING=so` | Accelerator: the command ring in a fixed memory area instead of the player's pages (to compare times) |
+| `MC_NODEBLOCK=1` | Accelerator: the FPGA does not run the deblocking filter, as in 3.0 (for comparisons) |
+| `MC_NOCOREOSD=1` | Accelerator: the ARM blends the player's controls over the picture instead of the core (for comparisons) |
 | `MC_ACC_COPY=1` | Accelerator: every picture is copied into the command ring, as before, instead of being written straight into it (to compare times) |
 | `MC_TEST=...` | Runs without screen or controller: simulated keys, pictures saved to `/tmp/mc_<seconds>.ppm`. With a `.cue` file it plays a Super Video CD image as if it were in the drive |
 
