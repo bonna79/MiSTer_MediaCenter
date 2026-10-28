@@ -1,6 +1,6 @@
 # Technical sheet: the H.264 accelerator in the FPGA of MiSTer MediaCenter
 
-*Version 3.0, updated on 26 October 2026 with the deblocking filter in the FPGA, which is not in a release yet. In Italian: [SCHEDA_TECNICA_ACCELERATORE_IT.md](SCHEDA_TECNICA_ACCELERATORE_IT.md).*
+*Version 3.5, updated on 28 October 2026: deblocking filter in the FPGA, the player's controls blended by the core, waiting for the end of start-up, measured bitrate limits. In Italian: [SCHEDA_TECNICA_ACCELERATORE_IT.md](SCHEDA_TECNICA_ACCELERATORE_IT.md).*
 
 This sheet is for programmers who want to understand, change or improve the accelerator, even starting again from scratch. It explains:
 - how the accelerator splits the work between the MiSTer's ARM processor and its FPGA;
@@ -27,7 +27,7 @@ A **1920x1080 H.264** video needs about **44 ms per picture** on the ARM, but at
 | FPGA (the engine in the menu core) | Rebuilds the pixels: 4x4/8x8 inverse transform, intra prediction, motion compensation with 6-tap filters and weights, residual add, deblocking filter with the edge strengths worked out in the core, writing the picture to memory | It is the part with many identical calculations in parallel: hardware does it well |
 | FPGA (the zero-copy block) | Copies the finished picture into the frame buffer, narrowing it to 1280 or 960 pixels | So the ARM never touches the pixels again |
 
-With this split the ARM needs on average **5–15 ms per picture** for a 1080p at 23.976 pictures per second, and the FPGA about 20–33 ms in heavy scenes, in parallel with the ARM. For a very heavy 1080p at 29.97 pictures per second (HTC.mp4) the ARM needs about 25 ms of 33.4 on average and a third of the pictures go over: there the ARM is the limit, not the FPGA (chapter 11).
+With this split the ARM needs on average **5–15 ms per picture** for a 1080p at 23.976 pictures per second, and the FPGA about 20–33 ms in heavy scenes, in parallel with the ARM. For a 1080p at 29.97 pictures per second (HTC.mp4, 4.5 Mbit/s) the ARM needs about 28 ms of 33.4 on average: it plays, with little room to spare. There the ARM is the limit, not the FPGA, and its work grows with the video's bitrate (chapter 11).
 
 **Limits today:**
 - only 8-bit, 4:2:0, progressive H.264, 1920 pixels wide;
@@ -95,7 +95,8 @@ The ARM and the FPGA share the 1 GB DDR3. Linux uses the first 512 MB; the rest 
 | `0x00000000`–`0x1FFFFFFF` | Linux memory. Also holds the command ring (normal mode) and the decoder's pictures for zero-copy without the accelerator. | ARM | ARM, FPGA (by pages) |
 | `0x22000000`–`0x237BB000` | The Main's frame buffer (3 pages for video) | `mc_zc`, ARM | HDMI scaler, `mc_out` |
 | `0x23E00000` | **`mc_acc` mailbox**: words 0–4 from the player, 16–25 the core's answer. At `+0x1000` the ring page table (one word per 4 KB page). | ARM / `mc_acc` | `mc_acc` / ARM |
-| `0x23F00000` | **`mc_zc` mailbox**: words 0–10 from the player, 16–18 answer. At `+0x1000` the page tables of the decoder's pictures (8 KB each). At `+0xC0000` the tables of the accelerator's 64 slots (4 KB each). | ARM / `mc_zc` | `mc_zc` / ARM |
+| `0x23F00000` | **`mc_zc` mailbox**: words 0–12 from the player, 16–18 answer. At `+0x1000` the page tables of the decoder's pictures (8 KB each). At `+0xC0000` the tables of the accelerator's 64 slots (4 KB each). | ARM / `mc_zc` | `mc_zc` / ARM |
+| `0x2F800000`–`0x2F87FFFF` | **The player's controls** to blend over the picture (512 KB outside Linux): one 64-bit word for each `mc_zc` output word (chapter 7) | ARM | `mc_zc` |
 | `0x2FC00000`–`0x2FFFFFFF` | Command ring in `MC_ACC_RING=so` mode (4 MB outside Linux) | ARM | `mc_acc` |
 | `0x30000000`–`0x3FFFFFFF` | **64 slots of 4 MB**: the pictures rebuilt by the engine | engine | engine (references), `mc_zc` |
 
@@ -192,7 +193,7 @@ The full command format is in [`accel/doc/comandi.md`](../accel/doc/comandi.md) 
 | 17 | core | session being run |
 | 18 | core | bytes read from the ring: the ARM may write over them |
 | 19 | core | pictures finished |
-| 20 | core | bit 0: unexpected command; bit 1: the memory never answered; bits 15:8: last slot; bit 16: `mc_zc` can narrow 2:1; bit 18: the core does deblocking (3-word `A5` command) |
+| 20 | core | bit 0: unexpected command; bit 1: the memory never answered; bits 15:8: last slot; bit 16: `mc_zc` can narrow 2:1; bit 18: the core does deblocking (3-word `A5` command); bit 19: `mc_zc` can blend the player's controls over the picture |
 | 21 | core | clocks between the last two finished pictures |
 | 22 | core | of those, clocks with no commands to read |
 | 23 | core | of those, clocks waiting for the memory |
@@ -219,7 +220,7 @@ The rebuilt pictures, instead, live outside Linux: the ARM never reads them, so 
 
 ### Sending, waiting, drawing
 
-- **`al_send()`** copies a picture's commands into the ring when there is room. If the ring stays full for more than 1 s, or the core reports an error, the accelerator stops.
+- **The commands go straight into the ring.** When it is a picture's turn (all the earlier ones sent), FFmpeg writes its commands straight into the ring, after copying what it had already written into the picture's buffer. Pictures not yet due stay in their buffer, and **`al_send()`** copies them into the ring when there is room. In the log: `scritte direttamente nell'anello X%`. If the ring stays full for more than 1 s, or the core reports an error, the accelerator stops.
 - **`al_wait()`** waits for the finished-picture counter (word 19) to reach the picture to show. It waits at most 0.5 s: after 3 empty waits in a row the player goes back to the normal decoder.
 - **`acc_zc_draw()`** fills the zero-copy mailbox:
   - frame buffer page;
@@ -228,7 +229,8 @@ The rebuilt pictures, instead, live outside Linux: the ARM never reads them, so 
   - words per line;
   - Y, U and V offsets in the slot (it allows for FFmpeg's cropping);
   - Y step (2 rows, since half the lines are made);
-  - the 2:1 bit when the frame buffer is 960 wide.
+  - the 2:1 bit when the frame buffer is 960 wide;
+  - when the player's controls are on screen and the core can blend them, bit 18 of word 10, the controls' address (word 11) and the first line that has them (word 12).
 
   Then it writes a new sequence number and waits for the core to repeat it in word 18 of its answer.
 
@@ -245,7 +247,9 @@ The rebuilt pictures, instead, live outside Linux: the ARM never reads them, so 
 | 6 | Y offset |
 | 7 | Y bytes between two output lines |
 | 8, 9 | U and V offsets |
-| 10 | U/V bytes between two output lines; bit 16: chroma line = output line / 2; bit 17: narrow 2:1 instead of 3:2 |
+| 10 | U/V bytes between two output lines; bit 16: chroma line = output line / 2; bit 17: narrow 2:1 instead of 3:2; bit 18: blend the player's controls |
+| 11 | physical address of the player's controls (`0x2F800000`, a multiple of 8) |
+| 12 | bits 15:0: first output line with the controls; from there to the last line |
 | 16 | clocks spent (answer) |
 | 17 | 0 done, 1 refused (bad values) |
 | 18 | sequence done (written last) |
@@ -310,6 +314,16 @@ Picture and slice commands wait for stage B to be idle.
   - **2:1** (1920 → 960): the average of two pixels.
 - Writes the YUYV line into the frame buffer. It has two line buffers that take turns.
 
+### The player's controls over the picture (build 162)
+
+When the player shows its controls (bar, menu, text) over an accelerator picture, the core blends them, not the ARM. Before, the ARM read the controls' band back from the frame buffer and blended it again for every picture: about 5 ms per picture even with NEON (build 161), and 1080p at 30 pictures per second dropped pictures while the menu was open.
+
+- **The player** (`acc_ovl_prepare()` in `accel_link.c`) writes the controls at `0x2F800000`: for each output word (4 dots, `Y0 U Y1 V Y2 U Y3 V`) one 64-bit word holding, for each of the 4 dots, the coverage `a` (0–255) and the grey `g` = 16 + v × 219 / 255. It writes only the words that changed (compared with a copy), and only when the controls change: 0.3 ms per picture on average.
+- **`mc_zc`**, in the lines from word 12 down, also reads the controls' line (segment 3, direct physical address, no page table) and blends each byte with the player's formula (`yuv_band`): `Y = (p × (255 − a) + g × a + 127) / 255`; for U and V the grey is 128 and the coverage is the mean of the two dots, `(a0 + a1 + 1) / 2`. The division by 255 is done as `(x + 1 + x / 256) / 256`, exact for every value used.
+- **The pipeline** has four steps after the narrowing, always there even without controls: coverage, grey minus dot and 255 × dot; the products, split into the two halves of the coverage (low and high 4 bits) to fit 108 MHz; the sum; the division. The products are in logic: the DSPs are for the HDMI scaler.
+- The result is **bit-for-bit identical** to the player's (simulated with Icarus Verilog against the earlier `mc_zc` plus `yuv_band`, 3:2 and 2:1 narrowing, controls from mid-picture, from line 0, and off).
+- The core says so with bit 19 of `mc_acc` word 20. With an older core, or with `MC_NOCOREOSD=1`, the ARM blends with NEON as in build 161. In the log: `diag comandi sopra l'acceleratore N s: X immagini mescolate dal core, preparazione Y ms per immagine`.
+
 ### Then: colours and outputs
 
 The YUYV 4:2:2 frame buffer is converted to RGB inside the core (frame buffer format, bit 5). Then:
@@ -357,6 +371,7 @@ The player flips pages with `fb_cmd3 page <n>`.
 - **A format the core cannot draw** (for example a 720-wide frame buffer for a format chosen with Start): the accelerator stops only while it lasts (`acc_file_off = 2`). When the format can be drawn again for at least 1 s, `acc_resume()` turns it back on.
 - **`MC_NOACC=1`** in `/media/fat/linux/mediacenter.ini`: the accelerator never turns on.
 - **`MC_NODEBLOCK=1`**: the accelerator stays on but the FPGA does not filter (as 3.0). Only for comparisons.
+- **`MC_NOCOREOSD=1`**: the ARM blends the player's controls over the picture instead of the core (as build 161). Only for comparisons.
 - **A core without the filter** (3.0's, for example): bit 18 of word 20 is missing, the player sends no `A5` and the log says `deblocking no (core senza filtro)`.
 - **A core without the accelerator:** the session gets no answer and the player uses the normal decoder.
 
@@ -389,17 +404,36 @@ The `diag decoder` and `diag zero-copy` lines tell how hard the rest of the play
 
 The `diag altri programmi N s: ... (altri in tutto X%)` line, every 10 s, names the other programs that took more than 5% of the CPU and how much they all took together (from `/proc/stat`, short-lived commands included). It shows whether a slowdown comes from outside. For this reason the player pauses MiSTer Remote (`remote.sh`, installed by update_all) while a video plays and starts it again at the end (`in pausa durante il video` and `ripartito dopo il video` lines). It looks for it every 10 s, because it starts only once the wifi is up, about half a minute after power-on. In the first minutes after power-on it catalogues the games and took 20–30% of the CPU. `MC_NOPAUSE=1` leaves it alone.
 
+### Right after power-on
+
+For the first 30–40 seconds after power-on the MiSTer is still running its start-up scripts (`rcS`: network, USB, `udevd`), which took up to 39% of the CPU. A 1080p started then stuttered for its first 60 seconds (HTC.mp4: 6.8% of pictures not shown). So:
+
+- **The video waits for start-up to end** (build 160). If the MiSTer has been on for less than 180 s and an `rcS` process is still there (not a zombie and not one of the player's parents), the player shows "La MiSTer sta finendo l'avvio" with the seconds gone by, and waits for the scripts to end, plus 2 s; 60 s at most. The B button goes back. It applies to files, DVDs, Video CDs and Super Video CDs in the drive. In the log: `attesa fine avvio X s (motivo)` or `avvio della MiSTer gia' finito (accesa da N s)`. **`MC_NOBOOTWAIT=1`** turns it off.
+- **The video comes before the other programs.** While a video plays, the player's threads go to `nice -10`; the loop that reads the file and sends the sound, and `aplay`, to `-15`, so they stay ahead of the decoders. If the kernel uses autogroups, the player's group goes to -10 too. At the end everything goes back to 0. In the log: `precedenza al video sugli altri programmi (N processi e thread, gruppo si/no/non usato)`. **`MC_NOPRIO=1`** turns it off.
+
+With the wait, HTC.mp4 right after power-on went from 6.8% to 0.3% of pictures not shown.
+
 ---
 
 ## 11. Performance and resources (with deblocking, October 2026)
 
 | Measure | Value |
 | --- | --- |
-| Menu core with the accelerator and deblocking | 73% of the logic (ALM; 55% in 3.0), 35% of the internal memory blocks (20% of the bits), 85% of the DSPs (95 of 112) |
-| Clock | 108 MHz (`clk_sys`). With deblocking, timing is tight: of fitter seeds 1–9 only **seed 4** (`menu.qsf`) meets it both at 100 °C (+0.003 ns) and at -40 °C (+0.082 ns); HDMI +0.288 ns |
+| Menu core with the accelerator, deblocking and the blending of the controls | 75% of the logic (ALM; 55% in 3.0), 36% of the internal memory blocks (21% of the bits), 85% of the DSPs (95 of 112) |
+| Clock | 108 MHz (`clk_sys`). Timing is tight: of fitter seeds 1 and 3–9 only **seed 1** (`menu.qsf`, +0.346 ns at 100 °C, +0.129 ns at -40 °C; HDMI +0.295 ns) and seed 8 (+0.031 ns) meet it at both corners |
 | Engine alone (synthesis `accel/syn`, phase 3, without deblocking) | about 12.9k ALM (31%), 39 DSP, 30 M10K blocks, Fmax about 112 MHz |
 | One Piece 1080p 23.976 on the MiSTer | 3.0: 238 s without seeks, 5724 pictures by the FPGA, 0 lost, 0 late, ARM 5–13 ms. With deblocking: 144 s, 0.3% of pictures not shown, ARM 7.9 ms on average |
-| HTC.mp4, 1080p 29.97, very heavy | With deblocking: 147 s, 12.4% of pictures not shown (3.0 without the filter: 12.4%), FPGA about 23 ms per picture, 0 lost, 0 late; ARM 25.7 ms on average, 34% over 33.4 ms. The purple, green and yellow dots seen in the snow scenes without the filter are gone |
+| HTC.mp4, 1080p 29.97, 4.5 Mbit/s | With deblocking: the purple, green and yellow dots seen in the snow scenes without the filter are gone. Build 162 (with the menu opened several times): 147 s, **0.1%** of pictures not shown, 3 dropped late, drawing 10.3 ms per picture, FPGA 0 lost and 0 late; ARM 28.5 ms on average. It was 12.4% in 3.0: it came down with a frame buffer page reused 1.5 CRT frames after it was shown instead of 65 ms (build 151), the commands written straight into the ring (152) and 24 pictures decoded ahead, with the start waiting for them (154) |
+
+**Bitrate.** With the accelerator, the work left to the ARM is parsing the H.264 stream (CABAC), and it grows with the bitrate: about 18 ms of base plus about 2.5 ms per Mbit/s, in the 1080p tests of 27 October:
+
+| 1080p 29.97 video | Bitrate | ARM on average | Pictures not shown |
+| --- | --- | --- | --- |
+| HTC.mp4 | 4.5 Mbit/s | 28.5 ms | 0.1% |
+| 6 Mbit/s test | 6.0 Mbit/s | 33.2 ms (at the 33.4 limit) | 0.3% |
+| 11 Mbit/s test | 10.5–14.3 Mbit/s | 51.7 ms | 64.7% (sound clean, FPGA idle waiting) |
+
+The limits for a fluid video, worked out from these measurements (estimates, not each one tested): **about 6 Mbit/s at 30 pictures per second, 8.5–9 at 25, 9–9.5 at 24**. Beyond that, CABAC would have to be parsed in the FPGA, together with the motion vectors and predictions that depend on it: a goal for version 4.0.
 
 The filter in the FPGA costs the ARM no time: the core works out the edge strengths. A first version worked them out on the ARM (+25–35% of stream parsing work) and took HTC.mp4 to 53% of pictures not shown.
 
@@ -454,7 +488,7 @@ Every change to the engine must stay **bit-exact** with FFmpeg on all test video
 
 ## 14. What can be improved
 
-- **1080p at 30 pictures per second**: in very heavy files (HTC.mp4) about 12% of the pictures are not shown because the ARM, just parsing the H.264 stream, goes over 33.4 ms for a third of the pictures. The FPGA has room left. The only gain is in lightening the ARM's work (more compact commands, for example).
+- **1080p above about 6 Mbit/s at 30 pictures per second** (9 Mbit/s at 24): the ARM, just parsing the H.264 stream, no longer fits in one picture's time (chapter 11). The FPGA has room left. For 4.0: CABAC in the FPGA together with the motion vectors and predictions.
 - **Less memory waiting**: up to about 19 ms per picture in heavy scenes. Longer bursts for the reference windows, reusing windows between neighbouring regions and better-suited `mc_bus` turns could help.
 - **Other formats:** widths other than 1920 (1440, 1280), interlaced H.264 (MBAFF/PAFF), 10-bit; each needs changes to the commands and the engine.
 - **More compact commands**: about 1 MB per picture today; less data means less ARM and memory time.
