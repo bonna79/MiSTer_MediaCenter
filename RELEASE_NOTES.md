@@ -22,7 +22,7 @@
 
 **Fin dove arriva il 1080p:** fluido fino a circa 6 Mbit/s a 30 immagini al secondo e 9 Mbit/s a 24 (stime dalle prove). Oltre, l'ARM non fa in tempo a leggere il flusso H.264: leggerlo nell'FPGA è un obiettivo per la 4.0.
 
-Provata su un MiSTer vero il 25–28 ottobre 2026 su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme: HTC.mp4 1080p 29,97 con il menu aperto più volte 0,1% di immagini non mostrate e menu pulito su HDMI e CRT; HTC.mp4 subito dopo l'accensione 0,3% dopo 18 s di attesa (prima 6,8%); One Piece 1080p 23,976 0,3%. Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-35) e nella [scheda tecnica](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/docs/SCHEDA_TECNICA_ACCELERATORE_IT.md).
+Provata su un MiSTer vero il 25–28 ottobre 2026 su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme: HTC.mp4 1080p 29,97 con il menu aperto più volte 0,0–0,1% di immagini non mostrate e menu pulito su HDMI e CRT; HTC.mp4 subito dopo l'accensione 0,3% dopo 18 s di attesa (prima 6,8%); One Piece 1080p 23,976 0,3%. Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-35) e nella [scheda tecnica](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/docs/SCHEDA_TECNICA_ACCELERATORE_IT.md).
 
 Le novità della 3.0 (acceleratore H.264 nell'FPGA) e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-30).
 
@@ -63,7 +63,7 @@ Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0
 
 **How far 1080p goes:** smooth up to about 6 Mbit/s at 30 pictures per second and 9 Mbit/s at 24 (estimates from the tests). Beyond that the ARM cannot parse the H.264 stream in time: parsing it in the FPGA is a goal for 4.0.
 
-Tested on a real MiSTer on 25–28 October 2026 on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together: HTC.mp4 1080p 29.97 with the menu opened several times 0.1% of pictures not shown and the menu clean on HDMI and CRT; HTC.mp4 right after power-on 0.3% after 18 s of waiting (before 6.8%); One Piece 1080p 23.976 0.3%. Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-35) and the [technical sheet](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/docs/TECHNICAL_SHEET_ACCELERATOR_EN.md).
+Tested on a real MiSTer on 25–28 October 2026 on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together: HTC.mp4 1080p 29.97 with the menu opened several times 0.0–0.1% of pictures not shown and the menu clean on HDMI and CRT; HTC.mp4 right after power-on 0.3% after 18 s of waiting (before 6.8%); One Piece 1080p 23.976 0.3%. Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-35) and the [technical sheet](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/docs/TECHNICAL_SHEET_ACCELERATOR_EN.md).
 
 What's new in 3.0 (the H.264 accelerator in the FPGA) and in earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-30).
 

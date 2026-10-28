@@ -62,8 +62,10 @@ Tested on a real MiSTer on 25–28 October 2026, on a Sony Trinitron CRT (SCART 
 | HTC.mp4 right after power-on | 18 s waiting for start-up to end, then 0.3% of pictures not shown (without the wait: 6.8%) |
 | One Piece Episode 940, 1080p 23.976 | 0.3% of pictures not shown, ARM 7.9 ms per picture on average |
 | Snow scenes of HTC.mp4 | The coloured dots seen without the deblocking filter are gone |
-| 1080p 29.97 at 6 Mbit/s | 0.3% of pictures not shown: the limit at 30 pictures per second |
+| 1080p 29.97 at 6 Mbit/s | 0.3–1.4% of pictures not shown depending on the run: the limit at 30 pictures per second |
 | 1080p 29.97 at 11 Mbit/s | 64.7% of pictures not shown, sound clean: beyond the limit |
+| 720p H.264, One Piece Episode 938, 166 s | 0.3% of pictures not shown, as in 3.0 (no accelerator) |
+| PAL DVD, Star Wars Episode III | 576i 50 Hz on the CRT, menu and film as in 3.0 |
 
 The technical details are in the [accelerator's technical sheet](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md).
 

@@ -60,8 +60,10 @@ Provata su un MiSTer vero il 25–28 ottobre 2026, su CRT Sony Trinitron (SCART 
 | HTC.mp4 subito dopo l'accensione | Attesa della fine dell'avvio di 18 s, poi 0,3% di immagini non mostrate (senza attesa: 6,8%) |
 | One Piece Episodio 940, 1080p 23,976 | 0,3% di immagini non mostrate, ARM 7,9 ms per immagine in media |
 | Scene con la neve di HTC.mp4 | Spariti i punti colorati che si vedevano senza il filtro anti-blocchi |
-| 1080p 29,97 a 6 Mbit/s | 0,3% di immagini non mostrate: è il limite a 30 immagini al secondo |
+| 1080p 29,97 a 6 Mbit/s | 0,3–1,4% di immagini non mostrate secondo la prova: è il limite a 30 immagini al secondo |
 | 1080p 29,97 a 11 Mbit/s | 64,7% di immagini non mostrate, audio pulito: oltre il limite |
+| 720p H.264, One Piece Episodio 938, 166 s | 0,3% di immagini non mostrate, come nella 3.0 (senza acceleratore) |
+| DVD PAL, Star Wars Episodio III | 576i 50 Hz sul CRT, menu e film come nella 3.0 |
 
 I dettagli tecnici sono nella [scheda tecnica dell'acceleratore](docs/SCHEDA_TECNICA_ACCELERATORE_IT.md).
 
