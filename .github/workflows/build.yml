@@ -75,15 +75,16 @@ jobs:
             dvdcss/libdvdcss.so.2
             Scripts/mediacenter.sh
 
-      # The menu core is compiled by fpga.yml (Quartus, only when fpga/ changes):
-      # the release takes its latest successful build.
+      # The menu core is compiled by fpga.yml (Quartus, only when fpga/ changes).
+      # The release takes the core build the user tested, by its run id: the
+      # fit changes with the build date (sys/build_id.tcl), so a new build of
+      # the same sources can miss timing. 3.5: fpga.yml run 40 (seed 1).
       - name: Fetch the menu core
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         uses: dawidd6/action-download-artifact@v6
         with:
           workflow: fpga.yml
-          branch: main
-          workflow_conclusion: success
+          run_id: 40599751430
           name: mediacenter_rbf
           path: rbf
 
