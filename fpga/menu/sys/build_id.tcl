@@ -5,7 +5,15 @@
 proc generateBuildID_Verilog {} {
 
 	# Get the timestamp (see: http://www.altera.com/support/examples/tcl/tcl-date-time-stamp.html)
-	set buildDate "`define BUILD_DATE \"[clock format [ clock seconds ] -format %y%m%d]\""
+	set dateText [clock format [ clock seconds ] -format %y%m%d]
+	# MediaCenter: a fixed date from build_date.txt, so the same sources always
+	# give the same core (the date is in the design and changes the fit).
+	if { [file exists "build_date.txt"] } {
+		set dateFile [open "build_date.txt" "r"]
+		set dateText [string trim [read $dateFile]]
+		close $dateFile
+	}
+	set buildDate "`define BUILD_DATE \"$dateText\""
 
 	# Create a Verilog file for output
 	set outputFileName "build_id.v"

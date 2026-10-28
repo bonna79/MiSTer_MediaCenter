@@ -26,6 +26,8 @@ jobs:
           docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
             quartus_sta -t timing.tcl 2>&1 | grep -v "^Info (332" | tail -120 || true
           cp fpga/menu/output_files/menu.rbf menu_mediacenter.rbf
+          # to check that the same sources give the same core
+          cat fpga/menu/build_id.v; echo; md5sum menu_mediacenter.rbf
 
       - uses: actions/upload-artifact@v4
         with:
