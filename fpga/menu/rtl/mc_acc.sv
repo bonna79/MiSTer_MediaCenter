@@ -20,6 +20,9 @@
 //  18 bytes read from the ring     19 pictures finished
 //  20 [0] unexpected command [1] memory never answered [15:8] last slot
 //     [16] 1: mc_zc can also narrow by 2:1 (core 3.0 test builds on)
+//     [17] 0 (core of phase 4: deblocking with the strengths from the ARM)
+//     [18] 1: the engine filters, working out the strengths (command A5 of 3 words)
+//     [19] 1: mc_zc blends the player's controls (mailbox word 10 bit 18)
 //  21 clocks between the last two finished pictures
 //  22 of them, clocks the engine had no command to read
 //  23 of them, clocks the engine waited for the memory
@@ -259,7 +262,7 @@ function [63:0] ans_word(input [2:0] i);
 	ans_word =
 		i == 0 ? {session, OKAY} :
 		i == 1 ? {pics, rd_done} :
-		i == 2 ? {l_since, 15'd0, 1'b1, l_slot, 6'd0, dead, err} :
+		i == 2 ? {l_since, 12'd0, 4'b1101, l_slot, 6'd0, dead, err} :
 		i == 3 ? {l_mwait, l_starve} :
 		         {clocks, e_mbs};
 endfunction

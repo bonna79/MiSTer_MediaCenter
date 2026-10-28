@@ -1,15 +1,20 @@
 // Test bench helper (host): decodes an H.264 file with the patched FFmpeg
 // (ffmpeg-accel-dump.patch) the way the player does in light mode, but with
 // one thread, and writes the FPGA commands and the expected pictures:
-//   accdump <file> <prefix> [pictures]
+//   accdump [-d] <file> <prefix> [pictures]
+// -d: with FFmpeg's deblocking, as the player with the FPGA deblocking filter
+// (commands A5, deblocked pictures)
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 
 int main(int argc, char **argv)
 {
-	if (argc < 3) { fprintf(stderr, "usage: accdump <file> <prefix> [pictures]\n"); return 1; }
+	int dbk = argc > 1 && !strcmp(argv[1], "-d");
+	if (dbk) { argc--; argv++; }
+	if (argc < 3) { fprintf(stderr, "usage: accdump [-d] <file> <prefix> [pictures]\n"); return 1; }
 	int maxpics = argc > 3 ? atoi(argv[3]) : 0;
 	AVFormatContext *fmt = NULL;
 	if (avformat_open_input(&fmt, argv[1], NULL, NULL) < 0 || avformat_find_stream_info(fmt, NULL) < 0) return 1;
@@ -20,7 +25,7 @@ int main(int argc, char **argv)
 	AVCodecContext *ctx = avcodec_alloc_context3(c);
 	avcodec_parameters_to_context(ctx, fmt->streams[vs]->codecpar);
 	ctx->thread_count = 1;
-	ctx->skip_loop_filter = AVDISCARD_ALL; // light mode, as on the MiSTer
+	if (!dbk) ctx->skip_loop_filter = AVDISCARD_ALL; // light mode, as on the MiSTer
 	ctx->flags2 |= AV_CODEC_FLAG2_FAST;
 	if (avcodec_open2(ctx, c, NULL) < 0) return 1;
 	AVPacket *pkt = av_packet_alloc();

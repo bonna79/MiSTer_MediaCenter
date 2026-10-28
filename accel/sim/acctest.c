@@ -4,12 +4,17 @@
 // of tools/mediacenter/accel.c (only the commands, as on the MiSTer, with the
 // player's two threads), and writes <prefix>.cmd (the commands, in the order
 // the FPGA gets them) and <prefix>.rec (FFmpeg's pictures in the same order),
-// for accel/sim/model.py and the test benches.
+// for accel/sim/model.py and the test benches. With deblocking (command A5),
+// as the player with a core that filters; MC_NODEBLOCK=1: without.
 //   acctest <file> <prefix> [threads] [pictures held, like the player's queue]
 // Built with -DACC_FAKE, the commands go through the player's link with the
 // core (tools/mediacenter/accel_link.c: ring, sessions, waiting for each
 // picture) to a pretend core, a thread that reads the ring as mc_acc does,
-// at random speeds, and writes what it read into <prefix>.cmd.
+// at random speeds, and writes what it read into <prefix>.cmd. The ring is
+// mapped twice like the player's own, and the picture whose turn it is is
+// written straight into it; MC_ACC_RING=so or MC_ACC_COPY=1: every picture
+// copied. -DACC_RING_PAGES=64 makes the ring small (it wraps all the time).
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +34,7 @@ static FILE *fcmd;
 
 static uint32_t fake_mb[2048] __attribute__((aligned(4096)));
 static uint8_t fake_ring[ACC_RING_PAGES * 4096] __attribute__((aligned(4096)));
+static uint8_t *fake_ringp = fake_ring;  // the ring the pretend core reads
 static volatile int fake_stop;
 static unsigned fake_pics, fake_sessions, fake_bad;
 
@@ -36,8 +42,24 @@ void *acc_fake_map(uint32_t phys, size_t len, void *at)
 {
 	(void)at;
 	if (phys == ACC_MBOX && len <= sizeof(fake_mb)) return fake_mb;
-	if (phys == ACC_RING_SO && len <= sizeof(fake_ring)) return fake_ring;
+	if (phys == ACC_RING_SO && len <= sizeof(fake_ring)) return fake_ringp = fake_ring;
 	return NULL;
+}
+
+// The ring as the player's own (MC_ACC_RING=wc): the same memory twice, one
+// copy after the other.
+uint8_t *acc_fake_ring(size_t len)
+{
+	int fd = memfd_create("acc_ring", 0);
+	if (fd < 0 || ftruncate(fd, (off_t)len)) return NULL;
+	uint8_t *va = mmap(NULL, 2 * len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (va == MAP_FAILED) return NULL;
+	if (mmap(va, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED ||
+		mmap(va + len, len, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED) return NULL;
+	close(fd);
+	// garbage, as in real memory
+	for (size_t i = 0; i < len; i++) va[i] = (uint8_t)(i * 2654435761u >> 24);
+	return fake_ringp = va;
 }
 
 // mc_acc, as the player sees it: the mailbox, the ring, the answer
@@ -73,7 +95,7 @@ static void *fake_core(void *arg)
 		for (uint32_t i = 0; i < take; i += 4)
 		{
 			uint32_t w;
-			memcpy(&w, fake_ring + (rd + i) % sizeof(fake_ring), 4);
+			memcpy(&w, fake_ringp + (rd + i) % sizeof(fake_ring), 4);
 			fwrite(&w, 4, 1, fcmd);
 			if (left) { left--; if (!left && stage == 1) stage = 2; continue; }
 			if (stage == 2) { left = (int)w; stage = 0; continue; } // coefficient count
@@ -87,6 +109,7 @@ static void *fake_core(void *arg)
 				else { left = type ? 5 : 37; stage = 1; }
 			}
 			else if (tag == 0xA4) pics++;
+			else if (tag == 0xA5) left = 2;
 			else if (tag != 0xA0) { fake_bad++; m[20] = 1; }
 		}
 		rd += take;
@@ -161,7 +184,10 @@ int main(int argc, char **argv)
 	avcodec_parameters_to_context(cn, fmt->streams[vs]->codecpar);
 	avcodec_parameters_to_context(ca, fmt->streams[vs]->codecpar);
 	cn->thread_count = 1;
-	cn->skip_loop_filter = AVDISCARD_ALL;
+	// deblocking in the FPGA (command A5) as the player does, unless MC_NODEBLOCK=1
+	const char *nd = getenv("MC_NODEBLOCK");
+	acc.hooks.deblock = !(nd && atoi(nd));
+	cn->skip_loop_filter = acc.hooks.deblock ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
 	cn->flags2 |= AV_CODEC_FLAG2_FAST;
 	ca->thread_count = threads;
 	ca->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
@@ -176,6 +202,10 @@ int main(int argc, char **argv)
 	char why[96];
 	if (al_open(why, sizeof(why))) { printf("acctest: link: %s\n", why); return 1; }
 	acc.send = al_send;
+	acc.ring_ok = al_ring_ok;
+	acc.ring_take = al_ring_take;
+	acc.ring_room = al_ring_room;
+	acc.ring_end = al_ring_end;
 #endif
 	acc_attach(ca);
 	if (avcodec_open2(cn, c, NULL) < 0 || avcodec_open2(ca, c, NULL) < 0) return 1;
@@ -226,8 +256,9 @@ int main(int argc, char **argv)
 		fwrite(pics[i].pix, 1, pics[i].n, fr);
 	}
 	fclose(fr);
-	printf("acctest: %d pictures (%u sent, %u dropped), %.1f words a picture, slots at most %d, %s%s, %.2f s\n",
+	printf("acctest: %d pictures (%u sent, %u dropped), %.1f words a picture (%.0f%% written straight into the ring), slots at most %d, %s%s, %.2f s\n",
 		npics, acc.pics_sent, acc.pics_dropped, acc.pics_sent ? (double)acc.words_sent / acc.pics_sent : 0.0,
+		acc.words_sent ? 100.0 * acc.words_direct / acc.words_sent : 0.0,
 		acc.slots_peak, acc.failed ? "FAILED: " : "ok", acc.why, acc_now() - t0);
 	for (int i = 0; i < npics; i++)
 		if (pics[i].seq != (unsigned)i) { printf("acctest: picture %d has number %u\n", i, pics[i].seq); return 1; }

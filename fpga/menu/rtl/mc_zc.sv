@@ -22,6 +22,14 @@
 //   8 U offset    9 V offset
 //  10 [15:0] U/V bytes between output lines  [16] U/V line = output line / 2
 //     [17] narrow by 2:1 instead of 3:2 (at most 256 output words a line)
+//     [18] the player's controls are blended over the lines from word 12 on
+//  11 controls (physical byte address, outside Linux): for each blended
+//     line, one 64-bit word per output word, bytes a0 g0 a1 g1 a2 g2 a3 g3
+//     (coverage a and grey g = 16 + v * 219 / 255 of its 4 pixels)
+//  12 [15:0] first line with the controls
+// Blending, as the player's yuv_band: Y = (Y * (255 - a) + g * a + 127) / 255
+// for each pixel; U and V the same toward 128 with (a0 + a1 + 1) / 2 of
+// their two pixels.
 // Answer (written by the block, 64 bytes on):
 //  16 clock cycles spent   17 status: 0 done, 1 refused (bad values)
 //  18 the sequence done (written last, in a word of its own)
@@ -100,11 +108,16 @@ reg [31:0] rd_u, rd_v;                 // U and V of the line being read
 reg [31:0] row_a;                      // frame buffer address of the next line to write                      // U/V line step: every line or every other one
 reg  [9:0] ow;                         // output words a line
 reg [10:0] ny, nc;                     // source words a line: Y, U (V)
+reg [31:0] ov_a;                       // controls of the next blended line to read
+reg        rd_band;                    // the line being read has the controls
+reg [31:0] rd_o;                       // where its controls are
 
 wire [31:0] y_step = hdr[7];
 wire [15:0] c_step = hdr[10][15:0];
 wire        c_half = hdr[10][16];
 wire        n21    = hdr[10][17];   // 2:1 (the mailbox is not read again while lines are made)
+wire        ov_on  = hdr[10][18];
+wire [15:0] ov_y0  = hdr[12][15:0];
 
 // ---------------------------------------------------------------- page table
 reg  [31:0] tab_lo[1024], tab_hi[1024];
@@ -142,6 +155,10 @@ always @(posedge clk) if(bwe && bseg == 1 &&  bidx[0]) uo[{bbank, bidx[6:1]}] <=
 always @(posedge clk) if(bwe && bseg == 2 && !bidx[0]) ve[{bbank, bidx[6:1]}] <= bdata;
 always @(posedge clk) if(bwe && bseg == 2 &&  bidx[0]) vo[{bbank, bidx[6:1]}] <= bdata;
 
+// controls of the line, two banks like the others
+reg [63:0] abuf[1024];
+always @(posedge clk) if(bwe && bseg == 3) abuf[{bbank, bidx[8:0]}] <= bdata;
+
 // output line
 reg [63:0] obuf[512];
 reg        owe = 0;
@@ -157,7 +174,16 @@ reg        mk_bank;
 reg  [9:0] mk_n;          // word being asked for
 reg [12:0] mk_y;          // 6n
 reg [11:0] mk_c;          // 3n
-reg [63:0] ye_q, yo_q, ue_q, uo_q, ve_q, vo_q;
+reg [63:0] ye_q, yo_q, ue_q, uo_q, ve_q, vo_q, ov_q;
+reg        mk_blend;      // the line being made has the controls
+reg        s2_v = 0, sa_v = 0, s3_v = 0, s4_v = 0;   // the steps after p1 (see "the controls")
+reg  [8:0] s2_n, sa_n, s3_n, s4_n;
+reg [63:0] s2_d, s2_ov, sa_d, sa_a, s3_d;
+reg        sa_b, s3_b, s4_b;
+reg [71:0] sa_g;          // 8 x 9 bits: g - p, signed
+reg [127:0] sa_k, s3_k;   // 8 x 16 bits: 255 * p + 127
+reg [103:0] s3_l, s3_h;   // 8 x 13 bits: (g - p) * low and high 4 bits of a, signed
+reg [127:0] s4_s;         // 8 x 16 bits: p * (255 - a) + g * a + 127
 reg        p1_v = 0;
 reg  [8:0] p1_n;
 reg        mk_go = 0;
@@ -178,6 +204,7 @@ always @(posedge clk) begin
 	uo_q <= uo[{mk_bank, ca[6:1]}];
 	ve_q <= ve[{mk_bank, ca[0] ? cb[6:1] : ca[6:1]}];
 	vo_q <= vo[{mk_bank, ca[6:1]}];
+	ov_q <= abuf[{mk_bank, mk_n[8:0]}];
 	p1_v    <= mk_on;
 	p1_n    <= mk_n[8:0];
 	p1_ys   <= mk_y[2:0];
@@ -216,16 +243,17 @@ always @(posedge clk) begin
 	u4  = u16 >> {p1_cs, 3'b000};
 	v4  = v16 >> {p1_cs, 3'b000};
 
-	owe <= p1_v;
-	owa <= p1_n;
+	s2_v  <= p1_v;
+	s2_n  <= p1_n;
+	s2_ov <= ov_q;
 	// bytes in memory order: Y0 U Y1 V Y2 U Y3 V
 	if(n21)
-		owd <= {avg2(v4[23:16], v4[31:24]),   avg2(y8[55:48], y8[63:56]),
+		s2_d <= {avg2(v4[23:16], v4[31:24]),   avg2(y8[55:48], y8[63:56]),
 		        avg2(u4[23:16], u4[31:24]),   avg2(y8[39:32], y8[47:40]),
 		        avg2(v4[7:0],   v4[15:8]),    avg2(y8[23:16], y8[31:24]),
 		        avg2(u4[7:0],   u4[15:8]),    avg2(y8[7:0],   y8[15:8])};
 	else
-		owd <= {third2(v4[23:16], v4[15:8]),  third2(y8[47:40], y8[39:32]),
+		s2_d <= {third2(v4[23:16], v4[15:8]),  third2(y8[47:40], y8[39:32]),
 		        third2(u4[23:16], u4[15:8]),  third2(y8[31:24], y8[39:32]),
 		        third2(v4[7:0],   v4[15:8]),  third2(y8[23:16], y8[15:8]),
 		        third2(u4[7:0],   u4[15:8]),  third2(y8[7:0],   y8[15:8])};
@@ -240,6 +268,7 @@ always @(posedge clk) begin
 	end
 	if(mk_go) begin
 		mk_on   <= 1;
+		mk_blend <= ov_on && row_c >= ov_y0;
 		mk_bank <= row_c[0];
 		mk_n    <= 0;
 		mk_y    <= 0;
@@ -247,7 +276,59 @@ always @(posedge clk) begin
 	end
 end
 
-wire mk_busy = mk_on | p1_v | owe;
+// ---------------------------------------------------------------- the controls
+// Four more steps for every word (also when no line has the controls):
+// sa coverage, grey - picture and 255 * picture, s3 the products (in two
+// halves of a), s4 their sums, then the division by 255 into owd.
+always @(posedge clk) begin
+	reg  [8:0] ac0, ac1;
+	reg [63:0] A, G;
+	reg  [7:0] pb;
+	reg [15:0] t;
+	// coverage and grey for each byte of the output word Y0 U Y1 V Y2 U Y3 V
+	ac0 = s2_ov[7:0] + s2_ov[23:16] + 1'd1;
+	ac1 = s2_ov[39:32] + s2_ov[55:48] + 1'd1;
+	A = {ac1[8:1], s2_ov[55:48], ac1[8:1], s2_ov[39:32], ac0[8:1], s2_ov[23:16], ac0[8:1], s2_ov[7:0]};
+	G = {8'd128,   s2_ov[63:56], 8'd128,   s2_ov[47:40], 8'd128,   s2_ov[31:24], 8'd128,   s2_ov[15:8]};
+	for(int i = 0; i < 8; i++) begin
+		pb = s2_d[i*8 +: 8];
+		sa_g[i*9 +: 9]   <= {1'b0, G[i*8 +: 8]} - {1'b0, pb};
+		sa_k[i*16 +: 16] <= {pb, 8'd0} - pb + 16'd127;
+	end
+	sa_a <= A;
+	sa_v <= s2_v;
+	sa_n <= s2_n;
+	sa_d <= s2_d;
+	sa_b <= mk_blend;
+
+	for(int i = 0; i < 8; i++) begin
+		s3_l[i*13 +: 13] <= $signed(sa_g[i*9 +: 9]) * $signed({1'b0, sa_a[i*8 +: 4]});
+		s3_h[i*13 +: 13] <= $signed(sa_g[i*9 +: 9]) * $signed({1'b0, sa_a[i*8 + 4 +: 4]});
+	end
+	s3_k <= sa_k;
+	s3_v <= sa_v;
+	s3_n <= sa_n;
+	s3_d <= sa_d;
+	s3_b <= sa_b;
+
+	// the sum is never negative and never above 65535: 16 bits are enough
+	for(int i = 0; i < 8; i++)
+		s4_s[i*16 +: 16] <= s3_b ? s3_k[i*16 +: 16] + {s3_h[i*13 +: 12], 4'd0} + {{3{s3_l[i*13 + 12]}}, s3_l[i*13 +: 13]}
+		                         : {s3_d[i*8 +: 8], 8'd0};
+	s4_v <= s3_v;
+	s4_n <= s3_n;
+	s4_b <= s3_b;
+
+	// x / 255 = (x + 1 + x / 256) / 256 for every x used here (up to 65152)
+	owe <= s4_v;
+	owa <= s4_n;
+	for(int i = 0; i < 8; i++) begin
+		t = s4_b ? s4_s[i*16 +: 16] + 1'd1 + s4_s[i*16 + 8 +: 8] : s4_s[i*16 +: 16];
+		owd[i*8 +: 8] <= t[15:8];
+	end
+end
+
+wire mk_busy = mk_on | p1_v | s2_v | sa_v | s3_v | s4_v | owe;
 
 // ---------------------------------------------------------------- the bus
 // output line word for the write: always the word at wr_idx
@@ -302,7 +383,8 @@ always @(posedge clk) begin
 					bdata <= ddr_dout;
 					if(rx < ny) begin bseg <= 0; bidx <= rx[10:0]; end
 					else if(rx < ny + nc) begin bseg <= 1; bidx <= rx[10:0] - ny; end
-					else begin bseg <= 2; bidx <= rx[10:0] - ny - nc; end
+					else if(rx < ny + nc + nc) begin bseg <= 2; bidx <= rx[10:0] - ny - nc; end
+					else begin bseg <= 3; bidx <= rx[10:0] - ny - nc - nc; end
 				end
 		endcase
 	end
@@ -335,7 +417,7 @@ always @(posedge clk) begin
 		else if(lk == 1) lk <= 3;       // table word read
 		else if(lk == 3) lk <= 2;       // tab_q ready
 		if(grant && rd_ready && !wr_ready && !ddr_rd && !ddr_we) begin
-			if(rd_kind == 2) begin
+			if(rd_kind == 2 && rd_seg != 3) begin
 				pa     = {tab_q[19:0], rd_off[11:0]};
 				to_end = pg_end;
 			end
@@ -352,11 +434,17 @@ always @(posedge clk) begin
 			rd_off    <= rd_off + {n, 3'b000};
 			rd_left   <= rd_left - n;
 			lk        <= 0;
-			if(rd_left == n && rd_kind == 2 && rd_seg != 2) begin
+			if(rd_left == n && rd_kind == 2 && rd_seg < 2) begin
 				// next segment of the line: U, then V
 				rd_seg  <= rd_seg + 1'd1;
 				rd_off  <= (rd_seg == 0) ? rd_u : rd_v;
 				rd_left <= nc;
+			end
+			if(rd_left == n && rd_kind == 2 && rd_seg == 2 && rd_band) begin
+				// then the controls, at a physical address
+				rd_seg  <= 3;
+				rd_off  <= rd_o;
+				rd_left <= {1'b0, ow};
 			end
 		end
 	end
@@ -419,7 +507,8 @@ always @(posedge clk) begin
 				// 2048 pages at most; addresses on 8 bytes
 				refused  <= !hdr[5][25:16] || hdr[5][18:16] || hdr[5][25:16] > (n21 ? 10'd256 : 10'd340) ||
 				            !hdr[5][15:0] || hdr[5][15:0] > 16'd2048 || !hdr[3][31:16] ||
-				            |{hdr[2][2:0], hdr[3][2:0], hdr[4][2:0], hdr[6][2:0], hdr[7][2:0], hdr[8][2:0], hdr[9][2:0], hdr[10][2:0]};
+				            |{hdr[2][2:0], hdr[3][2:0], hdr[4][2:0], hdr[6][2:0], hdr[7][2:0], hdr[8][2:0], hdr[9][2:0], hdr[10][2:0]} ||
+				            (hdr[10][18] && hdr[11][2:0]);
 				state    <= S_TABLE;
 			end
 
@@ -451,6 +540,7 @@ always @(posedge clk) begin
 						u_off   <= hdr[8];
 						v_off   <= hdr[9];
 						row_a   <= hdr[2];
+						ov_a    <= hdr[11];
 						state   <= S_ROWS;
 					end
 				end
@@ -470,6 +560,9 @@ always @(posedge clk) begin
 					rd_left <= ny;
 					rd_go   <= 1;
 					row_r   <= row_r + 1'd1;
+					rd_band <= ov_on && row_r >= ov_y0;
+					rd_o    <= ov_a;
+					if(ov_on && row_r >= ov_y0) ov_a <= ov_a + {ow, 3'b000};
 					// the line after
 					y_off   <= y_off + y_step;
 					if(!c_half || row_r[0]) begin
@@ -477,7 +570,7 @@ always @(posedge clk) begin
 						v_off <= v_off + c_step;
 					end
 				end
-				if(rd_on && !rd_go && !rd_left && !pend && rx == ny + nc + nc) rd_on <= 0;
+				if(rd_on && !rd_go && !rd_left && !pend && rx == ny + nc + nc + (rd_band ? ow : 10'd0)) rd_on <= 0;
 
 				// make a line once it is read, the output buffer free
 				if(!mk_busy && !mk_go && row_c < row_r && !(row_c + 1'd1 == row_r && (rd_on || rd_go)) && !wr_on && row_c == row_w)

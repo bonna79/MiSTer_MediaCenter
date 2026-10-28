@@ -58,5 +58,8 @@ printf '\033[?25l'
 status=$?
 # the console back in text mode, also if the player did not end normally
 "$BIN" --console-text >/dev/null 2>&1
+# programs the player paused during a video (MiSTer Remote) run again, also
+# if the player did not end normally
+killall -CONT remote.sh >/dev/null 2>&1
 printf '\033[?25h'
 exit $status

@@ -1,12 +1,13 @@
-diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_accdump.c ffmpeg-host-src/libavcodec/h264_accdump.c
---- a/libavcodec/h264_accdump.c
-+++ b/libavcodec/h264_accdump.c
-@@ -0,0 +1,169 @@
+diff -ruN a/libavcodec/h264_accdump.c b/libavcodec/h264_accdump.c
+--- a/libavcodec/h264_accdump.c	1970-01-01 00:00:00.000000000 +0000
++++ b/libavcodec/h264_accdump.c	2026-10-26 07:45:08.038653603 +0000
+@@ -0,0 +1,183 @@
 +/* MiSTer MediaCenter FPGA accelerator, phase 1 test bench only (host build):
 + * with MC_ACCDUMP=<prefix> the H.264 decoder writes, for every picture, the
 + * commands the ARM would send to the FPGA (<prefix>.cmd, 32-bit words, see
 + * accel/doc/comandi.md) and the picture it rebuilt (<prefix>.rec). Frame
-+ * pictures, 8-bit 4:2:0 only. */
++ * pictures, 8-bit 4:2:0 only. With deblocking on (accdump -d) the macroblock
++ * commands are preceded by A5 and <prefix>.rec holds the deblocked pictures. */
 +#include <stdio.h>
 +#include <stdlib.h>
 +
@@ -81,6 +82,19 @@ diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_accdump.c ffmpeg-host-src/lib
 +    else if (IS_INTRA16x16(mb_type)) type = 3;
 +    else if (IS_INTRA4x4(mb_type)) type = IS_8x8DCT(mb_type) ? 2 : 1;
 +    else type = 0;
++    // deblocking (only when FFmpeg deblocks, accdump -d): the command A5 as
++    // the player writes it; the core works out the edge strengths
++    if (sl->deblocking_filter) {
++        uint32_t dw[3];
++        int bad, have = mcacc_dbk(h, sl, dw, &bad);
++        if (bad) {
++            fprintf(stderr, "accdump: deblocking does not fit the command (mb %d %d)\n", sl->mb_x, sl->mb_y);
++            exit(1);
++        }
++        if (have)
++            for (i = 0; i < 3; i++)
++                acc_w(dw[i]);
++    }
 +    acc_w(0xA3000000u | type << 16 | sl->mb_y << 8 | sl->mb_x);
 +    if (type == 4) {
 +        for (i = 0; i < 384; i += 4)
@@ -171,9 +185,61 @@ diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_accdump.c ffmpeg-host-src/lib
 +    fflush(acc_cmd);
 +    fflush(acc_rec);
 +}
-diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_picture.c ffmpeg-host-src/libavcodec/h264_picture.c
---- a/libavcodec/h264_picture.c
-+++ b/libavcodec/h264_picture.c
+diff -ruN a/libavcodec/h264_mcdbk.c b/libavcodec/h264_mcdbk.c
+--- a/libavcodec/h264_mcdbk.c	1970-01-01 00:00:00.000000000 +0000
++++ b/libavcodec/h264_mcdbk.c	2026-10-26 07:45:08.041312501 +0000
+@@ -0,0 +1,48 @@
++/* MiSTer MediaCenter FPGA accelerator: the deblocking command A5 of one
++ * macroblock (accel/doc/comandi.md in the MiSTer MediaCenter repository).
++ * Included by h264_slice.c after loop_filter().
++ *
++ * The core works out the edge strengths itself, from the macroblock commands
++ * (A3: type, coefficients, references, vectors) as ff_h264_filter_mb() does
++ * for a progressive frame (no MBAFF, 4:2:0, 8 bit). Here only what the
++ * commands do not carry: the slice offsets, whether the left and top
++ * macroblocks are filtered against, and the qp of the edges. */
++
++/* The macroblock just read (sl->mb_xy): returns 1 and the 3 words of the
++ * command A5 if the slice is filtered, 0 if not. *bad is set when the
++ * stream does not fit the command (the macroblock is then left unfiltered). */
++static int mcacc_dbk(const H264Context *h, const H264SliceContext *sl, uint32_t w[3], int *bad)
++{
++    const int mb_xy = sl->mb_xy;
++    const uint8_t *qs = h->cur_pic.qscale_table;
++    const uint8_t (*ct)[QP_MAX_NUM + 1] = h->ps.pps->chroma_qp_table;
++    int avl, avt;
++
++    *bad = 0;
++    if (!sl->deblocking_filter)
++        return 0;
++    const int offa = sl->slice_alpha_c0_offset, offb = sl->slice_beta_offset;
++    if (FRAME_MBAFF(h) || FIELD_PICTURE(h) || h->pixel_shift || h->ps.sps->chroma_format_idc != 1 ||
++        offa < -16 || offa > 15 || offb < -16 || offb > 15) {
++        *bad = 1;
++        return 0;
++    }
++    // the neighbours, as fill_filter_caches
++    if (sl->deblocking_filter == 2) {
++        avl = h->slice_table[mb_xy - 1] == sl->slice_num;
++        avt = h->slice_table[mb_xy - h->mb_stride] == sl->slice_num;
++    } else {
++        avl = h->slice_table[mb_xy - 1] != 0xFFFF;
++        avt = h->slice_table[mb_xy - h->mb_stride] != 0xFFFF;
++    }
++    // qp: of the macroblock inside, the mean of the two macroblocks on its edges
++    const int q = qs[mb_xy];
++    const int nl = avl ? qs[mb_xy - 1] : q, nt = avt ? qs[mb_xy - h->mb_stride] : q;
++    const int qy0 = (q + nl + 1) >> 1, qy1 = (q + nt + 1) >> 1;
++    const int qb0 = (ct[0][q] + ct[0][nl] + 1) >> 1, qb1 = (ct[0][q] + ct[0][nt] + 1) >> 1;
++    const int qr0 = (ct[1][q] + ct[1][nl] + 1) >> 1, qr1 = (ct[1][q] + ct[1][nt] + 1) >> 1;
++    w[0] = 0xA5000000u | avl | avt << 1 | (offa & 31) << 2 | (offb & 31) << 7;
++    w[1] = qy0 | qy1 << 6 | q << 12 | qb0 << 18 | (uint32_t)qb1 << 24;
++    w[2] = ct[0][q] | qr0 << 6 | qr1 << 12 | ct[1][q] << 18;
++    return 1;
++}
+diff -ruN a/libavcodec/h264_picture.c b/libavcodec/h264_picture.c
+--- a/libavcodec/h264_picture.c	2026-10-26 07:45:08.090958688 +0000
++++ b/libavcodec/h264_picture.c	2026-10-26 07:45:08.099931034 +0000
 @@ -224,6 +224,8 @@
      int err = 0;
      h->mb_y = 0;
@@ -183,19 +249,20 @@ diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_picture.c ffmpeg-host-src/lib
      if (in_setup || !(avctx->active_thread_type & FF_THREAD_FRAME)) {
          if (!h->droppable) {
              err = ff_h264_execute_ref_pic_marking(h);
-diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_slice.c ffmpeg-host-src/libavcodec/h264_slice.c
---- a/libavcodec/h264_slice.c
-+++ b/libavcodec/h264_slice.c
-@@ -2480,6 +2480,8 @@
+diff -ruN a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+--- a/libavcodec/h264_slice.c	2026-10-26 07:45:08.104734342 +0000
++++ b/libavcodec/h264_slice.c	2026-10-26 07:45:08.107198110 +0000
+@@ -2480,6 +2480,9 @@
      sl->mb_mbaff    = sl->mb_field_decoding_flag = IS_INTERLACED(mb_type) ? 1 : 0;
  }
  
++#include "h264_mcdbk.c"
 +#include "h264_accdump.c"
 +
  /* MiSTer MediaCenter, measurement only: with MC_PARSEONLY=1 the decoder reads
   * the stream (CABAC/CAVLC, macroblock modes, motion vectors, coefficients)
   * but does not rebuild the pixels, to time what the ARM would still do if an
-@@ -2575,6 +2577,8 @@
+@@ -2575,6 +2578,8 @@
          }
      }
  
@@ -204,7 +271,7 @@ diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_slice.c ffmpeg-host-src/libav
      if (h->ps.pps->cabac) {
          /* realign */
          align_get_bits(&sl->gb);
-@@ -2600,6 +2604,8 @@
+@@ -2600,6 +2605,8 @@
  
              ret = ff_h264_decode_mb_cabac(h, sl);
  
@@ -213,7 +280,7 @@ diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_slice.c ffmpeg-host-src/libav
              if (ret >= 0 && !mc_parse_only())
                  ff_h264_hl_decode_mb(h, sl);
  
-@@ -2671,6 +2677,8 @@
+@@ -2671,6 +2678,8 @@
  
              ret = ff_h264_decode_mb_cavlc(h, sl);
  
@@ -222,9 +289,9 @@ diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264_slice.c ffmpeg-host-src/libav
              if (ret >= 0 && !mc_parse_only())
                  ff_h264_hl_decode_mb(h, sl);
  
-diff -ruN -x '*.o' -x '*.d' ffmpeg/libavcodec/h264dec.h ffmpeg-host-src/libavcodec/h264dec.h
---- a/libavcodec/h264dec.h
-+++ b/libavcodec/h264dec.h
+diff -ruN a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+--- a/libavcodec/h264dec.h	2026-10-26 07:45:08.110385981 +0000
++++ b/libavcodec/h264dec.h	2026-10-26 07:45:08.113460789 +0000
 @@ -652,6 +652,7 @@
  }
  

@@ -33,7 +33,7 @@ defs = ['-DCMDFILE="cmd.hex"', '-DNCMD=%d' % len(cmd), '-DCMDMAX=%d' % (len(cmd)
         '-DRING_PAGES=%d' % pages, '-DLAT=%d' % lat]
 rtl = os.path.join(root, 'accel', 'rtl')
 srcs = [os.path.join(here, 'tb_core.sv'), os.path.join(root, 'fpga/menu/rtl/mc_acc.sv'), os.path.join(root, 'fpga/menu/rtl/mc_bus.sv')] + \
-       [os.path.join(rtl, f) for f in ('acc_engine.sv', 'acc_mc.sv', 'acc_idct.sv', 'acc_resid.sv', 'acc_recon.sv', 'acc_ram.sv')]
+       [os.path.join(rtl, f) for f in ('acc_engine.sv', 'acc_dbk.sv', 'acc_bs.sv', 'acc_mc.sv', 'acc_idct.sv', 'acc_resid.sv', 'acc_recon.sv', 'acc_ram.sv')]
 subprocess.check_call(['iverilog', '-g2012', '-o', os.path.join(work, 'sim')] + defs + srcs)
 r = subprocess.run(['vvp', '-n', 'sim'], cwd=work, capture_output=True, text=True)
 print(r.stdout[-4000:], r.stderr[-2000:])

@@ -5,7 +5,7 @@
 > [!WARNING]
 > **AVVERTENZA: HDMI e CRT collegati insieme.** Se usi insieme l'uscita HDMI verso un televisore LCD e l'uscita VGA→SCART verso un CRT, collega **MiSTer, televisore LCD e CRT alla stessa multipresa elettrica**. Con i due televisori su prese diverse, accendere il CRT mentre il MiSTer è acceso può far passare uno sbalzo elettrico attraverso il MiSTer, tramite le masse dei cavi. È successo in una prova: l'HDMI è diventato verde per qualche secondo, poi l'immagine è sparita su tutte e due le uscite (l'audio continuava) e il pad non rispondeva più; è servito riavviare. Se non puoi usare la stessa multipresa, **accendi il CRT prima del MiSTer**.
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.0 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.5 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > Questo progetto è stato sviluppato con l'aiuto dell'intelligenza artificiale: il codice e la documentazione sono stati scritti con Claude, l'IA di Anthropic, e provati da rgm su un MiSTer vero.
 
@@ -36,6 +36,36 @@ Il pacchetto è formato da queste parti:
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | Le righe da copiare in `MiSTer.ini` (non è un `MiSTer.ini`: copia solo le righe) |
 
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
+
+## Novità della versione 3.5
+
+La 3.5 completa l'acceleratore della 3.0: l'immagine 1080p è più pulita, i video 1080p a 30 immagini al secondo sono fluidi e il menu sopra il video non li rallenta più.
+
+- **Filtro anti-blocchi (deblocking) nell'FPGA:** il core del menu ora fa anche il filtro che l'H.264 usa per nascondere i bordi dei blocchi, e calcola da solo quanto filtrare ogni bordo: all'ARM non costa niente. Spariti i punti viola, verdi e gialli che si vedevano nelle scene veloci con la neve. `MC_NODEBLOCK=1` in `mediacenter.ini` lo spegne (solo per i confronti).
+- **1080p a 30 immagini al secondo fluido:** HTC.mp4 (1080p 29,97, 4,5 Mbit/s) passa dal 12,4% di immagini non mostrate della 3.0 allo 0,1%. Il lettore riusa prima le pagine dello schermo, scrive i comandi direttamente nella memoria che legge l'FPGA e tiene 24 immagini decodificate in anticipo; all'inizio e dopo un salto aspetta di averle pronte (al massimo un secondo).
+- **Menu sopra il 1080p senza scatti:** la barra, il menu e le scritte del lettore sopra un video accelerato li mescola il core del menu mentre copia l'immagine. Prima lo faceva l'ARM, circa 5 ms per immagine, e a 30 immagini al secondo con il menu aperto qualche immagine veniva scartata. Ora all'ARM restano 0,3 ms.
+- **Subito dopo l'accensione il video aspetta la fine dell'avvio:** nei primi 30–40 secondi la MiSTer esegue ancora i suoi script di avvio, e un 1080p partito in quel momento scattava. Ora il lettore mostra "La MiSTer sta finendo l'avvio" con i secondi trascorsi e fa partire il video da solo quando l'avvio è finito (al massimo 60 secondi); B torna indietro. Se la MiSTer è accesa da più tempo il video parte subito. `MC_NOBOOTWAIT=1` toglie l'attesa.
+- **Il video ha la precedenza sugli altri programmi** mentre suona; alla fine tutto torna come prima. `MC_NOPRIO=1` la toglie.
+- **MiSTer Remote in pausa durante il video:** nei primi minuti dopo l'accensione cataloga i giochi e usava il 20–30% della CPU. Il lettore lo mette in pausa mentre un video suona e lo fa ripartire alla fine. `MC_NOPAUSE=1` lo lascia stare.
+- **Diagnosi nel log:** il bitrate del video, i picchi del decoder, il tempo per disegnare ogni immagine, gli altri programmi che usano la CPU e i comandi mescolati dal core.
+- **Nuova immagine** con la scritta Ver. 3.5, e il numero della build in basso.
+
+**Fin dove arriva il 1080p.** Con l'acceleratore l'ARM deve ancora leggere il flusso H.264, e il suo lavoro cresce con il bitrate del video. Dalle prove, i limiti per un video fluido sono circa **6 Mbit/s a 30 immagini al secondo**, **8,5–9 Mbit/s a 25** e **9–9,5 Mbit/s a 24**: sono stime ricavate dalle misure, non provate una per una. Oltre, il video va ma con molte immagini non mostrate (un 1080p a 30 immagini al secondo e 11 Mbit/s ne perde circa due su tre; l'audio resta pulito). Per andare oltre l'ARM servirebbe leggere il flusso nell'FPGA: è un obiettivo per la versione 4.0.
+
+Provata su un MiSTer vero il 25–28 ottobre 2026, su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme:
+
+| Prova | Risultato |
+| --- | --- |
+| HTC.mp4, 1080p 29,97, 4,5 Mbit/s, 147 s, con il menu aperto più volte | 0,1% di immagini non mostrate (3.0: 12,4%), nessuna immagine persa dall'FPGA; menu pulito su HDMI e CRT |
+| HTC.mp4 subito dopo l'accensione | Attesa della fine dell'avvio di 18 s, poi 0,3% di immagini non mostrate (senza attesa: 6,8%) |
+| One Piece Episodio 940, 1080p 23,976 | 0,3% di immagini non mostrate, ARM 7,9 ms per immagine in media |
+| Scene con la neve di HTC.mp4 | Spariti i punti colorati che si vedevano senza il filtro anti-blocchi |
+| 1080p 29,97 a 6 Mbit/s | 0,3–1,4% di immagini non mostrate secondo la prova: è il limite a 30 immagini al secondo |
+| 1080p 29,97 a 11 Mbit/s | 64,7% di immagini non mostrate, audio pulito: oltre il limite |
+| 720p H.264, One Piece Episodio 938, 166 s | 0,3% di immagini non mostrate, come nella 3.0 (senza acceleratore) |
+| DVD PAL, Star Wars Episodio III | 576i 50 Hz sul CRT, menu e film come nella 3.0 |
+
+I dettagli tecnici sono nella [scheda tecnica dell'acceleratore](docs/SCHEDA_TECNICA_ACCELERATORE_IT.md).
 
 ## Novità della versione 3.0
 
@@ -476,6 +506,9 @@ MC_CRT_VPOS=2
 | `MC_FIELDS=1` | DVD e video interlacciati: il lettore non fonde i due semiquadri. Il CRT li riceve intatti, come da un vero lettore DVD (più nitido e più fluido nel movimento); sull'HDMI li fonde lo scaler del Main, senza pettini. Consigliato con il CRT. Senza questa riga il lettore fonde le righe per tutte e due le uscite |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
 | `MC_NOACC=1` | Spegne l'acceleratore H.264 della 3.0: i video 1080p li decodifica l'ARM come nella 2.8 |
+| `MC_NOBOOTWAIT=1` | Subito dopo l'accensione il video parte senza aspettare la fine dell'avvio della MiSTer |
+| `MC_NOPRIO=1` | Il video non ha la precedenza sugli altri programmi |
+| `MC_NOPAUSE=1` | MiSTer Remote non viene messo in pausa durante il video |
 | `MC_VCD_OLD=1` | Video CD da disco con il vecchio lettore Video CD, come nella 2.8 (sul CRT con le bande ai lati) |
 | `MC_NOZC=1` | Video 1080p senza acceleratore: l'immagine la copia l'ARM invece del core del menu (zero-copy spento) |
 | `MC_MENU_HD=1` | Elenchi a 1280x720 come nella versione 2.1, invece che disegnati per il CRT |
@@ -529,6 +562,9 @@ Apri una segnalazione nella pagina [Issues](../../issues) e allega:
 | `MC_DEBUG=1` | Scrive nel log gli eventi della navigazione nei DVD |
 | `MC_FULLQUALITY=1` | Disattiva la modalità leggera dei video H.264/HEVC in alta definizione (deblocking spento, oltre le 720 righe metà delle righe ingrandite dallo scaler FPGA e, sopra i 30 fps, solo le immagini di riferimento) |
 | `MC_ACC_RING=so` | Acceleratore: l'anello dei comandi in una zona fissa della memoria invece che nelle pagine del lettore (per confrontare i tempi) |
+| `MC_NODEBLOCK=1` | Acceleratore: l'FPGA non fa il filtro anti-blocchi, come nella 3.0 (per i confronti) |
+| `MC_NOCOREOSD=1` | Acceleratore: i comandi del lettore sopra l'immagine li mescola l'ARM invece del core (per i confronti) |
+| `MC_ACC_COPY=1` | Acceleratore: ogni immagine viene copiata nell'anello dei comandi, come prima, invece di essere scritta direttamente (per confrontare i tempi) |
 | `MC_TEST=...` | Prova senza schermo né controller: tasti simulati e immagini salvate in `/tmp/mc_<secondi>.ppm`. Con un file `.cue` riproduce un'immagine di Super Video CD come se fosse nel lettore |
 
 Per misurare la velocità di decodifica usa `/media/fat/linux/mediacenter --bench <file>` oppure `--bench /dev/sr0`. Analizza al massimo il primo minuto del file (Ctrl+C lo ferma prima). Se il risultato supera il 100% del tempo reale, il file si può riprodurre.

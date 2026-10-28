@@ -42,6 +42,7 @@ static double video_aspect = 4.0 / 3.0;
 #define MC_AUDIO_LEAD 0.3
 #define MC_VQ_MAX 40  // pictures the queue can hold
 #define MC_VQ_FILE 12 // pictures decoded ahead for files
+#define MC_VQ_ACC 24  // with the FPGA accelerator (1080p): a deeper reserve for the heavy moments
 #define MC_PENDING_SECONDS 4
 #define MC_SKIP_SECONDS 60.0
 
@@ -433,9 +434,14 @@ static int media_open(const char *path)
 		// the Video CD player.
 		if (svcd_on && st->codecpar->codec_id == AV_CODEC_ID_MPEG1VIDEO) w = h * 4.0 / 3.0;
 		video_aspect = fb_aspect = (h > 0 && w > 0) ? w / h : 4.0 / 3.0;
-		printf("mediacenter: %s, video %s %dx%d aspect %.3f, audio %s, %.0f s\n", path,
+		printf("mediacenter: %s, video %s %dx%d aspect %.3f, audio %s, %.0f s", path,
 			avcodec_get_name(st->codecpar->codec_id), mc.vdec->width, mc.vdec->height, video_aspect,
 			mc.adec ? avcodec_get_name(mc.adec->codec_id) : "none", mc.duration);
+		// the bitrate the file declares: all streams, and the video alone
+		// when the file says it
+		if (mc.fmt->bit_rate > 0) printf(", bitrate %.2f Mbit/s", mc.fmt->bit_rate / 1e6);
+		if (st->codecpar->bit_rate > 0) printf(" (video %.2f Mbit/s)", st->codecpar->bit_rate / 1e6);
+		printf("\n");
 	}
 	else
 	{
@@ -466,9 +472,23 @@ static void push_audio(AVFrame *f)
 }
 
 // Sends the decoded audio that is due (up to MC_AUDIO_LEAD ahead) to aplay.
+// Pictures decoded ahead: with the FPGA accelerator (1080p, the ARM close
+// to its limit at 30 pictures a second) a deeper queue absorbs the runs of
+// slow pictures, which otherwise end in pictures skipped or dropped late.
+static int vq_depth(void)
+{
+	return acc.on ? MC_VQ_ACC : MC_VQ_FILE;
+}
+
+// At the start (and after fast forward / rewind) with the accelerator the
+// clock and the sound wait until the decoder is MC_VQ_ACC pictures ahead,
+// for one second at most: the queue starts full instead of empty.
+static int preroll;
+static double preroll_t0;
+
 static void feed_audio_output(void)
 {
-	if (!mc.pend_len) return;
+	if (!mc.pend_len || preroll) return;
 
 	// drop what is already late (after a seek or a stall)
 	int late = (int)((mc.clock - 0.05 - mc.pend_pts) * MC_AUDIO_RATE);
@@ -624,6 +644,12 @@ static struct
 	double clock;         // copy of mc.clock for the thread
 } vt = { .lock = PTHREAD_MUTEX_INITIALIZER, .cond = PTHREAD_COND_INITIALIZER };
 
+static void preroll_start(void)
+{
+	preroll = acc.on && vt.on;
+	preroll_t0 = now_seconds();
+}
+
 // Diagnosis of the decoder's time (MC_DIAG=0 turns it off; nothing here
 // changes the playback): the time each packet spends in the decoder, counted
 // only for packets decoded normally (not while skipping to catch up), with
@@ -636,6 +662,13 @@ static struct
 	int n, over, skipped;
 	double w_sum, w_max, w_start; // current 10 s window
 	int w_n, w_over, w_skipped, w_shown, w_dropped;
+	// video bitrate: bytes of the packets sent to the decoder over their
+	// running time (one picture each), per window and its highest value
+	double bytes, w_bytes, rate_max;
+	int pkts, w_pkts;
+	// peaks: pictures over twice the time per picture, and the longest run
+	// of pictures in a row over the time per picture
+	int peaks, run, run_max, w_peaks, w_run_max;
 } dd;
 
 static void dec_diag_reset(void)
@@ -649,10 +682,14 @@ static void dec_diag_reset(void)
 
 static int frames_shown, frames_dropped; // reported in the log
 
-static void dec_diag_add(double t0, double t1, int skipping)
+static void dec_diag_add(double t0, double t1, int skipping, int size)
 {
 	if (!dd.on) return;
 	if (!dd.w_start) dd.w_start = t0;
+	dd.bytes += size;
+	dd.w_bytes += size;
+	dd.pkts++;
+	dd.w_pkts++;
 	if (skipping)
 	{
 		dd.skipped++;
@@ -667,20 +704,99 @@ static void dec_diag_add(double t0, double t1, int skipping)
 		dd.w_n++;
 		if (d > dd.max) dd.max = d;
 		if (d > dd.w_max) dd.w_max = d;
-		if (d > dd.budget) { dd.over++; dd.w_over++; }
+		if (d > dd.budget) { dd.over++; dd.w_over++; dd.run++; }
+		else dd.run = 0;
+		if (d > 2 * dd.budget) { dd.peaks++; dd.w_peaks++; }
+		if (dd.run > dd.run_max) dd.run_max = dd.run;
+		if (dd.run > dd.w_run_max) dd.w_run_max = dd.run;
 	}
 	if (t1 - dd.w_start >= 10)
 	{
+		double rate = dd.w_pkts ? 8 * dd.w_bytes / (dd.w_pkts * dd.budget) : 0;
+		if (rate > dd.rate_max) dd.rate_max = rate;
 		printf("mediacenter: diag decoder %.0f s: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms, "
-			"%d saltate per recuperare; mostrate %d, scartate in ritardo %d\n",
+			"%d saltate per recuperare; mostrate %d, scartate in ritardo %d; picchi oltre %.1f ms %d, serie piu' lunga oltre %.1f ms %d; "
+			"bitrate video %.2f Mbit/s\n",
 			mc.clock, dd.w_n, dd.w_n ? 1000 * dd.w_sum / dd.w_n : 0, 1000 * dd.w_max, dd.w_over, 1000 * dd.budget,
-			dd.w_skipped, frames_shown - dd.w_shown, frames_dropped - dd.w_dropped);
+			dd.w_skipped, frames_shown - dd.w_shown, frames_dropped - dd.w_dropped,
+			2000 * dd.budget, dd.w_peaks, 1000 * dd.budget, dd.w_run_max, rate / 1e6);
+		dd.w_bytes = 0;
+		dd.w_pkts = 0;
+		dd.w_peaks = dd.w_run_max = 0;
 		dd.w_shown = frames_shown;
 		dd.w_dropped = frames_dropped;
 		dd.w_sum = dd.w_max = 0;
 		dd.w_n = dd.w_over = dd.w_skipped = 0;
 		dd.w_start = t1;
 	}
+}
+
+// Diagnosis of the main loop, which shows the pictures (MC_DIAG=0: off;
+// nothing here changes the playback): a picture is "dropped late" when two
+// are due in the same round, so a round longer than a picture's time costs
+// one. Every 10 s: the rounds, where the drawing time goes (waiting for a
+// free framebuffer page, the drawing itself) and how many decoded pictures
+// were ready ahead when one was shown.
+static struct
+{
+	double w_start;
+	int rounds, slow;          // rounds; those longer than a picture's time
+	double round_max;
+	int drawn;
+	double draw_sum, draw_max, wait_sum, wait_max;
+	int ready_min, ready_sum, ready_n, empty;
+	int s_slow, s_drawn, s_empty; // whole video
+	double s_draw, s_wait;
+} ld;
+static double fb_page_waited; // set by fb_present_paged
+
+static void loop_diag_reset(void)
+{
+	memset(&ld, 0, sizeof(ld));
+	ld.ready_min = -1;
+}
+
+static void loop_diag_round(double t, double round)
+{
+	if (!dd.on) return;
+	if (!ld.w_start) ld.w_start = t;
+	ld.rounds++;
+	if (round > dd.budget) { ld.slow++; ld.s_slow++; }
+	if (round > ld.round_max) ld.round_max = round;
+	if (t - ld.w_start < 10) return;
+	printf("mediacenter: diag ciclo %.0f s: %d giri, %d oltre %.1f ms (peggiore %.1f ms); disegnate %d, disegno medio %.1f ms "
+		"(attesa pagina libera %.1f ms, peggiore disegno %.1f ms, peggiore attesa %.1f ms); pronte in coda minimo %d, media %.1f, vuota %d volte\n",
+		mc.clock, ld.rounds, ld.slow, 1000 * dd.budget, 1000 * ld.round_max, ld.drawn,
+		ld.drawn ? 1000 * ld.draw_sum / ld.drawn : 0, ld.drawn ? 1000 * ld.wait_sum / ld.drawn : 0,
+		1000 * ld.draw_max, 1000 * ld.wait_max, ld.ready_min < 0 ? 0 : ld.ready_min,
+		ld.ready_n ? (double)ld.ready_sum / ld.ready_n : 0, ld.empty);
+	ld.w_start = t;
+	ld.rounds = ld.slow = ld.drawn = ld.ready_n = ld.ready_sum = ld.empty = 0;
+	ld.round_max = ld.draw_sum = ld.draw_max = ld.wait_sum = ld.wait_max = 0;
+	ld.ready_min = -1;
+}
+
+// a picture was shown, with `ready` decoded pictures left in the queue
+static void loop_diag_shown(int ready)
+{
+	if (!dd.on) return;
+	if (ld.ready_min < 0 || ready < ld.ready_min) ld.ready_min = ready;
+	ld.ready_sum += ready;
+	ld.ready_n++;
+	if (!ready) { ld.empty++; ld.s_empty++; }
+}
+
+static void loop_diag_drawn(double d)
+{
+	if (!dd.on) return;
+	ld.drawn++;
+	ld.s_drawn++;
+	ld.draw_sum += d;
+	ld.s_draw += d;
+	if (d > ld.draw_max) ld.draw_max = d;
+	ld.wait_sum += fb_page_waited;
+	ld.s_wait += fb_page_waited;
+	if (fb_page_waited > ld.wait_max) ld.wait_max = fb_page_waited;
 }
 
 static void *video_thread(void *arg)
@@ -690,7 +806,7 @@ static void *video_thread(void *arg)
 	pthread_mutex_lock(&vt.lock);
 	while (vt.run && frame)
 	{
-		if (!vt.count || mc.vq_count >= MC_VQ_FILE)
+		if (!vt.count || mc.vq_count >= vq_depth())
 		{
 			pthread_cond_wait(&vt.cond, &vt.lock);
 			continue;
@@ -743,7 +859,7 @@ static void *video_thread(void *arg)
 			pthread_mutex_unlock(&vt.lock);
 			av_frame_unref(frame);
 		}
-		if (pkt) dec_diag_add(dec_t0, now_seconds(), skip != skip_base);
+		if (pkt) dec_diag_add(dec_t0, now_seconds(), skip != skip_base, pkt->size);
 
 		pthread_mutex_lock(&vt.lock);
 		if (!pkt) vt.drained = 1;
@@ -880,7 +996,7 @@ static int need_more(void)
 		// (not beyond a second ahead: when only key pictures are decoded
 		// the thread empties its queue at once)
 		pthread_mutex_lock(&vt.lock);
-		int more = vt.count < 8 && mc.vq_count < MC_VQ_FILE && !(mc.read_vpts > mc.clock + 1.0);
+		int more = vt.count < 8 && mc.vq_count < vq_depth() && !(mc.read_vpts > mc.clock + (acc.on ? 1.5 : 1.0));
 		pthread_mutex_unlock(&vt.lock);
 		if (more) return 1;
 	}
@@ -1012,9 +1128,37 @@ static void fb_clear(void)
 // output, as a DVD player does, and the HDMI scaler blends them.
 static int pic_fields = 0;
 
+// The length of a frame of the 15 kHz CRT output (two fields when
+// interlaced), from the mode the Main measured (/tmp/mediacenter_crt, read
+// again every 2 s); 0 while it is not known.
+static double crt_frame_time(void)
+{
+	static double frame, read_at = -10;
+	double t = now_seconds();
+	if (t - read_at < 2) return frame;
+	read_at = t;
+	frame = 0;
+	FILE *f = fopen("/tmp/mediacenter_crt", "re");
+	if (!f) return 0;
+	unsigned w = 0, h = 0;
+	int il = 0;
+	double hz = 0, vz = 0;
+	if (fscanf(f, "%u %u %d %lf %lf", &w, &h, &il, &hz, &vz) == 5 && vz >= 40 && vz <= 70)
+		frame = (il ? 2.0 : 1.0) / vz;
+	fclose(f);
+	return frame;
+}
+
 // Draws the picture into the next page and shows it.
+// Set while fb_present_paged draws the same picture again (the controls
+// changed): such a switch is left out of the time between pictures.
+static int fb_redraw;
+// When a video picture was last drawn (draw_video_frame).
+static double video_drawn_t;
+
 static void fb_present_paged(void)
 {
+	fb_page_waited = 0;
 	if (fb_pages < 2)
 	{
 		fb_wait_vsync();
@@ -1026,10 +1170,24 @@ static void fb_present_paged(void)
 	// of wait to stay clear of the frame start): a page is drawn again only
 	// after that, or the CRT shows half of the new picture (a horizontal tear)
 	// when pictures come close together.
+	// When the picture's fields are not kept apart (pic_fields 0) the core
+	// takes the page at every field, so a page is free a field after the
+	// switch: a frame and a half (50 ms at 480i, 60 ms at 576i) leaves room
+	// to spare. The fixed 65 ms of before is kept for kept fields and when
+	// the CRT mode is not known. At 30 pictures a second with 3 pages a page
+	// comes back 3 pictures (100 ms) after it was shown, but the switch to a
+	// picture comes after its drawing (about 10 ms): with 65 ms each wait
+	// carried over to two pictures later and grew until a picture was
+	// dropped (1080p 30 fps lost 12% of its pictures that way).
 	static double slot_free[8], last_flip, interval = 0.04;
 	int next = (fb_page + 1) % fb_pages;
 	double wait = slot_free[next] - now_seconds();
-	if (wait > 0 && wait < 0.1) usleep((useconds_t)(wait * 1e6));
+	if (wait > 0 && wait < 0.1)
+	{
+		double w0 = now_seconds();
+		usleep((useconds_t)(wait * 1e6));
+		fb_page_waited = now_seconds() - w0;
+	}
 	fb_page = next;
 	fb_mem = fb_map + (size_t)fb_page * fb_len;
 	fb_present();
@@ -1037,9 +1195,18 @@ static void fb_present_paged(void)
 	char cmd[32];
 	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 page %d %d\n", fb_page, pic_fields);
 	double t = now_seconds();
-	if (t - last_flip < 0.2) interval = 0.9 * interval + 0.1 * (t - last_flip);
-	last_flip = t;
-	slot_free[(fb_page + fb_pages - 1) % fb_pages] = t + (interval >= 0.03 ? 0.065 : 0.03);
+	if (!fb_redraw)
+	{
+		if (t - last_flip < 0.2) interval = 0.9 * interval + 0.1 * (t - last_flip);
+		last_flip = t;
+	}
+	double keep = 0.03;
+	if (interval >= 0.03)
+	{
+		double frame = crt_frame_time();
+		keep = (pic_fields || frame <= 0) ? 0.065 : 1.5 * frame;
+	}
+	slot_free[(fb_page + fb_pages - 1) % fb_pages] = t + keep;
 	if (fb_cmd_fd < 0 || write(fb_cmd_fd, cmd, n) != n)
 	{
 		// Main does not take it: back to a single page
@@ -1060,6 +1227,311 @@ static void main_idle(int on)
 	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 idle %d\n", on ? 1 : 0);
 	if (fb_cmd_fd >= 0 && write(fb_cmd_fd, cmd, n) != n)
 		fprintf(stderr, "mediacenter: Main not told it can rest (%d)\n", on);
+}
+
+// Programs that take the CPU away from the decoder are paused while a video
+// plays (1) and started again after it (0): MiSTer Remote (remote.sh, from
+// update_all) catalogues the games for minutes after power-on and took a
+// fifth of the CPU, enough to make 1080p stutter. MC_NOPAUSE=1: left alone.
+// They are looked for again while a video plays, every second in its first
+// 20 s and every 10 s after: MiSTer Remote starts only once the wifi is up,
+// half a minute after power-on, and may start just as the video does.
+// mediacenter.sh starts them again also if the player does not end normally.
+static const char *const bg_names[] = { "remote.sh" };
+static pid_t bg_pids[8];
+static int bg_count;
+
+static void bg_pause(int on)
+{
+	if (!on)
+	{
+		for (int i = 0; i < bg_count; i++)
+			if (kill(bg_pids[i], SIGCONT) == 0)
+				printf("mediacenter: ripartito dopo il video: pid %d\n", (int)bg_pids[i]);
+		bg_count = 0;
+		return;
+	}
+	const char *e = getenv("MC_NOPAUSE");
+	if (e && atoi(e)) return;
+	DIR *d = opendir("/proc");
+	if (!d) return;
+	for (struct dirent *de; (de = readdir(d)) && bg_count < (int)(sizeof(bg_pids) / sizeof(bg_pids[0]));)
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= 1 || pid == getpid()) continue;
+		int paused = 0;
+		for (int i = 0; i < bg_count; i++) paused |= bg_pids[i] == pid;
+		if (paused) continue;
+		char path[64], comm[32] = "";
+		snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+		FILE *f = fopen(path, "re");
+		if (!f) continue;
+		if (fgets(comm, sizeof(comm), f)) comm[strcspn(comm, "\n")] = 0;
+		fclose(f);
+		for (size_t k = 0; k < sizeof(bg_names) / sizeof(bg_names[0]); k++)
+			if (!strcmp(comm, bg_names[k]) && kill(pid, SIGSTOP) == 0)
+			{
+				bg_pids[bg_count++] = pid;
+				printf("mediacenter: in pausa durante il video: %s (pid %d)\n", comm, pid);
+			}
+	}
+	closedir(d);
+}
+
+// Diag: every 10 s of a video, the other programs that took more than 5% of
+// the CPU (both cores = 100%, as top shows it), to find what slows the
+// decoder (MC_DIAG=0: off). Also the CPU all the other programs took
+// together, from /proc/stat, which counts the short ones that come and go
+// between two looks too. In the first 20 s, right after power-on the
+// busiest time, it looks every 2 s and names the 3 busiest programs even
+// under 5%, with how many programs were started in between (also from
+// /proc/stat: the short ones never show by name).
+#define CPU_PIDS 1024
+static struct { int pid; unsigned long long ticks; } cpu_prev[CPU_PIDS], cpu_cur[CPU_PIDS];
+static int cpu_nprev;
+static double cpu_t;
+static unsigned long long cpu_all_prev, cpu_busy_prev, cpu_own_prev, cpu_forks_prev;
+static double cpu_start;
+// early: names of the programs started, "name<parent", seen by spawn_scan
+static struct { char name[40]; int count; } spawn[16];
+static int spawn_n, spawn_maxpid;
+static double spawn_t;
+
+static void cpu_diag(double t, int reset)
+{
+	if (reset) { cpu_nprev = 0; cpu_t = 0; cpu_start = t; spawn_n = 0; spawn_maxpid = 0; spawn_t = 0; }
+	int early = t - cpu_start < 20;
+	if (!dd.on || (cpu_t && t - cpu_t < (early ? 2 : 10))) return;
+	// early: the 3 busiest, whatever their share
+	char top_name[3][20] = { "" };
+	double top_pct[3] = { 0 };
+	unsigned long long forks = 0;
+	DIR *d = opendir("/proc");
+	if (!d) return;
+	int n = 0;
+	static long hz;
+	static int ncpu;
+	if (!hz) { hz = sysconf(_SC_CLK_TCK); ncpu = (int)sysconf(_SC_NPROCESSORS_ONLN); }
+	if (hz <= 0) hz = 100;
+	if (ncpu <= 0) ncpu = 1;
+	char line[512] = "";
+	int len = 0, shown = 0;
+	unsigned long long own = 0, all = 0, busy = 0;
+	FILE *ps = fopen("/proc/stat", "re");
+	if (ps)
+	{
+		// cpu  user nice system idle iowait irq softirq steal
+		unsigned long long v[8] = { 0 };
+		if (fscanf(ps, "cpu %llu %llu %llu %llu %llu %llu %llu %llu", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) >= 4)
+		{
+			for (int i = 0; i < 8; i++) all += v[i];
+			busy = all - v[3] - v[4];
+		}
+		// "processes N": programs started since power-on
+		char sl[256];
+		while (fgets(sl, sizeof(sl), ps))
+			if (sscanf(sl, "processes %llu", &forks) == 1) break;
+		fclose(ps);
+	}
+	for (struct dirent *de; (de = readdir(d)) && n < CPU_PIDS;)
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= 0) continue;
+		char path[64], buf[512];
+		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		if (fd < 0) continue;
+		ssize_t r = read(fd, buf, sizeof(buf) - 1);
+		close(fd);
+		if (r <= 0) continue;
+		buf[r] = 0;
+		// pid (comm) state ppid ... utime is field 14, stime 15
+		char *open_p = strchr(buf, '('), *close_p = strrchr(buf, ')');
+		if (!open_p || !close_p) continue;
+		unsigned long long ut = 0, st = 0;
+		if (sscanf(close_p + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &ut, &st) != 2) continue;
+		cpu_cur[n].pid = pid;
+		cpu_cur[n].ticks = ut + st;
+		n++;
+		if (pid == getpid()) own = ut + st;
+		if (!cpu_t || pid == getpid()) continue;
+		long long before = -1;  // started since the last look: next time
+		for (int i = 0; i < cpu_nprev; i++)
+			if (cpu_prev[i].pid == pid) { before = (long long)cpu_prev[i].ticks; break; }
+		if (before < 0) continue;
+		double pct = 100.0 * (double)(ut + st - (unsigned long long)before) / ((t - cpu_t) * hz * ncpu);
+		if (early)
+		{
+			for (int k = 0; k < 3; k++)
+				if (pct > top_pct[k])
+				{
+					for (int j = 2; j > k; j--) { top_pct[j] = top_pct[j - 1]; memcpy(top_name[j], top_name[j - 1], sizeof(top_name[j])); }
+					top_pct[k] = pct;
+					size_t nl = (size_t)(close_p - open_p - 1);
+					if (nl >= sizeof(top_name[k])) nl = sizeof(top_name[k]) - 1;
+					memcpy(top_name[k], open_p + 1, nl);
+					top_name[k][nl] = 0;
+					break;
+				}
+			continue;
+		}
+		if (pct >= 5 && len < (int)sizeof(line) - 64)
+		{
+			*close_p = 0;
+			len += snprintf(line + len, sizeof(line) - len, "%s%s %.0f%%", shown ? ", " : "", open_p + 1, pct);
+			shown++;
+		}
+	}
+	closedir(d);
+	if (cpu_t)
+	{
+		char tot[48] = "";
+		if (all > cpu_all_prev && busy >= cpu_busy_prev && cpu_all_prev)
+		{
+			long long other = (long long)(busy - cpu_busy_prev) - (long long)(own - cpu_own_prev);
+			if (other < 0) other = 0;
+			snprintf(tot, sizeof(tot), " (altri in tutto %.0f%%)", 100.0 * (double)other / (double)(all - cpu_all_prev));
+		}
+		if (early)
+		{
+			for (int k = 0; k < 3 && top_pct[k] >= 0.5; k++)
+				len += snprintf(line + len, sizeof(line) - len, "%s%s %.0f%%", k ? ", " : "", top_name[k], top_pct[k]);
+			// the names seen, most started first ("name<parent")
+			char names[320] = "";
+			int nl = 0;
+			for (int k = 0; k < 6 && spawn_n; k++)
+			{
+				int b = 0;
+				for (int i = 1; i < spawn_n; i++) if (spawn[i].count > spawn[b].count) b = i;
+				if (!spawn[b].count) break;
+				nl += snprintf(names + nl, sizeof(names) - nl, "%s%s x%d", k ? ", " : " (", spawn[b].name, spawn[b].count);
+				spawn[b].count = 0;
+			}
+			if (nl) snprintf(names + nl, sizeof(names) - nl, ")");
+			spawn_n = 0;
+			printf("mediacenter: diag altri programmi %.0f s: %s%s, programmi partiti %llu%s\n", t - cpu_start,
+				len ? line : "nessuno", tot, cpu_forks_prev && forks >= cpu_forks_prev ? forks - cpu_forks_prev : 0ULL, names);
+		}
+		else
+			printf("mediacenter: diag altri programmi %.0f s: %s%s\n", mc.clock, shown ? line : "nessuno sopra il 5%", tot);
+	}
+	cpu_all_prev = all;
+	cpu_busy_prev = busy;
+	cpu_own_prev = own;
+	cpu_forks_prev = forks;
+	memcpy(cpu_prev, cpu_cur, n * sizeof(cpu_cur[0]));
+	cpu_nprev = n;
+	cpu_t = t;
+}
+
+// The name of a program and its parent from /proc/<pid>/stat; 0 if gone.
+static int proc_name(int pid, char *name, size_t len, int *ppid)
+{
+	char path[64], buf[256];
+	snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+	int fd = open(path, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) return 0;
+	ssize_t r = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (r <= 0) return 0;
+	buf[r] = 0;
+	char *o = strchr(buf, '('), *c = strrchr(buf, ')');
+	if (!o || !c) return 0;
+	size_t nl = (size_t)(c - o - 1);
+	if (nl >= len) nl = len - 1;
+	memcpy(name, o + 1, nl);
+	name[nl] = 0;
+	if (ppid && sscanf(c + 2, "%*c %d", ppid) != 1) *ppid = 0;
+	return 1;
+}
+
+// Diag, first 20 s of a video: every 0.1 s, the programs started since the
+// last look (higher pids), counted by name and parent for the "altri
+// programmi" lines; most of them last less than the 2 s between those.
+static void spawn_scan(double t)
+{
+	if (!dd.on || t - cpu_start >= 20 || t - spawn_t < 0.1) return;
+	spawn_t = t;
+	DIR *d = opendir("/proc");
+	if (!d) return;
+	int first = !spawn_maxpid, top = spawn_maxpid;
+	for (struct dirent *de; (de = readdir(d));)
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= spawn_maxpid) continue;
+		if (pid > top) top = pid;
+		if (first) continue;    // the first look only notes the highest pid
+		char name[20], parent[20] = "?", key[40];
+		int ppid = 0;
+		if (!proc_name(pid, name, sizeof(name), &ppid)) continue;
+		if (ppid > 0) proc_name(ppid, parent, sizeof(parent), NULL);
+		snprintf(key, sizeof(key), "%s<%s", name, parent);
+		int i = 0;
+		while (i < spawn_n && strcmp(spawn[i].name, key)) i++;
+		if (i == spawn_n)
+		{
+			if (spawn_n == (int)(sizeof(spawn) / sizeof(spawn[0]))) continue;
+			snprintf(spawn[spawn_n].name, sizeof(spawn[0].name), "%s", key);
+			spawn[spawn_n++].count = 0;
+		}
+		spawn[i].count++;
+	}
+	closedir(d);
+	spawn_maxpid = top;
+}
+
+// While a video plays the player comes before the other programs (1), and
+// back to normal after it (0): right after power-on the start-up scripts
+// took up to 39% of the CPU and the 1080p stuttered for 25 s. All the
+// player's threads (decoder ones included) go to nice -10, the loop that
+// reads the file and sends the sound and aplay, its sound, to -15 so they
+// stay ahead of the decoders. Looked at again with bg_pause, for the threads
+// and the aplay started later (a new audio track). MC_NOPRIO=1: left alone.
+static void prio_apply(int on)
+{
+	const char *e = getenv("MC_NOPRIO");
+	if (on && e && atoi(e)) return;
+	static int said;
+	int me = getpid(), main_tid = (int)syscall(SYS_gettid), n = 0;
+	DIR *d = opendir("/proc/self/task");
+	if (d)
+	{
+		for (struct dirent *de; (de = readdir(d));)
+		{
+			int tid = atoi(de->d_name);
+			if (tid <= 0) continue;
+			int want = !on ? 0 : tid == main_tid ? -15 : -10;
+			if (getpriority(PRIO_PROCESS, (id_t)tid) != want && !setpriority(PRIO_PROCESS, (id_t)tid, want)) n++;
+		}
+		closedir(d);
+	}
+	// aplay, started by popen: our child, or the child of its shell
+	d = opendir("/proc");
+	if (d)
+	{
+		for (struct dirent *de; (de = readdir(d));)
+		{
+			int pid = atoi(de->d_name), ppid = 0, pp2 = 0;
+			char name[20], pname[20];
+			if (pid <= 1 || pid == me || !proc_name(pid, name, sizeof(name), &ppid) || strcmp(name, "aplay")) continue;
+			if (ppid != me && !(proc_name(ppid, pname, sizeof(pname), &pp2) && pp2 == me)) continue;
+			int want = on ? -15 : 0;
+			if (getpriority(PRIO_PROCESS, (id_t)pid) != want && !setpriority(PRIO_PROCESS, (id_t)pid, want)) n++;
+		}
+		closedir(d);
+	}
+	// with autogroup scheduling the kernel shares the CPU between sessions
+	// first, whatever the nice of their programs: our session's share too
+	int ag = -1, fd = open("/proc/self/autogroup", O_WRONLY | O_CLOEXEC);
+	if (fd >= 0)
+	{
+		ag = dprintf(fd, "%d", on ? -10 : 0) > 0;
+		close(fd);
+	}
+	if (on && n && !said++)
+		printf("mediacenter: precedenza al video sugli altri programmi (%d processi e thread, gruppo %s)\n", n,
+			ag < 0 ? "non usato" : ag ? "si" : "no");
+	if (!on) said = 0;
 }
 
 static void screen_rebuild(void)
@@ -1327,6 +1799,99 @@ static void yuv_band(uint8_t *row_buf, int y)
 	}
 }
 
+// The controls over a picture of the FPGA accelerator: the picture is only
+// in the frame buffer (no cache, slow to read), so each row of the band is
+// read back in 64-byte blocks into row_buf, blended there 16 pixels at a
+// time with NEON (same bytes as yuv_band) and written back.
+// Time spent, for "diag comandi sopra l'acceleratore".
+// With a core that blends them (accel_link.c, acc_ovl_prepare) only the
+// preparation of what changed is counted.
+static struct { int pics, w_pics, core, w_core; double read, blend, w_read, w_blend, prep, w_prep; } od;
+
+#if defined(__arm__)
+#pragma GCC push_options
+#pragma GCC target("fpu=neon")
+// x / 255 rounded down, exact for x <= 65407 (all values used here)
+static inline uint16x8_t div255_16(uint16x8_t x)
+{
+	return vshrq_n_u16(vaddq_u16(vaddq_u16(x, vdupq_n_u16(1)), vshrq_n_u16(x, 8)), 8);
+}
+// (p * (255 - a) + q * a + 127) / 255 on 8 lanes
+static inline uint8x8_t mix255(uint8x8_t p, uint8x8_t q, uint8x8_t a)
+{
+	uint16x8_t n = vmull_u8(p, vsub_u8(vdup_n_u8(255), a));
+	n = vmlal_u8(n, q, a);
+	n = vaddq_u16(n, vdupq_n_u16(127));
+	return vmovn_u16(div255_16(n));
+}
+// 16 + v * 219 / 255 on 8 lanes
+static inline uint8x8_t grey_y(uint8x8_t v)
+{
+	return vadd_u8(vmovn_u16(div255_16(vmull_u8(v, vdup_n_u8(219)))), vdup_n_u8(16));
+}
+#endif
+
+static void fb_read_row(uint8_t *dst, const uint8_t *src, int n)
+{
+	int i = 0;
+#if defined(__arm__)
+	const uint8_t *s = src;
+	uint8_t *d = dst;
+	for (; i + 64 <= n; i += 64)
+		__asm__ volatile(
+			"vld1.8 {d0-d3}, [%0]!\n\t"
+			"vld1.8 {d4-d7}, [%0]!\n\t"
+			"vst1.8 {d0-d3}, [%1]!\n\t"
+			"vst1.8 {d4-d7}, [%1]!\n\t"
+			: "+r"(s), "+r"(d) : : "d0", "d1", "d2", "d3", "d4", "d5", "d6", "d7", "memory");
+#endif
+	if (i < n) memcpy(dst + i, src + i, (size_t)(n - i));
+}
+
+static void yuv_band_fast(uint8_t *row_buf, int y)
+{
+	int x = 0;
+#if defined(__arm__)
+	const uint8_t *a = ovl_a + (size_t)(y - ovl_y) * fb_w;
+	const uint8_t *v = ovl_v + (size_t)(y - ovl_y) * fb_w;
+	for (; x + 16 <= fb_w; x += 16)
+	{
+		// 8 pairs Y0 U Y1 V; coverage and grey of the even and odd pixels
+		uint8x8x4_t p = vld4_u8(row_buf + 2 * x);
+		uint8x8x2_t aa = vld2_u8(a + x), vv = vld2_u8(v + x);
+		p.val[0] = mix255(p.val[0], grey_y(vv.val[0]), aa.val[0]);
+		p.val[2] = mix255(p.val[2], grey_y(vv.val[1]), aa.val[1]);
+		uint8x8_t ac = vrhadd_u8(aa.val[0], aa.val[1]); // (a0 + a1 + 1) / 2
+		p.val[1] = mix255(p.val[1], vdup_n_u8(128), ac);
+		p.val[3] = mix255(p.val[3], vdup_n_u8(128), ac);
+		vst4_u8(row_buf + 2 * x, p);
+	}
+	if (x + 1 < fb_w)
+	{
+		// the last pixels: yuv_band's own loop from x
+		for (; x + 1 < fb_w; x += 2)
+		{
+			if (!a[x] && !a[x + 1]) continue;
+			uint8_t *q = row_buf + 2 * x;
+			for (int k = 0; k < 2; k++)
+			{
+				unsigned al = a[x + k], vy = 16 + v[x + k] * 219 / 255;
+				q[2 * k] = (uint8_t)((q[2 * k] * (255 - al) + vy * al + 127) / 255);
+			}
+			unsigned acs = (a[x] + a[x + 1] + 1) / 2;
+			q[1] = (uint8_t)((q[1] * (255 - acs) + 128 * acs + 127) / 255);
+			q[3] = (uint8_t)((q[3] * (255 - acs) + 128 * acs + 127) / 255);
+		}
+	}
+#else
+	(void)x;
+	yuv_band(row_buf, y);
+#endif
+}
+#if defined(__arm__)
+#pragma GCC pop_options
+#endif
+
 // Picture line l of a DVD picture packed as YUYV. An interlaced picture's
 // 4:2:0 colour rows alternate between its two fields: line l takes the row
 // of its own field (2 * (l / 4) + l % 2), or the colour of fast motion
@@ -1431,6 +1996,8 @@ static void yuv_draw(void)
 	// a picture of the FPGA accelerator is only in the FPGA's memory: the
 	// core draws all of it and the controls are blended over it here
 	int accf = have_frame && f && acc.on && acc_buf_of(f);
+	// the core blends the controls over it (accel_link.c)
+	acc_ovl_on = accf && ovl_shown && ovl_a && ovl_y < fb_h && acc_ovl_prepare();
 	// exactly 2:1 (1920 on 960, the 4:3 format): the core narrows the
 	// accelerator's pictures too, when it can (acc_can21)
 	int narrow21 = narrow && f->width == w * 2 && !(w & 31) && acc_can21();
@@ -1441,17 +2008,29 @@ static void yuv_draw(void)
 		if (zcp_draw(f, rows)) core_rows = rows;
 	}
 	else if (accf) acc_fail_layout("the picture format is not drawn by the core");
+	int core_ovl = acc_ovl_on && core_rows;
+	acc_ovl_on = 0;
+	if (core_ovl) { od.core++; od.w_core++; }
 	if (accf)
 	{
 		if (!core_rows) fb_blank(fb_mem, (size_t)fb_stride * fb_h);
-		else if (ovl_shown && ovl_a)
+		else if (ovl_shown && ovl_a && !core_ovl)
+		{
+			double tr = 0, tb = 0;
 			for (int y = ovl_y > 0 ? ovl_y : 0; y < fb_h; y++)
 			{
 				uint8_t *out = fb_mem + (size_t)y * fb_stride;
-				memcpy(row_buf, out, (size_t)fb_w * 2);
-				yuv_band(row_buf, y);
+				double t0 = now_seconds();
+				fb_read_row(row_buf, out, fb_w * 2);
+				double t1 = now_seconds();
+				yuv_band_fast(row_buf, y);
 				memcpy(out, row_buf, (size_t)fb_w * 2);
+				tb += now_seconds() - t1;
+				tr += t1 - t0;
 			}
+			od.pics++; od.read += tr; od.blend += tb;
+			od.w_pics++; od.w_read += tr; od.w_blend += tb;
+		}
 		return;
 	}
 	for (int y = core_rows; y < fb_h; y++)
@@ -1560,8 +2139,10 @@ static void draw_video_frame(AVFrame *f)
 			if (dvd_yuv) overlay_soften = 1;
 			have_frame = 1;
 			fb_present_paged();
+			video_drawn_t = now_seconds();
 			draw_present += now_seconds() - t_start;
 			draw_count++;
+			loop_diag_drawn(now_seconds() - t_start);
 			return;
 		}
 	}
@@ -1643,6 +2224,7 @@ static AVFrame *due_frame(void)
 		memmove(mc.vq, mc.vq + n, (mc.vq_count - n) * sizeof(mc.vq[0]));
 		mc.vq_count -= n;
 		frames_shown++;
+		loop_diag_shown(mc.vq_count);
 	}
 	return show;
 }
@@ -1754,6 +2336,7 @@ static void media_resume(double t)
 		mc.clock = vt.clock = shown;
 		mc.audio_end = shown;
 	}
+	preroll_start();
 }
 
 static int num_chapters(void)
@@ -1831,8 +2414,12 @@ static int media_play(int in_playlist)
 	fb_clear();
 	if (mc.audio_only) draw_audio_screen();
 	dec_diag_reset();
+	loop_diag_reset();
 	main_idle(1);
+	bg_pause(1);
+	cpu_diag(now_seconds(), 1);
 	vt_start();
+	preroll_start();
 	frames_shown = frames_dropped = 0;
 	draw_convert = draw_present = 0;
 	draw_count = 0;
@@ -1844,14 +2431,20 @@ static int media_play(int in_playlist)
 	// The loop that reads the file and sends the sound runs ahead of the
 	// video decoding threads, so the sound keeps flowing on a heavy stream.
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5);
+	prio_apply(1);
 
 	int result = END_DONE;
-	double last = now_seconds(), osd_built = 0;
+	double last = now_seconds(), osd_built = 0, bg_look = last, bg_t0 = last;
 	while (!quit_requested)
 	{
 		double t = now_seconds();
 		double elapsed = t - last;
 		last = t;
+		if (p.state == ST_PLAY) loop_diag_round(t, elapsed);
+		cpu_diag(t, 0);
+		spawn_scan(t);
+		// every second in the first 20 s of the video, then every 10 s
+		if (t - bg_look >= (t - bg_t0 < 20 ? 1 : 10)) { bg_look = t; bg_pause(1); prio_apply(1); }
 		if (elapsed > 0.5) elapsed = 0.5;
 
 		for (int code; (code = input_key(t));)
@@ -1959,11 +2552,25 @@ static int media_play(int in_playlist)
 		AVFrame *show = NULL;
 		if (p.state == ST_PLAY)
 		{
-			mc.clock += elapsed;
-			played += elapsed;
+			if (preroll)
+			{
+				pthread_mutex_lock(&vt.lock);
+				int ready = mc.vq_count;
+				pthread_mutex_unlock(&vt.lock);
+				if (ready >= MC_VQ_ACC || t - preroll_t0 > 1.0 || mc.eof || !acc.on || !vt.on)
+				{
+					preroll = 0;
+					if (dd.on) printf("mediacenter: diag partenza: %d immagini pronte dopo %.0f ms\n", ready, 1000 * (t - preroll_t0));
+				}
+			}
+			if (!preroll)
+			{
+				mc.clock += elapsed;
+				played += elapsed;
+			}
 			fill();
 			feed_audio_output();
-			av_sync(elapsed);
+			if (!preroll) av_sync(elapsed);
 			if (vt.on)
 			{
 				pthread_mutex_lock(&vt.lock);
@@ -2055,7 +2662,19 @@ static int media_play(int in_playlist)
 		}
 		else if (p.dirty)
 		{
-			fb_present();
+			// A picture of the FPGA accelerator: the core draws all of it,
+			// the band under the controls first without them, and the ARM
+			// blends the controls after; drawn again on the page on screen
+			// that band would flash. While pictures keep coming the next one
+			// brings the controls; otherwise it is drawn on a new page.
+			int accp = have_frame && fb_present_yuv && yuv_last && acc.on && acc_buf_of(yuv_last);
+			if (!accp) fb_present();
+			else if (!(p.state == ST_PLAY && t - video_drawn_t < 0.1))
+			{
+				fb_redraw = 1;
+				fb_present_paged();
+				fb_redraw = 0;
+			}
 		}
 		p.dirty = 0;
 
@@ -2065,6 +2684,7 @@ static int media_play(int in_playlist)
 	vt_end();
 	fmt_close();
 	main_idle(0);
+	bg_pause(0);
 	if (mc.vstream >= 0 && played > 1)
 	{
 		double fps = av_q2d(mc.fmt->streams[mc.vstream]->avg_frame_rate);
@@ -2079,8 +2699,18 @@ static int media_play(int in_playlist)
 		if (dd.on && dd.n)
 			printf("mediacenter: diag decoder: %d immagini decodificate, media %.1f ms, peggiore %.1f ms, %d oltre %.1f ms (%.1f%%), %d saltate per recuperare\n",
 				dd.n, 1000 * dd.sum / dd.n, 1000 * dd.max, dd.over, 1000 * dd.budget, 100.0 * dd.over / dd.n, dd.skipped);
+		if (dd.on && dd.n)
+			printf("mediacenter: diag picchi: %d immagini decodificate oltre %.1f ms, serie piu' lunga oltre %.1f ms %d\n",
+				dd.peaks, 2000 * dd.budget, 1000 * dd.budget, dd.run_max);
+		if (dd.on && dd.pkts)
+			printf("mediacenter: diag bitrate video: medio %.2f Mbit/s, massimo in 10 s %.2f Mbit/s\n",
+				8 * dd.bytes / (dd.pkts * dd.budget) / 1e6, dd.rate_max / 1e6);
+		if (dd.on && ld.s_drawn)
+			printf("mediacenter: diag ciclo: %d giri oltre %.1f ms; disegno medio %.1f ms, di cui attesa pagina libera %.1f ms; coda vuota %d volte\n",
+				ld.s_slow, 1000 * dd.budget, 1000 * ld.s_draw / ld.s_drawn, 1000 * ld.s_wait / ld.s_drawn, ld.s_empty);
 		av_report();
 	}
+	prio_apply(0);
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
 	audio_close();
 	exit_question = "Uscire dal Video CD?";
@@ -2423,6 +3053,103 @@ static int browse_data_disc(const char *device)
 	return 0;
 }
 
+static int wait_key_for(double secs);
+
+// Power-on: the MiSTer's start-up scripts (rcS and the S.. scripts it
+// starts: USB mounting, udev, dbus, network) run for some 30-40 s after the
+// Main is up. A video started meanwhile shared the CPU with them and
+// stuttered for its first minute, so it waits for them to end.
+// The rcS that started us, if any, never ends while we run: not counted.
+static int boot_scripts_running(void)
+{
+	int mine[16], n = 0;
+	for (int pid = getppid(); pid > 1 && n < 16;)
+	{
+		mine[n++] = pid;
+		char name[32];
+		int pp = 0;
+		if (!proc_name(pid, name, sizeof(name), &pp)) break;
+		pid = pp;
+	}
+	DIR *d = opendir("/proc");
+	if (!d) return 0;
+	int found = 0;
+	for (struct dirent *de; !found && (de = readdir(d));)
+	{
+		int pid = atoi(de->d_name);
+		if (pid <= 1) continue;
+		char name[32];
+		if (!proc_name(pid, name, sizeof(name), NULL) || strcmp(name, "rcS")) continue;
+		// an ended one not yet collected by init is a zombie: state Z
+		char path[64], st[256];
+		snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+		int fd = open(path, O_RDONLY | O_CLOEXEC);
+		ssize_t r = fd >= 0 ? read(fd, st, sizeof(st) - 1) : -1;
+		if (fd >= 0) close(fd);
+		if (r <= 0) continue;
+		st[r] = 0;
+		char *c = strrchr(st, ')');
+		if (c && c[1] == ' ' && c[2] == 'Z') continue;
+		found = 1;
+		for (int i = 0; i < n; i++) if (mine[i] == pid) found = 0;
+	}
+	closedir(d);
+	return found;
+}
+
+// Returns 1 when B (Back) was pressed: the video is not started.
+// MC_NOBOOTWAIT=1 starts it at once as before.
+static int boot_wait(void)
+{
+	const char *e = getenv("MC_NOBOOTWAIT");
+	if (e && atoi(e)) return 0;
+	double up = 0;
+	FILE *f = fopen("/proc/uptime", "re");
+	if (f) { if (fscanf(f, "%lf", &up) != 1) up = 0; fclose(f); }
+	if (up <= 0 || up > 180) return 0;
+	if (!boot_scripts_running())
+	{
+		printf("mediacenter: avvio della MiSTer gia' finito (accesa da %.0f s)\n", up);
+		return 0;
+	}
+	if (reopen_screen()) return 0;
+	printf("mediacenter: la MiSTer sta finendo l'avvio (accesa da %.0f s): il video aspetta\n", up);
+	double t0 = now_seconds(), ended = 0, look = -1;
+	int shown = -1, back = 0;
+	const char *why = "massimo 60 s";
+	while (!quit_requested)
+	{
+		double t = now_seconds();
+		if (!ended && t - look >= 0.5)
+		{
+			look = t;
+			if (!boot_scripts_running()) ended = t;
+		}
+		if (ended && t - ended >= 2) { why = "avvio finito"; break; }
+		if (t - t0 >= 60) break;
+		int s = (int)(t - t0);
+		if (s != shown)
+		{
+			shown = s;
+			menu_begin();
+			if (fb_mem)
+			{
+				int sx = menu_sx(), sy = menu_sy();
+				char line[64];
+				text_centre(fb_h / 2 - 24 * sy, sx, sy, 1, "La MiSTer sta finendo l'avvio", fb_rgb(255, 200, 80));
+				snprintf(line, sizeof(line), "Il video parte da solo  (%d s)", s);
+				text_centre(fb_h / 2 - 4 * sy, sx, sy, 1, line, fb_rgb(255, 255, 255));
+				text_centre(fb_h - 14 * sy, sx, sy, 1, "B Indietro", fb_rgb(230, 230, 230));
+			}
+			menu_end();
+		}
+		int code = wait_key_for(0.1);
+		if (code == KEY_ESC || code == KEY_BACKSPACE) { back = 1; why = "B premuto"; break; }
+	}
+	printf("mediacenter: attesa fine avvio %.1f s (%s)\n", now_seconds() - t0, why);
+	return back;
+}
+
 static int play_disc_in_drive(const char *device)
 {
 	char path[32];
@@ -2450,7 +3177,7 @@ static int play_disc_in_drive(const char *device)
 		printf("mediacenter: %s, %d track(s)\n", kind, track_last);
 		if (reopen_screen()) return -1;
 		svcd_kind = strcmp(kind, "Video CD") ? "Super Video CD" : "Video CD";
-		svcd_play();
+		if (!boot_wait()) svcd_play();
 		svcd_kind = "Super Video CD";
 		close(cd_fd);
 		cd_fd = -1;
@@ -2464,12 +3191,13 @@ static int play_disc_in_drive(const char *device)
 		if (dvd_detect(device))
 		{
 			if (reopen_screen()) return -1;
-			dvd_play(device);
+			if (!boot_wait()) dvd_play(device);
 			return 0;
 		}
 		return browse_data_disc(device);
 	}
 
+	if (boot_wait()) return 0;
 	// The Video CD player opens the framebuffer and the controls itself and
 	// releases them when it ends.
 	fb_close();
@@ -2563,6 +3291,7 @@ static int play_cue_image(const char *cue)
 
 static int play_file(const char *path, int in_playlist)
 {
+	if (boot_wait()) return END_BACK;
 	if (is_dvd_path(path)) return dvd_play(path);
 	if (has_ext(path, (const char *const[]){ "cue", NULL }))
 	{
@@ -3550,6 +4279,10 @@ static void crt_adjust_screen(void)
 
 #include "splash.h"
 
+#ifndef MC_BUILD
+#define MC_BUILD "locale"
+#endif
+
 // The MMC picture for 3 s when the player starts from the Scripts menu (a
 // disc started by the Main goes straight to the film). It is drawn in the
 // lists' frame buffer, shown as 4:3 on the CRT and over HDMI. Any key skips
@@ -3584,6 +4317,13 @@ static void show_splash(void)
 			uint32_t *row = (uint32_t *)(fb_mem + (size_t)(y0 + y) * fb_stride) + x0;
 			for (int x = 0; x < dw; x++) row[x] = pal[src[x * SPLASH_W / dw]];
 		}
+		// the build number in the black band at the bottom, right of the
+		// centre, big enough to read on the CRT (24 lines out of 480)
+		char b[32];
+		snprintf(b, sizeof(b), "Build %s", MC_BUILD);
+		int s = dh / 160 > 2 ? dh / 160 : 2;
+		int tw = (int)strlen(b) * GLYPH_W * s;
+		fb_text(x0 + dw * 560 / 640 - tw, y0 + dh * 436 / 480, s, b, fb_rgb(200, 200, 200));
 	}
 	menu_end();
 	free(pic);

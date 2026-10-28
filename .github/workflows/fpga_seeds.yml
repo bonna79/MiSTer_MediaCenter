@@ -1,0 +1,54 @@
+name: Menu core fitter seeds (timing only)
+
+# Compiles the menu core with several fitter seeds side by side and prints
+# the worst setup slack of each clock, to pick the seed for menu.qsf.
+# Each seed's rbf is kept as an artifact.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/fpga_seeds.yml'
+
+jobs:
+  seed:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [1, 3, 4, 5, 6, 7, 8, 9]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile with Quartus, seed ${{ matrix.seed }}
+        run: |
+          sed -i 's/^set_global_assignment -name SEED .*/set_global_assignment -name SEED ${{ matrix.seed }}/' fpga/menu/menu.qsf
+          grep -n "SEED" fpga/menu/menu.qsf
+          cat > fpga/menu/slack.tcl <<'TCL'
+          project_open menu
+          create_timing_netlist
+          read_sdc
+          update_timing_netlist
+          foreach t {100 -40} {
+          	set_operating_conditions -model slow -temperature $t -voltage 1100
+          	update_timing_netlist
+          	foreach_in_collection c [all_clocks] {
+          		set n [get_clock_info -name $c]
+          		foreach_in_collection p [get_timing_paths -setup -to_clock $c -npaths 1] {
+          			puts [format "SLACK seed=${::env(SEED)} temp=%s %8.3f %s" $t [get_path_info $p -slack] $n]
+          		}
+          	}
+          }
+          delete_timing_netlist
+          project_close
+          TCL
+          docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
+            quartus_sh --flow compile menu.qpf > compile.log 2>&1 || { tail -50 compile.log; exit 1; }
+          cat fpga/menu/output_files/menu.fit.summary
+          docker run --rm -e SEED=${{ matrix.seed }} -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
+            quartus_sta -t slack.tcl 2>&1 | grep "^SLACK" | sort -k4 -n
+          cp fpga/menu/output_files/menu.rbf menu_mediacenter_seed${{ matrix.seed }}.rbf
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mediacenter_rbf_seed${{ matrix.seed }}
+          path: menu_mediacenter_seed${{ matrix.seed }}.rbf

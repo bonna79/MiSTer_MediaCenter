@@ -2,12 +2,14 @@
 # - MC_PARSEONLY=1: the H.264 decoder reads the stream but does not rebuild
 #   the pixels (measurement, mediacenter --bench-parse)
 # - h264_mcacc.c: the FPGA accelerator, commands for the menu core (accel.c)
+# - h264_mcdbk.c: deblocking command of each macroblock for the core (A5: qp,
+#   neighbours; the core works out the edge strengths)
 diff --git a/libavcodec/h264_mcacc.c b/libavcodec/h264_mcacc.c
 new file mode 100644
-index 0000000..bcdddd1
+index 0000000..36a6710
 --- /dev/null
 +++ b/libavcodec/h264_mcacc.c
-@@ -0,0 +1,219 @@
+@@ -0,0 +1,242 @@
 +/* MiSTer MediaCenter FPGA accelerator (included by h264_slice.c).
 + *
 + * When the player sets mc_acc_hooks (and gives its own decoder context as
@@ -37,6 +39,9 @@ index 0000000..bcdddd1
 +    int (*slot)(void *opaque, const AVFrame *f);
 +    // the stream cannot be done by the FPGA
 +    void (*fail)(void *opaque, const char *why);
++    // the core filters the pictures (deblocking, command A5): set by the
++    // player when the core says so and MC_NODEBLOCK is not set
++    int deblock;
 +};
 +
 +struct mc_acc_hooks *mc_acc_hooks;
@@ -126,6 +131,18 @@ index 0000000..bcdddd1
 +    return n;
 +}
 +
++static int mcacc_dbk(const H264Context *h, const H264SliceContext *sl, uint32_t w[3], int *bad);
++
++// The deblocking command A5 of the macroblock, in the 3 words kept for it
++// before its A3; padding when the slice is not filtered.
++static void mcacc_dbk_put(const H264Context *h, H264SliceContext *sl, uint32_t *dw)
++{
++    int bad;
++    if (!mcacc_dbk(h, sl, dw, &bad))   // bad: never seen, left unfiltered
++        for (int i = 0; i < 3; i++)
++            dw[i] = 0xA0000000u;
++}
++
 +static void mcacc_mb(const H264Context *h, H264SliceContext *sl)
 +{
 +    struct mc_acc_pic *pic = h->mcacc;
@@ -134,19 +151,25 @@ index 0000000..bcdddd1
 +    const int mb_type = h->cur_pic.mb_type[sl->mb_xy];
 +    int16_t *mb = (int16_t *)sl->mb;
 +    int type, i, n = 0;
-+    uint32_t mask = 0, *coef, *head;
++    uint32_t mask = 0, *coef, *head, *dw = NULL;
 +
 +    if (IS_INTRA_PCM(mb_type)) type = 4;
 +    else if (IS_INTRA16x16(mb_type)) type = 3;
 +    else if (IS_INTRA4x4(mb_type)) type = IS_8x8DCT(mb_type) ? 2 : 1;
 +    else type = 0;
 +
-+    // at most: 38 words, the count, 384 coefficients
-+    mcacc_room(pic, 424);
++    // at most: the deblocking command (3 words), 38 words, the count, 384 coefficients
++    mcacc_room(pic, 427);
++    if (mc_acc_hooks->deblock && sl->deblocking_filter) {
++        dw = pic->p;
++        pic->p += 3;
++    }
 +    mcacc_w(pic, 0xA3000000u | type << 16 | sl->mb_y << 8 | sl->mb_x);
 +    if (type == 4) {
 +        for (i = 0; i < 384; i += 4)
 +            mcacc_w(pic, AV_RL32(sl->intra_pcm_ptr + i));
++        if (dw)
++            mcacc_dbk_put(h, sl, dw);
 +        return;
 +    }
 +    head = pic->p;                     // the mask goes here
@@ -226,6 +249,62 @@ index 0000000..bcdddd1
 +    }
 +    coef[-1] = n;
 +    pic->p = coef + n;
++    if (dw)
++        mcacc_dbk_put(h, sl, dw);
++}
+diff --git a/libavcodec/h264_mcdbk.c b/libavcodec/h264_mcdbk.c
+new file mode 100644
+index 0000000..464bd05
+--- /dev/null
++++ b/libavcodec/h264_mcdbk.c
+@@ -0,0 +1,48 @@
++/* MiSTer MediaCenter FPGA accelerator: the deblocking command A5 of one
++ * macroblock (accel/doc/comandi.md in the MiSTer MediaCenter repository).
++ * Included by h264_slice.c after loop_filter().
++ *
++ * The core works out the edge strengths itself, from the macroblock commands
++ * (A3: type, coefficients, references, vectors) as ff_h264_filter_mb() does
++ * for a progressive frame (no MBAFF, 4:2:0, 8 bit). Here only what the
++ * commands do not carry: the slice offsets, whether the left and top
++ * macroblocks are filtered against, and the qp of the edges. */
++
++/* The macroblock just read (sl->mb_xy): returns 1 and the 3 words of the
++ * command A5 if the slice is filtered, 0 if not. *bad is set when the
++ * stream does not fit the command (the macroblock is then left unfiltered). */
++static int mcacc_dbk(const H264Context *h, const H264SliceContext *sl, uint32_t w[3], int *bad)
++{
++    const int mb_xy = sl->mb_xy;
++    const uint8_t *qs = h->cur_pic.qscale_table;
++    const uint8_t (*ct)[QP_MAX_NUM + 1] = h->ps.pps->chroma_qp_table;
++    int avl, avt;
++
++    *bad = 0;
++    if (!sl->deblocking_filter)
++        return 0;
++    const int offa = sl->slice_alpha_c0_offset, offb = sl->slice_beta_offset;
++    if (FRAME_MBAFF(h) || FIELD_PICTURE(h) || h->pixel_shift || h->ps.sps->chroma_format_idc != 1 ||
++        offa < -16 || offa > 15 || offb < -16 || offb > 15) {
++        *bad = 1;
++        return 0;
++    }
++    // the neighbours, as fill_filter_caches
++    if (sl->deblocking_filter == 2) {
++        avl = h->slice_table[mb_xy - 1] == sl->slice_num;
++        avt = h->slice_table[mb_xy - h->mb_stride] == sl->slice_num;
++    } else {
++        avl = h->slice_table[mb_xy - 1] != 0xFFFF;
++        avt = h->slice_table[mb_xy - h->mb_stride] != 0xFFFF;
++    }
++    // qp: of the macroblock inside, the mean of the two macroblocks on its edges
++    const int q = qs[mb_xy];
++    const int nl = avl ? qs[mb_xy - 1] : q, nt = avt ? qs[mb_xy - h->mb_stride] : q;
++    const int qy0 = (q + nl + 1) >> 1, qy1 = (q + nt + 1) >> 1;
++    const int qb0 = (ct[0][q] + ct[0][nl] + 1) >> 1, qb1 = (ct[0][q] + ct[0][nt] + 1) >> 1;
++    const int qr0 = (ct[1][q] + ct[1][nl] + 1) >> 1, qr1 = (ct[1][q] + ct[1][nt] + 1) >> 1;
++    w[0] = 0xA5000000u | avl | avt << 1 | (offa & 31) << 2 | (offb & 31) << 7;
++    w[1] = qy0 | qy1 << 6 | q << 12 | qb0 << 18 | (uint32_t)qb1 << 24;
++    w[2] = ct[0][q] | qr0 << 6 | qr1 << 12 | ct[1][q] << 18;
++    return 1;
 +}
 diff --git a/libavcodec/h264_picture.c b/libavcodec/h264_picture.c
 index 46925e0..3d3baaa 100644
@@ -241,7 +320,7 @@ index 46925e0..3d3baaa 100644
          if (!h->droppable) {
              err = ff_h264_execute_ref_pic_marking(h);
 diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
-index aac6f26..76f955b 100644
+index aac6f26..12eab10 100644
 --- a/libavcodec/h264_slice.c
 +++ b/libavcodec/h264_slice.c
 @@ -475,6 +475,8 @@ int ff_h264_update_thread_context_for_user(AVCodecContext *dst,
@@ -261,10 +340,23 @@ index aac6f26..76f955b 100644
      ff_h264_unref_picture(&h->cur_pic);
      if (CONFIG_ERROR_RESILIENCE) {
          ff_h264_set_erpic(&h->er.cur_pic, NULL);
-@@ -2480,6 +2483,20 @@ static void predict_field_decoding_flag(const H264Context *h, H264SliceContext *
+@@ -2412,7 +2415,9 @@ static void loop_filter(const H264Context *h, H264SliceContext *sl, int start_x,
+     if (h->postpone_filter)
+         return;
+ 
+-    if (sl->deblocking_filter) {
++    // with the FPGA accelerator the pictures here are not real: the FPGA
++    // filters (command A5, h264_mcdbk.c)
++    if (sl->deblocking_filter && !h->mcacc_on) {
+         for (mb_x = start_x; mb_x < end_x; mb_x++)
+             for (mb_y = end_mb_y - FRAME_MBAFF(h); mb_y <= end_mb_y; mb_y++) {
+                 int mb_xy, mb_type;
+@@ -2480,6 +2485,22 @@ static void predict_field_decoding_flag(const H264Context *h, H264SliceContext *
      sl->mb_mbaff    = sl->mb_field_decoding_flag = IS_INTERLACED(mb_type) ? 1 : 0;
  }
  
++#include "h264_mcdbk.c"
++
 +/* MiSTer MediaCenter, measurement only: with MC_PARSEONLY=1 the decoder reads
 + * the stream (CABAC/CAVLC, macroblock modes, motion vectors, coefficients)
 + * but does not rebuild the pixels, to time what the ARM would still do if an
@@ -282,7 +374,7 @@ index aac6f26..76f955b 100644
  /**
   * Draw edges and report progress for the last MB row.
   */
-@@ -2561,6 +2578,8 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2561,6 +2582,8 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
          }
      }
  
@@ -291,7 +383,7 @@ index aac6f26..76f955b 100644
      if (h->ps.pps->cabac) {
          /* realign */
          align_get_bits(&sl->gb);
-@@ -2586,7 +2605,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2586,7 +2609,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
  
              ret = ff_h264_decode_mb_cabac(h, sl);
  
@@ -302,7 +394,7 @@ index aac6f26..76f955b 100644
                  ff_h264_hl_decode_mb(h, sl);
  
              // FIXME optimal? or let mb_decode decode 16x32 ?
-@@ -2595,7 +2616,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2595,7 +2620,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
  
                  ret = ff_h264_decode_mb_cabac(h, sl);
  
@@ -313,7 +405,7 @@ index aac6f26..76f955b 100644
                      ff_h264_hl_decode_mb(h, sl);
                  sl->mb_y--;
              }
-@@ -2657,7 +2680,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2657,7 +2684,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
  
              ret = ff_h264_decode_mb_cavlc(h, sl);
  
@@ -324,7 +416,7 @@ index aac6f26..76f955b 100644
                  ff_h264_hl_decode_mb(h, sl);
  
              // FIXME optimal? or let mb_decode decode 16x32 ?
-@@ -2665,7 +2690,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+@@ -2665,7 +2694,9 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
                  sl->mb_y++;
                  ret = ff_h264_decode_mb_cavlc(h, sl);
  
