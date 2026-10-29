@@ -1,0 +1,37 @@
+name: Release 3.5 notes - remove the power warning
+
+# One-off: removes the two HDMI + CRT power warning blocks from the
+# published v3.5 release notes (the zip is not touched).
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release_notes_fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Edit the v3.5 release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release view v3.5 --json body -q .body > before.md
+          python3 - <<'PY'
+          import re
+          s = open('before.md', encoding='utf-8').read()
+          pat = re.compile(r'> \[!WARNING\]\n> \*\*(AVVERTENZA: HDMI e CRT collegati insieme|WARNING: HDMI and CRT connected together)\.\*\*[^\n]*\n\n?')
+          s, n = pat.subn('', s)
+          print('blocks removed:', n)
+          if n != 2:
+              raise SystemExit('expected 2 blocks')
+          open('after.md', 'w', encoding='utf-8').write(s)
+          PY
+          diff before.md after.md || true
+          gh release edit v3.5 --notes-file after.md
+          gh release view v3.5 --json body -q .body | head -5
