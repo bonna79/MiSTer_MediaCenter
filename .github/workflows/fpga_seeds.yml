@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        seed: [10, 11, 12, 13, 14, 15, 16, 17]
+        seed: [18, 19, 20, 21, 22, 23, 24, 25]
     steps:
       - uses: actions/checkout@v4
 
