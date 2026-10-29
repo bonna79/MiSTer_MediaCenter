@@ -1,9 +1,3 @@
-> [!WARNING]
-> **AVVERTENZA: HDMI e CRT collegati insieme.** Se usi insieme l'uscita HDMI verso un televisore LCD e l'uscita VGA→SCART verso un CRT, collega **MiSTer, televisore LCD e CRT alla stessa multipresa elettrica**. Con i due televisori su prese diverse, accendere il CRT mentre il MiSTer è acceso può far passare uno sbalzo elettrico attraverso il MiSTer, tramite le masse dei cavi. È successo in una prova: l'HDMI è diventato verde per qualche secondo, poi l'immagine è sparita su tutte e due le uscite (l'audio continuava) e il pad non rispondeva più; è servito riavviare. Se non puoi usare la stessa multipresa, **accendi il CRT prima del MiSTer**.
-
-> [!WARNING]
-> **WARNING: HDMI and CRT connected together.** If you use the HDMI output to an LCD TV and the VGA→SCART output to a CRT at the same time, plug **the MiSTer, the LCD TV and the CRT into the same power strip**. With the two TVs on different wall sockets, switching the CRT on while the MiSTer is running can send an electrical surge through the MiSTer via the cable grounds. It happened in a test: HDMI turned green for a few seconds, then the picture vanished on both outputs (the sound kept playing) and the pad stopped responding; a reboot was needed. If you cannot use the same power strip, **switch the CRT on before the MiSTer**.
-
 <p align="center"><img src="https://raw.githubusercontent.com/bonna79/MiSTer_MediaCenter/main/docs/mmc.png" alt="MiSTer Media Center" width="720"></p>
 
 > Sviluppato con l'aiuto dell'intelligenza artificiale (Claude di Anthropic). / Developed with the help of AI (Anthropic's Claude).
