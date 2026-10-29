@@ -131,8 +131,9 @@ endfunction
 
 // ------------------------------------------------------------ fetch side
 
-localparam F_IDLE = 0, F_REGION = 1, F_SETUP = 2, F_REQ = 3, F_NEXT = 4, F_SW = 5, F_REQ0 = 6;
-reg  [2:0] fs;
+localparam F_IDLE = 0, F_REGION = 1, F_SETUP = 2, F_REQ = 3, F_NEXT = 4, F_SW = 5, F_REQ0 = 6,
+           F_UN = 7, F_M1 = 8, F_M2 = 9, F_M3 = 10;
+reg  [3:0] fs;
 assign pre_full = fs != F_IDLE; // still reading a macroblock: no pre_start now
 reg  [1:0] f_rq, f_rk;
 reg        f_l;
@@ -143,6 +144,30 @@ reg signed [15:0] f_mvx, f_mvy;
 reg  [7:0] f_slot;
 wire [3:0] f_bi = fj_all16 || fj_qeq[f_rq] ? {f_rq, 2'b00} : {f_rq, f_rk};
 wire [31:0] f_mv = f_l ? fj_mvs1[f_bi * 32 +: 32] : fj_mvs[f_bi * 32 +: 32];
+
+// Union window of a quadrant split in 4x4 blocks: when the four windows of
+// one list fit together in a window buffer (luma at most 21 x 21, chroma
+// 9 x 9), the quadrant is read once for that list and its four blocks are
+// calculated from the same buffer, each at its own offset. Positions in the
+// macroblock, integer samples: luma rx + (mvx >> 2), chroma rx / 2 + (mvx >> 3).
+reg        f_fit;             // the region being read is such a union
+reg [31:0] f_m4[4];           // vectors of the quadrant's four blocks
+reg signed [15:0] u_lx[4], u_ly[4], u_cx[4], u_cy[4];
+reg signed [15:0] u_lx0[2], u_lx1[2], u_ly0[2], u_ly1[2];   // pairwise min (0) and max (1)
+reg signed [15:0] u_cx0[2], u_cx1[2], u_cy0[2], u_cy1[2];
+reg signed [15:0] u_mlx, u_mly, u_mcx, u_mcy;                // minimum of the four
+reg signed [15:0] u_xlx, u_xly, u_xcx, u_xcy;                // maximum
+reg  [4:0] u_wl, u_hl, u_wc, u_hc;                           // union window size
+// the union of each buffer, for the calculation side
+reg        bfit[2];
+reg signed [15:0] bmlx[2], bmly[2], bmcx[2], bmcy[2];
+
+function signed [15:0] smin(input signed [15:0] a, input signed [15:0] b);
+	smin = a < b ? a : b;
+endfunction
+function signed [15:0] smax(input signed [15:0] a, input signed [15:0] b);
+	smax = a > b ? a : b;
+endfunction
 
 reg        bused[2];          // buffer holds a region not yet calculated
 
@@ -175,7 +200,8 @@ always @* begin
 end
 
 reg signed [15:0] r_swx[3], r_swy[3];
-reg  [4:0] r_sn[3];
+reg  [4:0] r_sn[3];           // rows
+reg  [4:0] r_snw[3];          // width
 
 // request parameters of the region being requested
 reg signed [15:0] jwy[3];
@@ -279,7 +305,7 @@ end
 
 // ------------------------------------------------------ calculation side
 
-localparam M_IDLE = 0, M_REGION = 1, M_WAITY = 3, M_LLOAD = 4, M_LCALC = 5, M_WAITC = 6,
+localparam M_IDLE = 0, M_REGION = 1, M_OFF = 2, M_WAITY = 3, M_LLOAD = 4, M_LCALC = 5, M_WAITC = 6,
            M_CCALC = 7, M_NEXT = 8, M_CLOAD = 9;
 reg  [3:0] ms;
 reg  [1:0] c_rq, c_rk;
@@ -288,6 +314,8 @@ reg        c_l;
 reg        c_b;
 reg  [4:0] S;                 // region size 16, 8, 4
 reg  [3:0] rx, ry;            // region position in the macroblock
+reg  [3:0] dx, dy;            // luma window of the region inside its buffer's window (union)
+reg  [2:0] cdx, cdy;          // chroma
 reg signed [15:0] mvx, mvy;
 reg  [1:0] plane;             // chroma plane being predicted: 1 U, 2 V
 wire [3:0] c_bi = all16 || quad_eq[c_rq] ? {c_rq, 2'b00} : {c_rq, c_rk};
@@ -372,8 +400,8 @@ reg [167:0] win_q;
 wire [1:0] lg_last = S == 16 ? 2'd3 : (S == 8 ? 2'd1 : 2'd0);
 reg  [4:0] win_addr;
 always @* begin
-	if (ms == M_LLOAD) win_addr = lk[2:0];
-	else win_addr = lg == lg_last ? ly + 5'd7 : ly + 5'd6;
+	if (ms == M_LLOAD) win_addr = lk[2:0] + dy;
+	else win_addr = (lg == lg_last ? ly + 5'd7 : ly + 5'd6) + dy;
 end
 always @(posedge clk) win_q <= winrow[{c_b, win_addr}];
 
@@ -389,8 +417,8 @@ wire [2:0] cxf = mvx[2:0], cyf = mvy[2:0];
 reg [71:0] crow0, crow1, cwin_q;
 reg  [3:0] cwin_addr;
 always @* begin
-	if (ms == M_CLOAD) cwin_addr = {2'b00, ck};
-	else cwin_addr = cg_last ? cr + 4'd3 : cr + 4'd2;
+	if (ms == M_CLOAD) cwin_addr = {2'b00, ck} + cdy;
+	else cwin_addr = (cg_last ? cr + 4'd3 : cr + 4'd2) + cdy;
 end
 always @(posedge clk) cwin_q <= cwin[{c_b, plane[1], cwin_addr}];
 
@@ -576,6 +604,54 @@ always @(posedge clk) begin
 			f_mvx <= f_mv[15:0];
 			f_mvy <= f_mv[31:16];
 			f_slot <= f_l ? fj_qslot1[f_rq * 8 +: 8] : fj_qslot[f_rq * 8 +: 8];
+			for (i = 0; i < 4; i = i + 1)
+				f_m4[i] <= f_l ? fj_mvs1[(f_rq * 4 + i) * 32 +: 32] : fj_mvs[(f_rq * 4 + i) * 32 +: 32];
+			f_fit <= 0;
+			// first block of a 4x4 quadrant: try the union window
+			fs <= !fj_all16 && !fj_qeq[f_rq] && f_rk == 0 ? F_UN : F_SW;
+		end
+
+		// union window: positions of the four blocks, then their minimum
+		// and maximum, two at a time
+		F_UN: begin
+			for (i = 0; i < 4; i = i + 1) begin
+				u_lx[i] <= $signed({12'd0, f_rq[0], i[0], 2'd0}) + ($signed(f_m4[i][15:0]) >>> 2);
+				u_ly[i] <= $signed({12'd0, f_rq[1], i[1], 2'd0}) + ($signed(f_m4[i][31:16]) >>> 2);
+				u_cx[i] <= $signed({13'd0, f_rq[0], i[0], 1'd0}) + ($signed(f_m4[i][15:0]) >>> 3);
+				u_cy[i] <= $signed({13'd0, f_rq[1], i[1], 1'd0}) + ($signed(f_m4[i][31:16]) >>> 3);
+			end
+			fs <= F_M1;
+		end
+
+		F_M1: begin
+			for (i = 0; i < 2; i = i + 1) begin
+				u_lx0[i] <= smin(u_lx[i * 2], u_lx[i * 2 + 1]); u_lx1[i] <= smax(u_lx[i * 2], u_lx[i * 2 + 1]);
+				u_ly0[i] <= smin(u_ly[i * 2], u_ly[i * 2 + 1]); u_ly1[i] <= smax(u_ly[i * 2], u_ly[i * 2 + 1]);
+				u_cx0[i] <= smin(u_cx[i * 2], u_cx[i * 2 + 1]); u_cx1[i] <= smax(u_cx[i * 2], u_cx[i * 2 + 1]);
+				u_cy0[i] <= smin(u_cy[i * 2], u_cy[i * 2 + 1]); u_cy1[i] <= smax(u_cy[i * 2], u_cy[i * 2 + 1]);
+			end
+			fs <= F_M2;
+		end
+
+		F_M2: begin
+			u_mlx <= smin(u_lx0[0], u_lx0[1]);
+			u_mly <= smin(u_ly0[0], u_ly0[1]);
+			u_mcx <= smin(u_cx0[0], u_cx0[1]);
+			u_mcy <= smin(u_cy0[0], u_cy0[1]);
+			u_xlx <= smax(u_lx1[0], u_lx1[1]);
+			u_xly <= smax(u_ly1[0], u_ly1[1]);
+			u_xcx <= smax(u_cx1[0], u_cx1[1]);
+			u_xcy <= smax(u_cy1[0], u_cy1[1]);
+			fs <= F_M3;
+		end
+
+		F_M3: begin
+			u_wl <= 5'(u_xlx - u_mlx + 16'sd9);
+			u_hl <= 5'(u_xly - u_mly + 16'sd9);
+			u_wc <= 5'(u_xcx - u_mcx + 16'sd3);
+			u_hc <= 5'(u_xcy - u_mcy + 16'sd3);
+			f_fit <= u_xlx - u_mlx <= 16'sd12 && u_xly - u_mly <= 16'sd12 &&
+			         u_xcx - u_mcx <= 16'sd6 && u_xcy - u_mcy <= 16'sd6;
 			fs <= F_SW;
 		end
 
@@ -585,6 +661,19 @@ always @(posedge clk) begin
 				r_swx[i] <= swx[i];
 				r_swy[i] <= swy[i];
 				r_sn[i] <= sn[i];
+				r_snw[i] <= sn[i];
+			end
+			if (f_fit) begin
+				r_swx[0] <= iX + u_mlx - 2;
+				r_swy[0] <= iY + u_mly - 2;
+				r_sn[0] <= u_hl;
+				r_snw[0] <= u_wl;
+				for (i = 1; i < 3; i = i + 1) begin
+					r_swx[i] <= (iX >>> 1) + u_mcx;
+					r_swy[i] <= (iY >>> 1) + u_mcy;
+					r_sn[i] <= u_hc;
+					r_snw[i] <= u_wc;
+				end
 			end
 			fs <= F_SETUP;
 		end
@@ -594,11 +683,11 @@ always @(posedge clk) begin
 				jwy[i] <= r_swy[i];
 				jn[i] <= r_sn[i];
 				jw0[i] <= clampv(r_swx[i], i == 0 ? W : Wc) >>> 3;
-				jK[i] <= 3'((clampv(r_swx[i] + $signed({11'd0, r_sn[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
+				jK[i] <= 3'((clampv(r_swx[i] + $signed({11'd0, r_snw[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
 				            (clampv(r_swx[i], i == 0 ? W : Wc) >>> 3) + 1);
 				jbase[i] <= slot_base + (i == 0 ? AW'(0) : (i == 1 ? AW'(UOFF) : AW'(VOFF)));
 				kn[f_b * 3 + i] <= r_sn[i];
-				kK[f_b * 3 + i] <= 3'((clampv(r_swx[i] + $signed({11'd0, r_sn[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
+				kK[f_b * 3 + i] <= 3'((clampv(r_swx[i] + $signed({11'd0, r_snw[i]}) - 16'sd1, i == 0 ? W : Wc) >>> 3) -
 				                      (clampv(r_swx[i], i == 0 ? W : Wc) >>> 3) + 1);
 				ksh[f_b * 3 + i] <= 3'(r_swx[i]);
 				klf[f_b * 3 + i] <= r_swx[i] >= 0 ? 5'd0 : (r_swx[i] < -21 ? 5'd21 : 5'(-r_swx[i]));
@@ -607,6 +696,11 @@ always @(posedge clk) begin
 				krc[f_b * 3 + i] <= 5'(jlim - (clampv(r_swx[i], i == 0 ? W : Wc) & ~16'sd7));
 			end
 			bused[f_b] <= 1;
+			bfit[f_b] <= f_fit;
+			bmlx[f_b] <= u_mlx;
+			bmly[f_b] <= u_mly;
+			bmcx[f_b] <= u_mcx;
+			bmcy[f_b] <= u_mcy;
 			rq_j <= 0;
 			rq_row <= 0;
 			fs <= F_REQ0;
@@ -629,20 +723,19 @@ always @(posedge clk) begin
 			if (rq_row + 1'd1 == jn[rq_j] && rq_j == 2) fs <= F_NEXT;
 		end
 
+		// next region; the 4x4 blocks of a quadrant go list by list (all
+		// four blocks of list 0, then of list 1), so a union is read once
 		F_NEXT: begin
 			f_b <= ~f_b;
 			fs <= F_REGION;
-			if (!f_l && fj_use1[f_rq]) f_l <= 1;
+			if (!fj_all16 && !fj_qeq[f_rq] && !f_fit && f_rk != 3) f_rk <= f_rk + 1'd1;
+			else if (!f_l && fj_use1[f_rq]) begin f_l <= 1; f_rk <= 0; end
 			else if (fj_all16) fs <= F_IDLE;
-			else if (fj_qeq[f_rq] || f_rk == 3) begin
+			else begin
 				f_rk <= 0;
 				f_rq <= f_rq + 1'd1;
 				f_l <= !fj_use0[f_rq + 1'd1];
 				if (f_rq == 3) fs <= F_IDLE;
-			end
-			else begin
-				f_rk <= f_rk + 1'd1;
-				f_l <= !fj_use0[f_rq];
 			end
 		end
 
@@ -703,14 +796,27 @@ always @(posedge clk) begin
 		end
 
 		M_WAITY: if (got[c_b][0]) begin
-			ms <= M_LLOAD;
+			ms <= M_OFF;
 			lk <= 0;
+		end
+
+		// offsets inside a union window (its buffer's descriptor is set
+		// before its rows come in)
+		M_OFF: begin
+			dx <= 0; dy <= 0; cdx <= 0; cdy <= 0;
+			if (bfit[c_b]) begin
+				dx <= 4'($signed({12'd0, rx}) + (mvx >>> 2) - bmlx[c_b]);
+				dy <= 4'($signed({12'd0, ry}) + (mvy >>> 2) - bmly[c_b]);
+				cdx <= 3'($signed({12'd0, rx >> 1}) + (mvx >>> 3) - bmcx[c_b]);
+				cdy <= 3'($signed({12'd0, ry >> 1}) + (mvy >>> 3) - bmcy[c_b]);
+			end
+			ms <= M_LLOAD;
 		end
 
 		// first 6 window rows
 		M_LLOAD: begin
 			lk <= lk + 1'd1;
-			if (lk >= 1) lw6[lk - 1] <= win_q;
+			if (lk >= 1) lw6[lk - 1] <= win_q >> {dx, 3'd0};
 			if (lk == 6) begin
 				ms <= M_LCALC;
 				ly <= 0;
@@ -735,7 +841,7 @@ always @(posedge clk) begin
 				lg <= 0;
 				ly <= ly + 1'd1;
 				for (i = 0; i < 5; i = i + 1) lw6[i] <= lw6[i + 1];
-				lw6[5] <= win_q;
+				lw6[5] <= win_q >> {dx, 3'd0};
 				if (ly == S - 1) begin
 					plane <= 1;
 					ms <= M_WAITC;
@@ -752,9 +858,9 @@ always @(posedge clk) begin
 		// first 2 chroma window rows
 		M_CLOAD: begin
 			ck <= ck + 1'd1;
-			if (ck == 1) crow0 <= cwin_q;
+			if (ck == 1) crow0 <= cwin_q >> {cdx, 3'd0};
 			if (ck == 2) begin
-				crow1 <= cwin_q;
+				crow1 <= cwin_q >> {cdx, 3'd0};
 				ms <= M_CCALC;
 				cr <= 0;
 				cg <= 0;
@@ -782,7 +888,7 @@ always @(posedge clk) begin
 				cg <= 0;
 				cr <= cr + 1'd1;
 				crow0 <= crow1;
-				crow1 <= cwin_q;
+				crow1 <= cwin_q >> {cdx, 3'd0};
 				if (cr == (S >> 1) - 1) begin
 					if (plane == 1) begin plane <= 2; ms <= M_WAITC; end
 					else ms <= M_NEXT;
@@ -791,23 +897,24 @@ always @(posedge clk) begin
 		end
 
 		// region done: its buffer is free for the fetch
+		// (the 4x4 blocks of a quadrant list by list, as the fetch side; the
+		// blocks of a union share its buffer)
 		M_NEXT: begin
-			bused[c_b] <= 0;
-			got[c_b] <= 0;
-			c_b <= ~c_b;
+			if (!bfit[c_b] || c_rk == 3 || all16 || quad_eq[c_rq]) begin
+				bused[c_b] <= 0;
+				got[c_b] <= 0;
+				c_b <= ~c_b;
+			end
 			ms <= M_REGION;
-			if (!c_l && use1[c_rq]) c_l <= 1;
+			if (!all16 && !quad_eq[c_rq] && c_rk != 3) c_rk <= c_rk + 1'd1;
+			else if (!c_l && use1[c_rq]) begin c_l <= 1; c_rk <= 0; end
 			else if (all16) begin fin <= 1; ms <= M_IDLE; end
-			else if (quad_eq[c_rq] || c_rk == 3) begin
+			else begin
 				c_rk <= 0;
 				c_rq <= c_rq + 1'd1;
 				c_rqw <= c_rq + 1'd1;
 				c_l <= !use0[c_rq + 1'd1];
 				if (c_rq == 3) begin fin <= 1; ms <= M_IDLE; end
-			end
-			else begin
-				c_rk <= c_rk + 1'd1;
-				c_l <= !use0[c_rq];
 			end
 		end
 
