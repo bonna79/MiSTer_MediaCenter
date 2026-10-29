@@ -15,8 +15,8 @@
 // Prediction comes out 4 pixels a clock on px_*.
 //
 // The fetch side works from its own copy of a macroblock's vectors, given
-// with pre_start as soon as the engine has them (one macroblock can wait in
-// pre_*), so the windows of the next macroblock are read while the current
+// with pre_start as soon as the engine has them and the fetch side is free
+// (pre_full low), so the windows of the next macroblock are read while the current
 // one is still being calculated. Every inter macroblock gets one pre_start
 // and, later and in the same order, one start.
 module acc_mc #(
@@ -109,15 +109,13 @@ function [4:0] plan(input [511:0] m0, input [511:0] m1, input [55:0] q);
 	end
 endfunction
 
-// the macroblock waiting for the fetch side (pd_) and the one it reads (fj_)
-reg          pd_v;
-reg    [7:0] pd_mbx, pd_mby, fj_mbx, fj_mby;
-reg  [511:0] pd_mvs, pd_mvs1, fj_mvs, fj_mvs1;
-reg   [31:0] pd_qslot, pd_qslot1, fj_qslot, fj_qslot1;
-reg    [3:0] pd_use0, pd_use1, fj_use0, fj_use1;
-reg          pd_all16, fj_all16;
-reg    [3:0] pd_qeq, fj_qeq;
-assign pre_full = pd_v;
+// the macroblock the fetch side reads (fj_)
+reg    [7:0] fj_mbx, fj_mby;
+reg  [511:0] fj_mvs, fj_mvs1;
+reg   [31:0] fj_qslot, fj_qslot1;
+reg    [3:0] fj_use0, fj_use1;
+reg          fj_all16;
+reg    [3:0] fj_qeq;
 
 // ----------------------------------------------------------- region plan
 // Passes in order: quadrant rq, 4x4 block rk inside it, list l (0 then 1,
@@ -135,6 +133,7 @@ endfunction
 
 localparam F_IDLE = 0, F_REGION = 1, F_SETUP = 2, F_REQ = 3, F_NEXT = 4, F_SW = 5, F_REQ0 = 6;
 reg  [2:0] fs;
+assign pre_full = fs != F_IDLE; // still reading a macroblock: no pre_start now
 reg  [1:0] f_rq, f_rk;
 reg        f_l;
 reg        f_b;               // window buffer being filled
@@ -569,25 +568,6 @@ always @(posedge clk) begin
 	// ---- fetch: regions in order, each on a free buffer
 	if (mem_rd && !mem_busy) mem_rd <= 0;
 	case (fs)
-		// the macroblock waiting is taken
-		F_IDLE: if (pd_v) begin
-			pd_v <= 0;
-			fj_mbx <= pd_mbx;
-			fj_mby <= pd_mby;
-			fj_mvs <= pd_mvs;
-			fj_mvs1 <= pd_mvs1;
-			fj_qslot <= pd_qslot;
-			fj_qslot1 <= pd_qslot1;
-			fj_use0 <= pd_use0;
-			fj_use1 <= pd_use1;
-			fj_all16 <= pd_all16;
-			fj_qeq <= pd_qeq;
-			f_rq <= 0;
-			f_rk <= 0;
-			f_l <= !pd_use0[0];
-			fs <= F_REGION;
-		end
-
 		F_REGION: if (!bused[f_b]) begin
 			f_S <= reg_size(fj_all16, fj_qeq, f_rq);
 			if (fj_all16) begin f_rx <= 0; f_ry <= 0; end
@@ -834,22 +814,24 @@ always @(posedge clk) begin
 		default: ms <= M_IDLE;
 	endcase
 
-	// the next macroblock, from the engine
+	// the next macroblock, from the engine (only while the fetch side is idle)
 	if (pre_start) begin
-		pd_v <= 1;
-		pd_mbx <= pre_mbx;
-		pd_mby <= pre_mby;
-		pd_mvs <= pre_mvs;
-		pd_mvs1 <= pre_mvs1;
-		pd_qslot <= pre_qslot;
-		pd_qslot1 <= pre_qslot1;
-		pd_use0 <= ~{pre_qref[48], pre_qref[34], pre_qref[20], pre_qref[6]};
-		pd_use1 <= ~{pre_qref[55], pre_qref[41], pre_qref[27], pre_qref[13]};
-		{pd_all16, pd_qeq} <= plan(pre_mvs, pre_mvs1, pre_qref);
+		fj_mbx <= pre_mbx;
+		fj_mby <= pre_mby;
+		fj_mvs <= pre_mvs;
+		fj_mvs1 <= pre_mvs1;
+		fj_qslot <= pre_qslot;
+		fj_qslot1 <= pre_qslot1;
+		fj_use0 <= ~{pre_qref[48], pre_qref[34], pre_qref[20], pre_qref[6]};
+		fj_use1 <= ~{pre_qref[55], pre_qref[41], pre_qref[27], pre_qref[13]};
+		{fj_all16, fj_qeq} <= plan(pre_mvs, pre_mvs1, pre_qref);
+		f_rq <= 0;
+		f_rk <= 0;
+		f_l <= pre_qref[6]; // list 0 not used by quadrant 0
+		fs <= F_REGION;
 	end
 
 	if (reset) begin
-		pd_v <= 0;
 		ms <= M_IDLE;
 		fs <= F_IDLE;
 		mem_rd <= 0;
@@ -878,7 +860,6 @@ initial begin
 	px_valid = 0;
 	p0_we = 0;
 	fs = F_IDLE;
-	pd_v = 0;
 	mem_rd = 0;
 	f_b = 0;
 	c_b = 0;
