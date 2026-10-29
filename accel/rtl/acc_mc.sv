@@ -145,23 +145,26 @@ reg  [7:0] f_slot;
 wire [3:0] f_bi = fj_all16 || fj_qeq[f_rq] ? {f_rq, 2'b00} : {f_rq, f_rk};
 wire [31:0] f_mv = f_l ? fj_mvs1[f_bi * 32 +: 32] : fj_mvs[f_bi * 32 +: 32];
 
-// Union window of a quadrant split in 4x4 blocks: when the four windows of
-// one list fit together in a window buffer (luma at most 16 wide and 21
-// high, so a block is at most 7 samples right of the union's left edge;
-// chroma 9 x 9), the quadrant is read once for that list and its four blocks are
-// calculated from the same buffer, each at its own offset. Positions in the
-// macroblock, integer samples: luma rx + (mvx >> 2), chroma rx / 2 + (mvx >> 3).
+// Union window of a quadrant split in 4x4 blocks: when the four blocks of
+// one list have the same integer x vector (so the union is 13 luma and 5
+// chroma samples wide, the right blocks 4 and 2 samples in) and their windows
+// fit together in height (luma at most 21 rows, chroma 9), the quadrant is
+// read once for that list and its four blocks are calculated from the same
+// buffer, each at its own offset. Positions in the macroblock, integer
+// samples: luma ry + (mvy >> 2), chroma ry / 2 + (mvy >> 3).
 reg        f_fit;             // the region being read is such a union
 reg [31:0] f_mvr;              // vector of block u_kk, read one block a clock
 reg  [1:0] u_kk, u_k2;
 reg        u_v1, u_v2;
-reg signed [13:0] p_lx, p_ly, p_cx, p_cy;                    // position of block u_k2
-reg signed [13:0] u_mlx, u_mly, u_mcx, u_mcy;                // minimum of the four
-reg signed [13:0] u_xlx, u_xly, u_xcx, u_xcy;                // maximum
-reg  [4:0] u_wl, u_hl, u_wc, u_hc;                           // union window size
+reg signed [13:0] p_ly, p_cy;                                // position of block u_k2
+reg signed [13:0] u_mly, u_mcy;                              // minimum of the four
+reg signed [13:0] u_xly, u_xcy;                              // maximum
+reg  [4:0] u_hl, u_hc;                                       // union window height
+reg [13:0] u_mx0;                                            // integer x vector of block 0
+reg        u_xne;                                            // some block's integer x differs
 // the union of each buffer, for the calculation side
 reg        bfit[2];
-reg signed [13:0] bmlx[2], bmly[2], bmcx[2], bmcy[2];
+reg signed [13:0] bmly[2], bmcy[2];
 
 
 reg        bused[2];          // buffer holds a region not yet calculated
@@ -309,9 +312,9 @@ reg        c_l;
 reg        c_b;
 reg  [4:0] S;                 // region size 16, 8, 4
 reg  [3:0] rx, ry;            // region position in the macroblock
-reg  [2:0] dx;                // luma window of the region inside its buffer's window (union)
-reg  [3:0] dy;
-reg  [2:0] cdx, cdy;          // chroma
+reg        dx;                // region in the right half of its buffer's window (union): luma 4, chroma 2 samples
+reg  [3:0] dy;                // rows below the union window's top
+reg  [2:0] cdy;               // chroma
 reg signed [15:0] mvx, mvy;
 reg  [1:0] plane;             // chroma plane being predicted: 1 U, 2 V
 wire [3:0] c_bi = all16 || quad_eq[c_rq] ? {c_rq, 2'b00} : {c_rq, c_rk};
@@ -597,19 +600,13 @@ always @(posedge clk) begin
 	u_v2 <= u_v1;
 	u_k2 <= u_kk;
 	if (u_v1) begin
-		p_lx <= $signed({10'd0, f_rq[0], u_kk[0], 2'd0}) + 14'($signed(f_mvr[15:0]) >>> 2);
 		p_ly <= $signed({10'd0, f_rq[1], u_kk[1], 2'd0}) + 14'($signed(f_mvr[31:16]) >>> 2);
-		p_cx <= $signed({11'd0, f_rq[0], u_kk[0], 1'd0}) + 14'($signed(f_mvr[15:0]) >>> 3);
 		p_cy <= $signed({11'd0, f_rq[1], u_kk[1], 1'd0}) + 14'($signed(f_mvr[31:16]) >>> 3);
 	end
 	if (u_v2) begin
-		if (u_k2 == 0 || p_lx < u_mlx) u_mlx <= p_lx;
 		if (u_k2 == 0 || p_ly < u_mly) u_mly <= p_ly;
-		if (u_k2 == 0 || p_cx < u_mcx) u_mcx <= p_cx;
 		if (u_k2 == 0 || p_cy < u_mcy) u_mcy <= p_cy;
-		if (u_k2 == 0 || p_lx > u_xlx) u_xlx <= p_lx;
 		if (u_k2 == 0 || p_ly > u_xly) u_xly <= p_ly;
-		if (u_k2 == 0 || p_cx > u_xcx) u_xcx <= p_cx;
 		if (u_k2 == 0 || p_cy > u_xcy) u_xcy <= p_cy;
 	end
 	case (fs)
@@ -632,6 +629,8 @@ always @(posedge clk) begin
 		F_UN: begin
 			f_mvr <= f_mv;
 			u_kk <= f_rk;
+			if (f_rk == 0) begin u_mx0 <= f_mv[15:2]; u_xne <= 0; end
+			else if (f_mv[15:2] != u_mx0) u_xne <= 1;
 			u_v1 <= 1;
 			f_rk <= f_rk + 1'd1;
 			if (f_rk == 3) fs <= F_M1;
@@ -641,12 +640,9 @@ always @(posedge clk) begin
 		F_M2: fs <= F_M3;
 
 		F_M3: begin
-			u_wl <= 5'(u_xlx - u_mlx + 14'sd9);
 			u_hl <= 5'(u_xly - u_mly + 14'sd9);
-			u_wc <= 5'(u_xcx - u_mcx + 14'sd3);
 			u_hc <= 5'(u_xcy - u_mcy + 14'sd3);
-			f_fit <= u_xlx - u_mlx <= 14'sd7 && u_xly - u_mly <= 14'sd12 &&
-			         u_xcx - u_mcx <= 14'sd6 && u_xcy - u_mcy <= 14'sd6;
+			f_fit <= !u_xne && u_xly - u_mly <= 14'sd12 && u_xcy - u_mcy <= 14'sd6;
 			fs <= F_SW;
 		end
 
@@ -659,15 +655,13 @@ always @(posedge clk) begin
 				r_snw[i] <= sn[i];
 			end
 			if (f_fit) begin
-				r_swx[0] <= iX + u_mlx - 2;
 				r_swy[0] <= iY + u_mly - 2;
 				r_sn[0] <= u_hl;
-				r_snw[0] <= u_wl;
+				r_snw[0] <= 5'd13;
 				for (i = 1; i < 3; i = i + 1) begin
-					r_swx[i] <= (iX >>> 1) + u_mcx;
 					r_swy[i] <= (iY >>> 1) + u_mcy;
 					r_sn[i] <= u_hc;
-					r_snw[i] <= u_wc;
+					r_snw[i] <= 5'd5;
 				end
 			end
 			fs <= F_SETUP;
@@ -692,9 +686,7 @@ always @(posedge clk) begin
 			end
 			bused[f_b] <= 1;
 			bfit[f_b] <= f_fit;
-			bmlx[f_b] <= u_mlx;
 			bmly[f_b] <= u_mly;
-			bmcx[f_b] <= u_mcx;
 			bmcy[f_b] <= u_mcy;
 			rq_j <= 0;
 			rq_row <= 0;
@@ -798,11 +790,10 @@ always @(posedge clk) begin
 		// offsets inside a union window (its buffer's descriptor is set
 		// before its rows come in)
 		M_OFF: begin
-			dx <= 0; dy <= 0; cdx <= 0; cdy <= 0;
+			dx <= 0; dy <= 0; cdy <= 0;
 			if (bfit[c_b]) begin
-				dx <= 3'($signed({12'd0, rx}) + (mvx >>> 2) - bmlx[c_b]);
+				dx <= rx[2];
 				dy <= 4'($signed({12'd0, ry}) + (mvy >>> 2) - bmly[c_b]);
-				cdx <= 3'($signed({12'd0, rx >> 1}) + (mvx >>> 3) - bmcx[c_b]);
 				cdy <= 3'($signed({12'd0, ry >> 1}) + (mvy >>> 3) - bmcy[c_b]);
 			end
 			ms <= M_LLOAD;
@@ -811,7 +802,7 @@ always @(posedge clk) begin
 		// first 6 window rows
 		M_LLOAD: begin
 			lk <= lk + 1'd1;
-			if (lk >= 1) lw6[lk - 1] <= win_q >> {dx, 3'd0};
+			if (lk >= 1) lw6[lk - 1] <= (dx ? win_q >> 32 : win_q);
 			if (lk == 6) begin
 				ms <= M_LCALC;
 				ly <= 0;
@@ -836,7 +827,7 @@ always @(posedge clk) begin
 				lg <= 0;
 				ly <= ly + 1'd1;
 				for (i = 0; i < 5; i = i + 1) lw6[i] <= lw6[i + 1];
-				lw6[5] <= win_q >> {dx, 3'd0};
+				lw6[5] <= (dx ? win_q >> 32 : win_q);
 				if (ly == S - 1) begin
 					plane <= 1;
 					ms <= M_WAITC;
@@ -853,9 +844,9 @@ always @(posedge clk) begin
 		// first 2 chroma window rows
 		M_CLOAD: begin
 			ck <= ck + 1'd1;
-			if (ck == 1) crow0 <= cwin_q >> {cdx, 3'd0};
+			if (ck == 1) crow0 <= (dx ? cwin_q >> 16 : cwin_q);
 			if (ck == 2) begin
-				crow1 <= cwin_q >> {cdx, 3'd0};
+				crow1 <= (dx ? cwin_q >> 16 : cwin_q);
 				ms <= M_CCALC;
 				cr <= 0;
 				cg <= 0;
@@ -883,7 +874,7 @@ always @(posedge clk) begin
 				cg <= 0;
 				cr <= cr + 1'd1;
 				crow0 <= crow1;
-				crow1 <= cwin_q >> {cdx, 3'd0};
+				crow1 <= (dx ? cwin_q >> 16 : cwin_q);
 				if (cr == (S >> 1) - 1) begin
 					if (plane == 1) begin plane <= 2; ms <= M_WAITC; end
 					else ms <= M_NEXT;
