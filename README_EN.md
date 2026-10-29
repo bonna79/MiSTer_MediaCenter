@@ -2,9 +2,6 @@
 
 [Italiano](README.md) · **English**
 
-> [!WARNING]
-> **WARNING: HDMI and CRT connected together.** If you use the HDMI output to an LCD TV and the VGA→SCART output to a CRT at the same time, plug **the MiSTer, the LCD TV and the CRT into the same power strip**. With the two TVs on different wall sockets, switching the CRT on while the MiSTer is running can send an electrical surge through the MiSTer via the cable grounds. It happened in a test: HDMI turned green for a few seconds, then the picture vanished on both outputs (the sound kept playing) and the pad stopped responding; a reboot was needed. If you cannot use the same power strip, **switch the CRT on before the MiSTer**.
-
 <p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.5 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
@@ -70,9 +67,6 @@ Tested on a real MiSTer on 25–28 October 2026, on a Sony Trinitron CRT (SCART 
 The technical details are in the [accelerator's technical sheet](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md).
 
 ## What's new in version 3.0
-
-> [!WARNING]
-> **WARNING: HDMI and CRT connected together.** If you use the HDMI output to an LCD TV and the VGA→SCART output to a CRT at the same time, plug **the MiSTer, the LCD TV and the CRT into the same power strip**. With the two TVs on different wall sockets, switching the CRT on while the MiSTer is running can send an electrical surge through the MiSTer via the cable grounds. It happened in a test: HDMI turned green for a few seconds, then the picture vanished on both outputs (the sound kept playing) and the pad stopped responding; a reboot was needed. If you cannot use the same power strip, **switch the CRT on before the MiSTer**.
 
 3.0 plays **1080p H.264** video smoothly, over HDMI and on the CRT: the MiSTer's FPGA helps the ARM decode it.
 
