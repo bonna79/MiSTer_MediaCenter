@@ -63,7 +63,7 @@ reg         e_reset = 1;
 wire        e_rd, e_we;
 wire [24:0] e_addr;
 wire  [7:0] e_burst, e_be;
-wire [63:0] e_din;
+wire [63:0] e_din, e_din2;
 wire        e_take;                     // the engine's request goes into the queue
 wire        e_valid, e_ready;
 wire [31:0] e_cmd;
@@ -78,7 +78,7 @@ acc_engine #(.AW(25)) engine
 (
 	.clk(clk), .reset(e_reset),
 	.cmd_valid(e_valid), .cmd_data(e_cmd), .cmd_ready(e_ready),
-	.mem_rd(e_rd), .mem_we(e_we), .mem_addr(e_addr), .mem_burst(e_burst), .mem_din(e_din), .mem_be(e_be),
+	.mem_rd(e_rd), .mem_we(e_we), .mem_addr(e_addr), .mem_burst(e_burst), .mem_din(e_din), .mem_din2(e_din2), .mem_be(e_be),
 	.mem_busy(!e_take), .mem_dout(e_dout), .mem_dout_ready(e_dout_ready),
 	.pic_done(e_done), .pic_slot(e_slot), .error(e_err), .mb_count(e_mbs)
 );
@@ -96,6 +96,7 @@ reg        rq_we_[RQ];
 reg [28:0] rq_addr[RQ];
 reg  [7:0] rq_burst[RQ];
 reg [63:0] rq_din[RQ];
+reg [63:0] rq_din2[RQ];             // second word of a write burst of two
 
 localparam TQ = 32;
 reg  [4:0] tq_wp = 0, tq_rp = 0;
@@ -121,13 +122,17 @@ wire        p_we    = f_take ? f_we : e_we;
 wire [28:0] p_addr  = f_take ? f_addr : {SLOTS[31:28], e_addr};
 wire  [7:0] p_burst = f_take ? f_burst : e_burst;
 wire [63:0] p_din   = f_take ? f_din : e_din;
+wire [63:0] p_din2  = e_din2;
 wire  [1:0] p_kind  = f_take ? f_kind : 2'd0;
 wire        tpush   = push && !p_we;
 
-// the head of the queue goes on the bus
+// the head of the queue goes on the bus; a write burst of two keeps the
+// bus for its second word (w2: the first word is out)
+reg        w2 = 0;
+reg [63:0] din2;
 wire on_bus = ddr_rd || ddr_we;
 wire bus_ok = on_bus && !ddr_busy;
-wire pop    = rq_n != 0 && (!on_bus || bus_ok) && grant;
+wire pop    = rq_n != 0 && (!on_bus || (bus_ok && !w2)) && grant;
 
 always @(posedge clk) begin
 	reg [3:0] n;
@@ -136,6 +141,7 @@ always @(posedge clk) begin
 		rq_addr[rq_wp]  <= p_addr;
 		rq_burst[rq_wp] <= p_burst;
 		rq_din[rq_wp]   <= p_din;
+		rq_din2[rq_wp]  <= p_din2;
 		rq_wp <= rq_wp + 1'd1;
 	end
 	if (pop) rq_rp <= rq_rp + 1'd1;
@@ -144,8 +150,14 @@ always @(posedge clk) begin
 	rq_room <= n <= RQ - 3;
 
 	if (bus_ok) begin
-		ddr_rd <= 0;
-		ddr_we <= 0;
+		if (w2) begin
+			ddr_din <= din2;
+			w2 <= 0;
+		end
+		else begin
+			ddr_rd <= 0;
+			ddr_we <= 0;
+		end
 	end
 	if (pop) begin
 		ddr_rd    <= !rq_we_[rq_rp];
@@ -153,6 +165,8 @@ always @(posedge clk) begin
 		ddr_addr  <= rq_addr[rq_rp];
 		ddr_burst <= rq_burst[rq_rp];
 		ddr_din   <= rq_din[rq_rp];
+		din2      <= rq_din2[rq_rp];
+		w2        <= rq_we_[rq_rp] && rq_burst[rq_rp] == 8'd2;
 	end
 end
 
