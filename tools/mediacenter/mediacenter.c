@@ -2122,6 +2122,12 @@ static void draw_video_frame(AVFrame *f)
 		}
 		if (sw >= 320 && fw > sw) fw = sw;
 		if (sh >= 240 && fh > sh) fh = sh;
+		// 1440 wide pictures of the FPGA accelerator (810p): the core narrows
+		// only by 3:2 or 2:1, so they get a 960 wide frame buffer (also while
+		// the normal decoder waits for the format to be drawable again)
+		int w32 = f->width * 2 / 3;
+		if (f->width == 1440 && half && ((acc.on && acc_buf_of(f)) || acc_file_off == 2) && fw > w32 && fw * 2 != f->width)
+			fw = w32;
 		pic_fields = (f->flags & AV_FRAME_FLAG_INTERLACED) && fh == h && getenv("MC_FIELDS") && atoi(getenv("MC_FIELDS"));
 		// A picture drawn at its own size goes to the framebuffer as YUV and
 		// the FPGA converts the colours: the ARM only copies it. Decided on

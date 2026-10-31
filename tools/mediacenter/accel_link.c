@@ -568,12 +568,13 @@ static void al_close(void)
 // ---------------------------------------------------------------- the player
 
 // Turns the accelerator on for a new video decoder when it can do the
-// stream: H.264, 8-bit 4:2:0, 1920 wide, drawn with half its lines by the
-// zero-copy block (light mode). MC_NOACC=1 turns it off.
+// stream: H.264, 8-bit 4:2:0, 1920 wide (or 1440: 810p, drawn on a 960
+// wide frame buffer), drawn with half its lines by the zero-copy block
+// (light mode). MC_NOACC=1 turns it off.
 static void acc_try(AVCodecContext *ctx, const AVStream *st)
 {
 	const char *e = getenv("MC_NOACC");
-	if (ctx->codec_id != AV_CODEC_ID_H264 || st->codecpar->format != AV_PIX_FMT_YUV420P || st->codecpar->width != 1920 ||
+	if (ctx->codec_id != AV_CODEC_ID_H264 || st->codecpar->format != AV_PIX_FMT_YUV420P || (st->codecpar->width != 1920 && st->codecpar->width != 1440) ||
 		!half_lines || fb_fake || zc_get_buffer2 || acc_file_off || (e && atoi(e))) return;
 	char why[96];
 	if (zcp_map())
