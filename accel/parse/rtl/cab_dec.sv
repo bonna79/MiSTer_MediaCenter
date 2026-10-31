@@ -82,7 +82,7 @@ function [3:0] last8(input [5:0] i);
 endfunction
 
 localparam S_IDLE = 0, S_INIT = 1, S_INIT2 = 2, S_LOAD = 3, S_DREAD = 4, S_DLUT = 5, S_DEXE = 6, S_BYP = 7,
-           S_TERM = 8, S_PCM = 9, S_SKIP = 10, S_RSIG = 11, S_RPOP = 12;
+           S_TERM = 8, S_PCM = 9, S_SKIP = 10, S_RSIG = 11, S_RPOP = 12, S_PCM2 = 13;
 reg  [3:0] st;
 reg  [9:0] dctx;                  // context of the decision being decoded
 assign busy = st != S_IDLE;
@@ -119,20 +119,29 @@ always @(posedge clk) begin
 end
 always @(*) ctx_q = ctx_fw ? ctx_fwd : ctx_rd;
 
-// initialisation, 2 stages: ROM, then the state
+// initialisation, 3 stages: ROM, then ((m * qp) >> 4) + n, then the state
 reg [11:0] irom_a;
 reg [15:0] irom_q;
 always @(posedge clk) irom_q <= init_rom[irom_a];
+reg signed [15:0] ip;             // ((m * qp) >> 4) + n of context ip_a
+reg  [9:0] ip_a;
+reg        ip_v;
 
-function [6:0] pre_state(input [15:0] mn, input [5:0] qp);
+function signed [15:0] pre_mul(input [15:0] mn, input [5:0] qp);
 	reg signed [7:0] m, n;
 	reg signed [15:0] t;
-	reg signed [15:0] p;
 	begin
 		m = mn[15:8];
 		n = mn[7:0];
 		t = m * $signed({2'b00, qp});
-		p = (t >>> 4) + n;
+		pre_mul = (t >>> 4) + n;
+	end
+endfunction
+
+function [6:0] pre_state(input signed [15:0] pin);
+	reg signed [15:0] p;
+	begin
+		p = pin;
 		if (p < 1) p = 1;
 		if (p > 126) p = 126;
 		pre_state = p <= 63 ? {6'(63 - p), 1'b0} : {6'(p - 64), 1'b1};
@@ -269,17 +278,21 @@ always @(posedge clk) begin
 		// context initialisation: ROM address, ROM data, write
 		S_INIT: begin
 			irom_a <= {s_type == 2'd2 ? 2'd0 : s_idc + 2'd1, 10'd0};
+			ip_v <= 1'b0;
 			st <= S_INIT2;
 		end
 		S_INIT2: begin
 			icnt <= icnt + 11'd1;
 			irom_a[9:0] <= irom_a[9:0] + 10'd1;
-			if (icnt != 11'd0) begin
+			ip_v <= icnt != 11'd0 && icnt <= 11'd1024;
+			ip <= pre_mul(irom_q, s_qp);
+			ip_a <= icnt[9:0] - 10'd1;
+			if (ip_v) begin
 				ctx_we <= 1'b1;
-				ctx_wa <= icnt[9:0] - 10'd1;
-				ctx_wd <= pre_state(irom_q, s_qp);
+				ctx_wa <= ip_a;
+				ctx_wd <= pre_state(ip);
 			end
-			if (icnt == 11'd1024) st <= S_LOAD;
+			if (icnt == 11'd1025) st <= S_LOAD;
 		end
 		// engine start: 9 bits
 		S_LOAD: if (vbits >= 5'd9) begin
@@ -436,14 +449,16 @@ always @(posedge clk) begin
 		// (bytes_in * 8 - vbits); the look-ahead is dropped, then the stream
 		// up to the end of the 384 bytes
 		S_PCM: begin
-			reg [31:0] at;
-			at = (({bytes_in[28:0], 3'd0} - {27'd0, vbits}) + 32'd7) >> 3;
-			out_valid <= 1'b1;
-			out_kind <= 2'd3;
-			out_val <= at;
-			skipn <= at + 32'd384 - bytes_in;
+			out_val <= (({bytes_in[28:0], 3'd0} - {27'd0, vbits}) + 32'd7) >> 3;
 			look <= 16'd0;
 			vbits <= 5'd0;
+			took = 1'b1;
+			st <= S_PCM2;
+		end
+		S_PCM2: begin
+			out_valid <= 1'b1;
+			out_kind <= 2'd3;
+			skipn <= out_val + 32'd384 - bytes_in;
 			took = 1'b1;
 			st <= S_SKIP;
 		end
