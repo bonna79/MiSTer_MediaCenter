@@ -55,7 +55,8 @@ cab_dec dec
 	.out_valid(o_valid),
 	.out_kind(o_kind),
 	.out_pos(o_pos),
-	.out_val(o_val)
+	.out_val(o_val),
+	.busy()
 );
 
 endmodule

@@ -24,8 +24,10 @@
 //   out_kind 0 bin (out_val[0]); 1 coefficient (out_pos, out_val signed,
 //   last coefficient first); 2 end of block (out_pos = count);
 //   3 I_PCM start (out_val = byte offset in the slice data)
-// Timing: a decision bin takes 2 clocks (context read, then the decision),
-// a bypass bin 1, the INIT 1024 + a few.
+// Timing: a decision bin takes 3 clocks (context read, rangeTabLPS, the
+// decision), a bypass bin 1, the INIT 1024 + a few. The bits come to the
+// engine through a 16-bit look-ahead filled one byte a clock when the engine
+// does not take bits, so that no wide shift sits on the decision path.
 module cab_dec
 (
 	input             clk,
@@ -43,7 +45,8 @@ module cab_dec
 	output reg        out_valid,
 	output reg  [1:0] out_kind,
 	output reg  [6:0] out_pos,
-	output reg [31:0] out_val
+	output reg [31:0] out_val,
+	output            busy
 );
 
 // ---------------------------------------------------------------- tables
@@ -78,17 +81,22 @@ function [3:0] last8(input [5:0] i);
 	end
 endfunction
 
-localparam S_IDLE = 0, S_INIT = 1, S_INIT2 = 2, S_LOAD = 3, S_DREAD = 4, S_DEXE = 5, S_BYP = 6, S_TERM = 7,
-           S_PCM = 8, S_RSIG = 9, S_RPOP = 12, S_SKIP = 13;
+localparam S_IDLE = 0, S_INIT = 1, S_INIT2 = 2, S_LOAD = 3, S_DREAD = 4, S_DLUT = 5, S_DEXE = 6, S_BYP = 7,
+           S_TERM = 8, S_PCM = 9, S_SKIP = 10, S_RSIG = 11, S_RPOP = 12;
 reg  [3:0] st;
 reg  [9:0] dctx;                  // context of the decision being decoded
+assign busy = st != S_IDLE;
 
-// ---------------------------------------------------------------- bit buffer
-reg [63:0] bb;                    // next bits, first in bit 63
-reg  [6:0] bcnt;                  // valid bits in bb
-reg [31:0] bitpos;                // bits taken since the slice start
-// the buffer is updated in the control block below, with the bits taken
-assign in_ready = !reset && bcnt <= 7'd32 && st != S_INIT;
+// ---------------------------------------------------------------- bit stream
+// words -> byte buffer bb (bytes in bits 63:56 first) -> look-ahead look
+// (bits in 15:0, first in bit 15) -> the engine's offset
+reg [63:0] bb;
+reg  [3:0] bcnt;                  // bytes in bb
+reg [15:0] look;
+reg  [4:0] vbits;                 // bits in look
+reg [31:0] bytes_in;              // bytes moved into look since the slice start
+reg [31:0] skipn;                 // bytes to drop (I_PCM)
+assign in_ready = !reset && bcnt <= 4'd4 && st != S_INIT;
 
 // ---------------------------------------------------------------- contexts
 reg  [6:0] ctx_ram[0:1023];       // pStateIdx << 1 | valMPS
@@ -139,16 +147,44 @@ function [2:0] nshift(input [8:0] r);
 	nshift = r[8] ? 3'd0 : r[7] ? 3'd1 : r[6] ? 3'd2 : r[5] ? 3'd3 : r[4] ? 3'd4 : r[3] ? 3'd5 : r[2] ? 3'd6 : 3'd7;
 endfunction
 
+// decision, stage 2 (S_DLUT): state and rangeTabLPS, registered
+reg  [5:0] l_p;
+reg        l_mps;
+reg  [7:0] l_rlps;
+reg  [8:0] l_rmps;
+
+// decision, stage 3 (S_DEXE)
+wire       d_lps = offset >= l_rmps;
+wire       d_bin = d_lps ? !l_mps : l_mps;
+wire [8:0] d_r   = d_lps ? {1'b0, l_rlps} : l_rmps;
+wire [8:0] d_o   = d_lps ? offset - l_rmps : offset;
+wire [2:0] d_sh  = nshift(d_r);
+wire [24:0] d_v  = {d_o, look} << d_sh;
+wire [6:0] d_ns  = d_lps ? {tlps_rom[l_p], (l_p == 6'd0) ? !l_mps : l_mps} : {(l_p >= 6'd62) ? l_p : l_p + 6'd1, l_mps};
+wire       d_ok  = vbits >= 5'd7;
+
+// bypass
+wire [9:0] b_o   = {offset, look[15]};
+wire       b_bin = b_o >= {1'b0, range};
+wire       b_ok  = vbits != 5'd0;
+
+// terminate
+wire [8:0] t_r   = range - 9'd2;
+wire       t_bin = offset >= t_r;
+wire       t_sh  = !t_bin && !t_r[8];
+wire       t_ok  = vbits != 5'd0;
+
 // ---------------------------------------------------------------- control
-reg  [3:0] ret;                   // what the decision bin belongs to
+reg  [3:0] ret;                   // what the bin belongs to
 localparam R_CMD = 0, R_SIG = 1, R_LAST = 2, R_ABS0 = 3, R_ABSN = 4, R_EGP = 5, R_EGS = 6, R_SIGN = 7;
 
 reg  [1:0] s_type, s_idc;
 reg  [5:0] s_qp;
 reg [10:0] icnt;
 reg  [2:0] cat;
+reg  [9:0] sigb, lastb, absb;     // context bases of the block
 reg  [6:0] ri;                    // coefficient index in the map
-reg  [6:0] rmax;                  // maxNumCoeff
+reg  [6:0] rmax;                  // maxNumCoeff - 1
 reg  [5:0] lifo[0:63];            // significant positions
 reg  [6:0] rn;                    // their count
 reg  [6:0] rk;                    // levels left
@@ -157,123 +193,24 @@ reg  [2:0] eq1, gt1;
 reg  [3:0] pre;
 reg  [4:0] k0;
 reg [19:0] suf, absv;
-reg [31:0] skip;                  // bits to skip (I_PCM)
+reg  [6:0] ocnt;
 
 assign cmd_ready = st == S_IDLE && !reset;
 
-wire [9:0] sigbase = cat == 3'd5 ? 10'd402 : 10'd105 + (cat == 3'd1 ? 10'd15 : cat == 3'd2 ? 10'd29 : cat == 3'd3 ? 10'd44 : cat == 3'd4 ? 10'd47 : 10'd0);
-wire [9:0] lastbase = cat == 3'd5 ? 10'd417 : 10'd166 + (cat == 3'd1 ? 10'd15 : cat == 3'd2 ? 10'd29 : cat == 3'd3 ? 10'd44 : cat == 3'd4 ? 10'd47 : 10'd0);
-wire [9:0] absbase = cat == 3'd5 ? 10'd426 : 10'd227 + (cat == 3'd1 ? 10'd10 : cat == 3'd2 ? 10'd20 : cat == 3'd3 ? 10'd30 : cat == 3'd4 ? 10'd39 : 10'd0);
 wire [3:0] sinc = cat == 3'd5 ? sig8(ri[5:0]) : cat == 3'd3 ? (ri > 7'd2 ? 4'd2 : ri[3:0]) : ri[3:0];
 wire [3:0] linc = cat == 3'd5 ? last8(ri[5:0]) : cat == 3'd3 ? (ri > 7'd2 ? 4'd2 : ri[3:0]) : ri[3:0];
 wire [2:0] inc1 = gt1 != 3'd0 ? 3'd0 : (eq1 >= 3'd3 ? 3'd4 : eq1 + 3'd1);
 wire [2:0] gmax = cat == 3'd3 ? 3'd3 : 3'd4;
 wire [3:0] inc2 = 4'd5 + {1'b0, gt1 > gmax ? gmax : gt1};
 
-// the decision: combinational on the context read (S_DEXE)
-wire [5:0] d_p   = ctx_q[6:1];
-wire       d_mps = ctx_q[0];
-wire [7:0] d_rlps = rlps_rom[{d_p, range[7:6]}];
-wire [8:0] d_rmps = range - {1'b0, d_rlps};
-wire       d_lps = offset >= d_rmps;
-wire       d_bin = d_lps ? !d_mps : d_mps;
-wire [8:0] d_r   = d_lps ? {1'b0, d_rlps} : d_rmps;
-wire [8:0] d_o   = d_lps ? offset - d_rmps : offset;
-wire [2:0] d_sh  = nshift(d_r);
-wire [6:0] d_ns  = d_lps ? {tlps_rom[d_p], (d_p == 6'd0) ? !d_mps : d_mps} : {(d_p == 6'd62 || d_p == 6'd63) ? d_p : d_p + 6'd1, d_mps};
-wire       d_ok  = bcnt >= {4'd0, d_sh};
-
-// bypass
-wire [9:0] b_o   = {offset, bb[63]};
-wire       b_bin = b_o >= {1'b0, range};
-wire       b_ok  = bcnt != 7'd0;
-
-// terminate
-wire [8:0] t_r   = range - 9'd2;
-wire       t_bin = offset >= t_r;
-wire [2:0] t_sh  = t_bin ? 3'd0 : nshift(t_r);
-wire       t_ok  = bcnt >= {4'd0, t_sh};
-
-// next step after a bin of kind ret with value b: sets st, dctx and the residual state
-task automatic after_bin(input b);
-	begin
-		case (ret)
-		R_CMD: st <= S_IDLE;
-		R_SIG: begin
-			if (b) begin
-				lifo[rn[5:0]] <= ri[5:0];
-				rn <= rn + 7'd1;
-				st <= S_DREAD;
-				ret <= R_LAST;
-				dctx <= lastbase + {6'd0, linc};
-			end
-			else begin
-				ri <= ri + 7'd1;
-				st <= S_RSIG;
-			end
-		end
-		R_LAST: begin
-			if (b) begin_levels(rn);
-			else begin
-				ri <= ri + 7'd1;
-				st <= S_RSIG;
-			end
-		end
-		R_ABS0: begin
-			if (!b) begin
-				absv <= 20'd1;
-				st <= S_BYP;
-				ret <= R_SIGN;
-			end
-			else begin
-				pre <= 4'd1;
-				st <= S_DREAD;
-				ret <= R_ABSN;
-				dctx <= absbase + {6'd0, inc2};
-			end
-		end
-		R_ABSN: begin
-			if (b && pre != 4'd13) begin
-				pre <= pre + 4'd1;
-				st <= S_DREAD;
-			end
-			else if (b) begin
-				// prefix 14: Exp-Golomb suffix in bypass bins
-				k0 <= 5'd0;
-				suf <= 20'd0;
-				st <= S_BYP;
-				ret <= R_EGP;
-			end
-			else begin
-				absv <= {16'd0, pre} + 20'd1;
-				st <= S_BYP;
-				ret <= R_SIGN;
-			end
-		end
-		default: st <= S_IDLE;
-		endcase
-	end
-endtask
-
-
-task automatic begin_levels(input [6:0] n);
-	begin
-		rk <= n;
-		eq1 <= 3'd0;
-		gt1 <= 3'd0;
-		st <= S_RPOP;
-	end
-endtask
-
-reg [6:0] ocnt;
 `ifdef CABDBG
 reg dbg_on = 1;
 `endif
 
 always @(posedge clk) begin
-	reg  [6:0] take;              // bits taken this clock
+	reg        took;              // the engine took bits from look this clock
 	reg        flush;
-	take = 7'd0;
+	took = 1'b0;
 	flush = 1'b0;
 	out_valid <= 1'b0;
 	ctx_we <= 1'b0;
@@ -281,9 +218,11 @@ always @(posedge clk) begin
 		st <= S_IDLE;
 		range <= 9'd510;
 		offset <= 9'd0;
-		bitpos <= 32'd0;
 		bb <= 64'd0;
-		bcnt <= 7'd0;
+		bcnt <= 4'd0;
+		look <= 16'd0;
+		vbits <= 5'd0;
+		bytes_in <= 32'd0;
 	end
 	else begin
 		case (st)
@@ -309,7 +248,14 @@ always @(posedge clk) begin
 			3'd3: st <= S_TERM;
 			3'd4: begin
 				cat <= cmd_arg[2:0];
-				rmax <= cmd_arg[2:0] == 3'd5 ? 7'd64 : cmd_arg[2:0] == 3'd3 ? 7'd4 : (cmd_arg[2:0] == 3'd1 || cmd_arg[2:0] == 3'd4) ? 7'd15 : 7'd16;
+				case (cmd_arg[2:0])
+				3'd0: begin sigb <= 10'd105; lastb <= 10'd166; absb <= 10'd227; rmax <= 7'd15; end
+				3'd1: begin sigb <= 10'd120; lastb <= 10'd181; absb <= 10'd237; rmax <= 7'd14; end
+				3'd2: begin sigb <= 10'd134; lastb <= 10'd195; absb <= 10'd247; rmax <= 7'd15; end
+				3'd3: begin sigb <= 10'd149; lastb <= 10'd210; absb <= 10'd257; rmax <= 7'd3; end
+				3'd4: begin sigb <= 10'd152; lastb <= 10'd213; absb <= 10'd266; rmax <= 7'd14; end
+				default: begin sigb <= 10'd402; lastb <= 10'd417; absb <= 10'd426; rmax <= 7'd63; end
+				endcase
 				ri <= 7'd0;
 				rn <= 7'd0;
 				ocnt <= 7'd0;
@@ -336,21 +282,32 @@ always @(posedge clk) begin
 			if (icnt == 11'd1024) st <= S_LOAD;
 		end
 		// engine start: 9 bits
-		S_LOAD: if (bcnt >= 7'd9) begin
+		S_LOAD: if (vbits >= 5'd9) begin
 			range <= 9'd510;
-			offset <= bb[63:55];
-			take = 7'd9;
+			offset <= look[15:7];
+			look <= look << 9;
+			vbits <= vbits - 5'd9;
+			took = 1'b1;
 			st <= S_IDLE;
 		end
 
-		S_DREAD: st <= S_DEXE;       // the context RAM reads dctx
+		S_DREAD: st <= S_DLUT;        // the context RAM reads dctx
+		S_DLUT: begin
+			l_p <= ctx_q[6:1];
+			l_mps <= ctx_q[0];
+			l_rlps <= rlps_rom[{ctx_q[6:1], range[7:6]}];
+			l_rmps <= range - {1'b0, rlps_rom[{ctx_q[6:1], range[7:6]}]};
+			st <= S_DEXE;
+		end
 		S_DEXE: if (d_ok) begin
 `ifdef CABDBG
-			if (dbg_on) $display("D ctx %0d st %0d bin %0d range %0d off %0d ret %0d", dctx, ctx_q, d_bin, range, offset, ret);
+			if (dbg_on) $display("D ctx %0d st %0d bin %0d range %0d off %0d ret %0d", dctx, {l_p, l_mps}, d_bin, range, offset, ret);
 `endif
 			range <= d_r << d_sh;
-			offset <= (d_o << d_sh) | ({2'd0, bb[63:57]} >> (3'd7 - d_sh));
-			take = {4'd0, d_sh};
+			offset <= d_v[24:16];
+			look <= d_v[15:0];
+			vbits <= vbits - {2'd0, d_sh};
+			took = 1'b1;
 			ctx_we <= 1'b1;
 			ctx_wa <= dctx;
 			ctx_wd <= d_ns;
@@ -359,12 +316,72 @@ always @(posedge clk) begin
 				out_kind <= 2'd0;
 				out_val <= {31'd0, d_bin};
 			end
-			after_bin(d_bin);
+			case (ret)
+			R_SIG: begin
+				if (d_bin) begin
+					lifo[rn[5:0]] <= ri[5:0];
+					rn <= rn + 7'd1;
+					st <= S_DREAD;
+					ret <= R_LAST;
+					dctx <= lastb + {6'd0, linc};
+				end
+				else begin
+					ri <= ri + 7'd1;
+					st <= S_RSIG;
+				end
+			end
+			R_LAST: begin
+				if (d_bin) begin
+					rk <= rn;
+					eq1 <= 3'd0;
+					gt1 <= 3'd0;
+					st <= S_RPOP;
+				end
+				else begin
+					ri <= ri + 7'd1;
+					st <= S_RSIG;
+				end
+			end
+			R_ABS0: begin
+				if (!d_bin) begin
+					absv <= 20'd1;
+					st <= S_BYP;
+					ret <= R_SIGN;
+				end
+				else begin
+					pre <= 4'd1;
+					st <= S_DREAD;
+					ret <= R_ABSN;
+					dctx <= absb + {6'd0, inc2};
+				end
+			end
+			R_ABSN: begin
+				if (d_bin && pre != 4'd13) begin
+					pre <= pre + 4'd1;
+					st <= S_DREAD;
+				end
+				else if (d_bin) begin
+					// prefix 14: Exp-Golomb suffix in bypass bins
+					k0 <= 5'd0;
+					suf <= 20'd0;
+					st <= S_BYP;
+					ret <= R_EGP;
+				end
+				else begin
+					absv <= {16'd0, pre} + 20'd1;
+					st <= S_BYP;
+					ret <= R_SIGN;
+				end
+			end
+			default: st <= S_IDLE;
+			endcase
 		end
 
 		S_BYP: if (b_ok) begin
 			offset <= b_bin ? 9'(b_o - {1'b0, range}) : b_o[8:0];
-			take = 7'd1;
+			look <= look << 1;
+			vbits <= vbits - 5'd1;
+			took = 1'b1;
 			case (ret)
 			R_CMD: begin
 				out_valid <= 1'b1;
@@ -402,46 +419,60 @@ always @(posedge clk) begin
 		end
 
 		S_TERM: if (t_ok) begin
-			range <= t_bin ? t_r : t_r << t_sh;
-			offset <= t_bin ? offset : (offset << t_sh) | ({2'd0, bb[63:57]} >> (3'd7 - t_sh));
-			take = {4'd0, t_sh};
+			range <= t_sh ? {t_r[7:0], 1'b0} : t_r;
+			if (t_sh) begin
+				offset <= {offset[7:0], look[15]};
+				look <= look << 1;
+				vbits <= vbits - 5'd1;
+				took = 1'b1;
+			end
 			out_valid <= 1'b1;
 			out_kind <= 2'd0;
 			out_val <= {31'd0, t_bin};
 			st <= S_IDLE;
 		end
 
-		// I_PCM: the samples start at the byte boundary after the bits read
+		// I_PCM: the samples start at the byte boundary after the bits taken
+		// (bytes_in * 8 - vbits); the look-ahead is dropped, then the stream
+		// up to the end of the 384 bytes
 		S_PCM: begin
+			reg [31:0] at;
+			at = (({bytes_in[28:0], 3'd0} - {27'd0, vbits}) + 32'd7) >> 3;
 			out_valid <= 1'b1;
 			out_kind <= 2'd3;
-			out_val <= (bitpos + 32'd7) >> 3;
-			skip <= {((bitpos + 32'd7) >> 3) + 32'd384, 3'd0} - bitpos;
+			out_val <= at;
+			skipn <= at + 32'd384 - bytes_in;
+			look <= 16'd0;
+			vbits <= 5'd0;
+			took = 1'b1;
 			st <= S_SKIP;
 		end
 		S_SKIP: begin
-			if (skip == 32'd0) begin
+			took = 1'b1;
+			if (skipn == 32'd0) begin
 				ret <= R_CMD;
 				st <= S_LOAD;
 			end
-			else if (bcnt != 7'd0) begin
-				reg [6:0] n;
-				n = bcnt > 7'd32 ? 7'd32 : bcnt;
-				if ({25'd0, n} > skip) n = skip[6:0];
-				take = n;
-				skip <= skip - {25'd0, n};
+			else if (bcnt != 4'd0) begin
+				bb <= bb << 8;
+				bcnt <= bcnt - 4'd1;
+				bytes_in <= bytes_in + 32'd1;
+				skipn <= skipn - 32'd1;
 			end
 		end
 
 		// residual: next significance bin (index ri)
 		S_RSIG: begin
-			if (ri == rmax - 7'd1) begin
+			if (ri == rmax) begin
 				lifo[rn[5:0]] <= ri[5:0];
 				rn <= rn + 7'd1;
-				begin_levels(rn + 7'd1);
+				rk <= rn + 7'd1;
+				eq1 <= 3'd0;
+				gt1 <= 3'd0;
+				st <= S_RPOP;
 			end
 			else begin
-				dctx <= sigbase + {6'd0, sinc};
+				dctx <= sigb + {6'd0, sinc};
 				ret <= R_SIG;
 				st <= S_DREAD;
 			end
@@ -457,7 +488,7 @@ always @(posedge clk) begin
 			else begin
 				rpos <= lifo[rk[5:0] - 6'd1];
 				rk <= rk - 7'd1;
-				dctx <= absbase + {7'd0, inc1};
+				dctx <= absb + {7'd0, inc1};
 				ret <= R_ABS0;
 				st <= S_DREAD;
 			end
@@ -465,24 +496,42 @@ always @(posedge clk) begin
 		default: st <= S_IDLE;
 		endcase
 
-		// bit buffer: bits taken, then a new word
+		// stream: a word into bb; a byte from bb into look when the engine
+		// took no bits this clock
 		if (flush) begin
 			bb <= 64'd0;
-			bcnt <= 7'd0;
-			bitpos <= 32'd0;
+			bcnt <= 4'd0;
+			look <= 16'd0;
+			vbits <= 5'd0;
+			bytes_in <= 32'd0;
 		end
 		else begin
 			reg [63:0] b;
-			reg  [6:0] c;
-			b = bb << take;
-			c = bcnt - take;
-			if (in_valid && in_ready) begin
-				b = b | ({in_data, 32'd0} >> c);
-				c = c + 7'd32;
+			reg  [3:0] c;
+			reg        mv;
+			b = bb;
+			c = bcnt;
+			mv = !took && st != S_SKIP && vbits <= 5'd8 && bcnt != 4'd0;
+			if (mv) begin
+				look <= look | ({bb[63:56], 8'd0} >> vbits);
+				vbits <= vbits + 5'd8;
+				bytes_in <= bytes_in + 32'd1;
+				b = b << 8;
+				c = c - 4'd1;
 			end
-			bb <= b;
-			bcnt <= c;
-			bitpos <= bitpos + {25'd0, take};
+			if (st != S_SKIP || !(skipn != 32'd0 && bcnt != 4'd0)) begin
+				if (in_valid && in_ready) begin
+					b = b | ({in_data, 32'd0} >> {c, 3'd0});
+					c = c + 4'd4;
+				end
+				bb <= b;
+				bcnt <= c;
+			end
+			else if (in_valid && in_ready) begin
+				// S_SKIP dropping a byte: the word goes after the remaining bytes
+				bb <= (bb << 8) | ({in_data, 32'd0} >> {bcnt - 4'd1, 3'd0});
+				bcnt <= bcnt + 4'd3;
+			end
 		end
 	end
 end

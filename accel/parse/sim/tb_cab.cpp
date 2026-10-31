@@ -11,7 +11,7 @@
 #include "verilated.h"
 
 static Vcab_dec *d;
-static uint64_t clk_count;
+static uint64_t clk_count, busy_count;  // all clocks / clocks the engine is working
 static std::vector<uint32_t> words;  // the slice data
 static size_t wp;                    // next word to give
 static long errors, nbins, nres, ncoef, npcm, nslices, nskip, npics;
@@ -25,6 +25,7 @@ static void tick()
 	d->clk = 0;
 	d->eval();
 	bool took = d->in_valid && d->in_ready;
+	if (d->busy) busy_count++;
 	d->clk = 1;
 	d->eval();
 	if (took) wp++;
@@ -97,7 +98,7 @@ int main(int argc, char **argv)
 	tick();
 	unsigned w;
 	int active = 0;
-	uint64_t pkt_clk = clk_count, max_pkt = 0, max_pkt_bins = 0;
+	uint64_t pkt_clk = clk_count, max_pkt = 0, max_pkt_bins = 0, pkt_busy = 0, max_busy = 0;
 	long pkt_bins = 0;
 	std::vector<uint8_t> data;
 	while (rw(&w))
@@ -140,7 +141,9 @@ int main(int argc, char **argv)
 			rw(&w);
 			uint64_t c = clk_count - pkt_clk;
 			if (npics && c > max_pkt) { max_pkt = c; max_pkt_bins = pkt_bins; }
+			if (npics && busy_count - pkt_busy > max_busy) max_busy = busy_count - pkt_busy;
 			pkt_clk = clk_count;
+			pkt_busy = busy_count;
 			pkt_bins = 0;
 			npics++;
 		}
@@ -202,9 +205,10 @@ int main(int argc, char **argv)
 		if (errors > 1000) break;
 	}
 	printf("%s: Verilog %ld pacchetti, %ld slice (%ld saltate), %ld bin fuori dai blocchi, %ld blocchi residui, %ld coefficienti, %ld I_PCM, errori %ld; "
-		"%llu colpi di clock (%.1f s a 108 MHz), pacchetto peggiore %llu colpi (%.1f ms)\n",
+		"%llu colpi di clock (%.1f s a 108 MHz), pacchetto peggiore %llu colpi (%.1f ms); blocco al lavoro %llu colpi (%.1f s), pacchetto peggiore al lavoro %.1f ms\n",
 		name, npics, nslices, nskip, nbins, nres, ncoef, npcm, errors,
-		(unsigned long long)clk_count, clk_count / 108e6, (unsigned long long)max_pkt, max_pkt / 108e3);
+		(unsigned long long)clk_count, clk_count / 108e6, (unsigned long long)max_pkt, max_pkt / 108e3,
+		(unsigned long long)busy_count, busy_count / 108e6, max_busy / 108e3);
 	delete d;
 	return errors != 0;
 }
