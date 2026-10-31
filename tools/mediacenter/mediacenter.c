@@ -2055,7 +2055,10 @@ static void yuv_draw(void)
 	{
 		uint8_t *out = fb_mem + (size_t)y * fb_stride;
 		int band = y >= ovl_y && ovl_shown && ovl_a;
-		int ly = yuv_half ? 2 * y : y, cy = yuv_half ? y : y / 2;
+		// a picture taller than the framebuffer (shortened, draw_video_frame)
+		// gives the nearest line
+		int ly = yuv_half ? 2 * y : (f && f->height > fb_h) ? y * f->height / fb_h : y;
+		int cy = yuv_half ? y : ly / 2;
 		// rows are packed straight into the framebuffer; only rows under the
 		// controls go through row_buf, as the blend reads them back
 		uint8_t *dst = band ? row_buf : out;
@@ -2136,15 +2139,21 @@ static void draw_video_frame(AVFrame *f)
 		// A picture wider than the screen is narrowed while it is copied, still
 		// in YUV (before, it went to RGB on the ARM: about 90 ms a picture).
 		int narrow = mx == 1 && fw < f->width;
+		// A picture taller than the window of its aspect (a 2.40 film of
+		// 1728x720 on a 1280x720 screen: 1280x533) is shortened while it is
+		// copied, still in YUV (before, it went to RGB on the ARM: about 34 ms
+		// a picture). Not for light mode or interlaced pictures.
+		int shorten = mx == 1 && my == 1 && !half && fh < h && !(f->flags & AV_FRAME_FLAG_INTERLACED);
 		if (yuv_stream < 0)
 			yuv_stream = yuv_ok && !getenv("MC_NOYUV") && !frame_overlay && f->format == AV_PIX_FMT_YUV420P &&
-				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && (fw == f->width || narrow) && fh == h && !(fw & 1);
-		int yuv = yuv_stream && yuv_ok && (fw == f->width || narrow) && fh == h && f->format == AV_PIX_FMT_YUV420P;
+				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && (fw == f->width || narrow) && (fh == h || shorten) && !(fw & 1);
+		int yuv = yuv_stream && yuv_ok && (fw == f->width || narrow) && (fh == h || shorten) && f->format == AV_PIX_FMT_YUV420P;
 		// DVD pictures too (step 3), when they are drawn at their own size: the
 		// subtitles, buttons and line blending are done while copying.
 		int dvd_yuv = frame_overlay && yuv_ovl_row && yuv_ok && !getenv("MC_NOYUV") && f->format == AV_PIX_FMT_YUV420P &&
 			mx == 1 && fw == f->width && fh == h && !(fw & 1);
 		if (dvd_yuv) yuv = 1;
+		if (yuv && shorten) fh &= ~1; // whole colour rows
 		crt_video_std(f);
 		fb_native_fmt(fw, fh, fb_aspect, yuv);
 		if (yuv && !fb_yuv) fb_native_fmt(fw, fh, fb_aspect, 0); // refused
