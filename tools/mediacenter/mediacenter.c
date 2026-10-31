@@ -40,9 +40,11 @@ static double video_aspect = 4.0 / 3.0;
 
 #define MC_AUDIO_RATE 48000
 #define MC_AUDIO_LEAD 0.3
-#define MC_VQ_MAX 40  // pictures the queue can hold
+#define MC_VQ_MAX 64  // pictures the queue can hold
 #define MC_VQ_FILE 12 // pictures decoded ahead for files
-#define MC_VQ_ACC 24  // with the FPGA accelerator (1080p): a deeper reserve for the heavy moments
+#define MC_VQ_ACC 48  // with the FPGA accelerator (1080p): a deeper reserve for the heavy moments
+#define MC_ACC_SPARE 10 // FPGA picture slots kept free for the pictures being decoded
+#define MC_PREROLL 2.0 // seconds the start waits for the reserve, at most
 #define MC_PENDING_SECONDS 4
 #define MC_SKIP_SECONDS 60.0
 
@@ -480,9 +482,19 @@ static int vq_depth(void)
 	return acc.on ? MC_VQ_ACC : MC_VQ_FILE;
 }
 
+// The queue is full. With the accelerator every picture in it holds a slot
+// of the FPGA memory (64 slots, the decoder's reference pictures take some
+// too): it is also full while fewer than MC_ACC_SPARE slots are free.
+static int vq_full(void)
+{
+	if (mc.vq_count >= vq_depth()) return 1;
+	return acc.on && ACC_SLOTS - __builtin_popcountll(__atomic_load_n(&acc.slots_used, __ATOMIC_SEQ_CST)) < MC_ACC_SPARE;
+}
+
 // At the start (and after fast forward / rewind) with the accelerator the
-// clock and the sound wait until the decoder is MC_VQ_ACC pictures ahead,
-// for one second at most: the queue starts full instead of empty.
+// clock and the sound wait until the queue is full (MC_VQ_ACC pictures
+// ahead), for MC_PREROLL seconds at most: the queue starts full instead of
+// empty.
 static int preroll;
 static double preroll_t0;
 
@@ -806,7 +818,7 @@ static void *video_thread(void *arg)
 	pthread_mutex_lock(&vt.lock);
 	while (vt.run && frame)
 	{
-		if (!vt.count || mc.vq_count >= vq_depth())
+		if (!vt.count || vq_full())
 		{
 			pthread_cond_wait(&vt.cond, &vt.lock);
 			continue;
@@ -993,10 +1005,11 @@ static int need_more(void)
 	{
 		// keep a few packets ready for the video thread; reading further
 		// ahead is driven by the sound
-		// (not beyond a second ahead: when only key pictures are decoded
-		// the thread empties its queue at once)
+		// (not beyond a second ahead, 2.5 s with the accelerator's deeper
+		// queue: when only key pictures are decoded the thread empties its
+		// queue at once)
 		pthread_mutex_lock(&vt.lock);
-		int more = vt.count < 8 && mc.vq_count < vq_depth() && !(mc.read_vpts > mc.clock + (acc.on ? 1.5 : 1.0));
+		int more = vt.count < 8 && !vq_full() && !(mc.read_vpts > mc.clock + (acc.on ? 2.5 : 1.0));
 		pthread_mutex_unlock(&vt.lock);
 		if (more) return 1;
 	}
@@ -2556,8 +2569,9 @@ static int media_play(int in_playlist)
 			{
 				pthread_mutex_lock(&vt.lock);
 				int ready = mc.vq_count;
+				int full = vq_full();
 				pthread_mutex_unlock(&vt.lock);
-				if (ready >= MC_VQ_ACC || t - preroll_t0 > 1.0 || mc.eof || !acc.on || !vt.on)
+				if (ready >= MC_VQ_ACC || full || t - preroll_t0 > MC_PREROLL || mc.eof || !acc.on || !vt.on)
 				{
 					preroll = 0;
 					if (dd.on) printf("mediacenter: diag partenza: %d immagini pronte dopo %.0f ms\n", ready, 1000 * (t - preroll_t0));
