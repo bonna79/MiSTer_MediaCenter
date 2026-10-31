@@ -2,7 +2,7 @@
 
 **Italiano** · [English](README_EN.md)
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.5 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.6 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > Questo progetto è stato sviluppato con l'aiuto dell'intelligenza artificiale: il codice e la documentazione sono stati scritti con Claude, l'IA di Anthropic, e provati da rgm su un MiSTer vero.
 
@@ -33,6 +33,33 @@ Il pacchetto è formato da queste parti:
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | Le righe da copiare in `MiSTer.ini` (non è un `MiSTer.ini`: copia solo le righe) |
 
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
+
+## Novità della versione 3.6
+
+La 3.6 porta l'acceleratore H.264 nell'FPGA anche ai video **720p**, **810p** e ai film in formato cinema come **Tears of Steel (1728x720)**, e lo rende più veloce nel 1080p.
+
+- **Acceleratore anche per 720p, 810p e altre larghezze:** fino alla 3.5 l'FPGA ricostruiva solo i video larghi 1920 punti. Ora prende tutti i video H.264 a 8 bit, 4:2:0, progressivi da 1024x400 a 2048x1088. Il core del menu copia poi l'immagine nel framebuffer portandola alla misura dello schermo, con gli stessi punti e le stesse righe che sceglieva l'ARM. Tears of Steel passa dal 29,6% di immagini non mostrate allo 0,0%, e l'ARM da circa 41 ms a 3,8 ms per immagine. Con un core del menu più vecchio il lettore spegne da solo l'acceleratore per queste misure.
+- **Video 1440x810 con l'acceleratore:** per esempio gli MKV di Inuyasha. Il core restringe l'immagine a 960x405 con lo stesso restringimento 3:2 del 1080p; all'ARM restano circa 6 ms per immagine invece di 17.
+- **FPGA più veloce nel 1080p:** il motore legge le finestre di riferimento del macroblocco successivo mentre calcola quello attuale, legge con una finestra sola i blocchi piccoli vicini con lo stesso vettore e il filtro anti-blocchi scrive due parole per volta in memoria. HTC.mp4 passa da 23,5 a 20,3 ms di lavoro dell'FPGA per immagine (-14%): più margine per le scene pesanti.
+- **Partenza più sicura:** con l'acceleratore il lettore prepara 48 immagini prima di partire (prima 24) e tiene sempre liberi 10 posti dell'FPGA; HTC.mp4 non ha più immagini in ritardo all'inizio (prima 6). Senza acceleratore ne prepara 24 (prima 12) e le aspetta anche dopo un salto: un 720p con due salti passa da 5 immagini in ritardo a nessuna.
+- **Film più larghi del 16:9 anche senza acceleratore:** quando il video lo decodifica l'ARM, un film 2,40:1 ristretto alla sua finestra resta in YUV (i colori li converte l'FPGA) e il restringimento usa le istruzioni NEON del processore: il disegno di un'immagine passa da 14,3 a 7,8 ms.
+- **Nuova immagine** con la scritta Ver. 3.6, mostrata 3 secondi solo quando si avvia lo script mediacenter dagli Scripts (non quando parte un DVD, un Video CD o un Super Video CD).
+
+Il core del menu della 3.6 usa il 78% della logica, il 37% dei blocchi di memoria interna e l'85% dei moltiplicatori dell'FPGA, e rispetta i tempi a 108 MHz a 100 °C e a -40 °C (seed 9 del fitter, margine +0,066 ns). Il lettore e il core vanno aggiornati insieme.
+
+Provata su un MiSTer vero il 29–31 ottobre 2026, su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme. Tutte le prove dal menu, con l'audio sempre pulito:
+
+| Prova | Prima | 3.6 |
+| --- | --- | --- |
+| Tears of Steel, H.264 1728x720 2,40:1, i primi 241 s, con le scene più pesanti, da USB | 29,6% di immagini non mostrate, ARM circa 41 ms per immagine (al limite) | **0,0%**, nessuna in ritardo, nessuna persa dall'FPGA, ARM 3,8 ms |
+| One Piece Episodio 938, H.264 1280x720, 156 s | 0,3% (3.5, senza acceleratore) | **0,1%** (nei primi secondi), nessuna in ritardo, nessuna persa dall'FPGA, ARM 1,7 ms |
+| Inuyasha, H.264 1440x810, 627 s, dal DVD | 0,2%, 10 in ritardo, ARM 16,9 ms (3.5) | **0,0%**, 2 in ritardo (due pause di lettura del disco), nessuna persa dall'FPGA, ARM 5,6 ms |
+| One Piece Episodio 940, H.264 1920x1080, 788 s | 0,3% (3.5) | **0,0%**, nessuna in ritardo, nessuna persa dall'FPGA |
+| HTC.mp4, 1080p 29,97: lavoro dell'FPGA per immagine | 23,5 ms (3.5) | **20,3 ms** (-14%), 0,1% di immagini non mostrate |
+| HTC.mp4, partenza | 6 immagini in ritardo nei primi secondi | **nessuna** |
+| Video 720p decodificato dall'ARM (VisionQuest, prima dell'acceleratore per il 720p) con due salti | 0,5%, 5 in ritardo | **0,2%**, nessuna in ritardo |
+
+Le immagini che il core disegna con l'acceleratore sono state confrontate prima in simulazione con quelle di FFmpeg e del lettore: identiche punto per punto (16 casi di ridimensionamento; Tears of Steel: 210 immagini nel modello e 6 nel motore Verilog).
 
 ## Novità della versione 3.5
 
@@ -200,11 +227,11 @@ Il framebuffer ha tre pagine: l'ARM scrive la prossima immagine in una pagina me
 - **HDMI:** lo scaler del MiSTer porta l'immagine in YUV fino all'uscita, la converte in RGB alla fine e la ingrandisce alla risoluzione del televisore (`video_mode`) con le proporzioni giuste. La conversione dei colori nell'FPGA toglie all'ARM circa 16 ms per immagine.
 - **CRT a 15 kHz (modulo `mc_out`):** genera da solo il segnale per il CRT, indipendente dall'HDMI, a 13,5 MHz con 720 punti per riga come un lettore DVD: 576i o 480i per i video, secondo il DVD PAL o NTSC o gli fps del file, oppure 288p o 240p se forzati in Regola CRT. Converte i colori, porta l'immagine a 720 punti (i DVD punto per punto, le altre larghezze con un filtro che fonde i punti vicini), aggiunge le bande nere ai film 16:9 e applica Regola CRT ridisegnando l'immagine nel nuovo riquadro senza toccare il sincronismo, così il CRT non perde mai l'aggancio. Cambia pagina solo all'inizio di un semiquadro e solo quando l'indirizzo è stabile, così l'immagine non si spezza. Il filtro tremolio fa la media di ogni riga con quella sotto.
 
-- **Acceleratore H.264 (moduli `mc_acc`, `acc_engine`, `mc_zc`, dalla 3.0):** per i video 1080p FFmpeg sull'ARM legge il video (CABAC, vettori di movimento, coefficienti) ma non ricostruisce le immagini: scrive per ogni immagine i comandi del motore (circa 1 MB) in un anello di memoria. Il motore nell'FPGA, a 108 MHz, li legge dalla memoria DDR e ricostruisce le immagini (trasformata inversa, predizione intra, compensazione del movimento con i pesi delle immagini B) in 64 posti da 4 MB della memoria; poi il blocco zero-copy restringe l'immagine a 1280 o 960 punti e la scrive nel framebuffer in YUV. L'ARM non tocca più i pixel. Con il core 3.0 il core del menu usa il 55% della logica, il 17% della memoria interna e l'85% dei moltiplicatori dell'FPGA. Il funzionamento completo, per chi vuole modificarlo o migliorarlo, è nella [scheda tecnica dell'acceleratore](docs/SCHEDA_TECNICA_ACCELERATORE_IT.md) ([English](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md)).
+- **Acceleratore H.264 (moduli `mc_acc`, `acc_engine`, `mc_zc`, dalla 3.0):** per i video H.264 in alta definizione (dalla 3.6 da 1024x400 a 2048x1088: 720p, 810p, 1080p) FFmpeg sull'ARM legge il video (CABAC, vettori di movimento, coefficienti) ma non ricostruisce le immagini: scrive per ogni immagine i comandi del motore (circa 1 MB) in un anello di memoria. Il motore nell'FPGA, a 108 MHz, li legge dalla memoria DDR e ricostruisce le immagini (trasformata inversa, predizione intra, compensazione del movimento con i pesi delle immagini B) in 64 posti da 4 MB della memoria; poi il blocco zero-copy porta l'immagine alla misura dello schermo (restringe il 1080p a 1280 o 960 punti, ricampiona le altre misure) e la scrive nel framebuffer in YUV. L'ARM non tocca più i pixel. Con il core 3.0 il core del menu usa il 55% della logica, il 17% della memoria interna e l'85% dei moltiplicatori dell'FPGA. Il funzionamento completo, per chi vuole modificarlo o migliorarlo, è nella [scheda tecnica dell'acceleratore](docs/SCHEDA_TECNICA_ACCELERATORE_IT.md) ([English](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md)).
 
 Le due uscite funzionano insieme: la stessa immagine va all'HDMI e alla VGA nello stesso momento. L'audio è uno solo e arriva insieme all'HDMI, all'uscita analogica e a quella ottica.
 
-L'FPGA non ha spazio per un decodificatore H.264 completo: per questo divide il lavoro con l'ARM, che legge il video, e solo per l'H.264 a 8 bit progressivo largo 1920 punti. Gli altri video li decodifica tutti l'ARM.
+L'FPGA non ha spazio per un decodificatore H.264 completo: per questo divide il lavoro con l'ARM, che legge il video, e solo per l'H.264 a 8 bit progressivo da 1024x400 a 2048x1088 (720p, 810p, 1080p). Gli altri video li decodifica tutti l'ARM.
 
 ## Novità della versione 2.0
 
@@ -310,16 +337,17 @@ MMC è fatto per i video a risoluzione standard. Queste sono le risoluzioni mass
 | Super Video CD (MPEG-2) | 480x576 (PAL), 480x480 (NTSC) | Perfetto |
 | DivX, Xvid (MPEG-4) | 720x576 | Fluido |
 | MP4, MKV in H.264 a 8 bit | 1280x720 | Fluido |
-| MP4, MKV in H.264 a 8 bit progressivo | 1920x1080, con l'acceleratore della 3.0 | Fluido |
+| MP4, MKV in H.264 a 8 bit progressivo | 1920x1080 (fino a 2048x1088), con l'acceleratore nell'FPGA: dalla 3.6 anche 720p, 810p e film come 1728x720 | Fluido |
 | Musica | Qualsiasi | Perfetta |
 
-**I video oltre i 720p che non sono H.264 a 8 bit progressivo 1920x1080, quelli in H.264 a 10 bit (Hi10p) e quelli in HEVC/H.265 sono sconsigliati.** Si riproducono, con l'audio sempre fluido, ma il MiSTer non riesce a mostrare tutti i fotogrammi e l'immagine scatta. Misure fatte su un MiSTer vero:
+**I video oltre i 720p che non sono H.264 a 8 bit progressivo (fino a 2048x1088), quelli in H.264 a 10 bit (Hi10p) e quelli in HEVC/H.265 sono sconsigliati.** Si riproducono, con l'audio sempre fluido, ma il MiSTer non riesce a mostrare tutti i fotogrammi e l'immagine scatta. Misure fatte su un MiSTer vero:
 
 | Video | Fotogrammi non mostrati |
 | --- | --- |
 | DVD (MPEG-2 720x576) | meno dell'1% |
-| H.264 8 bit 1280x720 | 0,1% a piena risoluzione nella 2.7 (1,4–2,5% nelle versioni precedenti, il 10% prima che l'FPGA convertisse i colori) |
-| H.264 8 bit 1440x810 | circa 1,4% (era circa 65% fino alla 2.5) |
+| H.264 8 bit 1280x720 | 0,1% con l'acceleratore della 3.6 (One Piece Episodio 938); senza, 0,1% a piena risoluzione nella 2.7 (1,4–2,5% nelle versioni precedenti, il 10% prima che l'FPGA convertisse i colori) |
+| H.264 8 bit 1728x720 (2,40:1) | 0,0% con l'acceleratore della 3.6 (Tears of Steel; 29,6% prima) |
+| H.264 8 bit 1440x810 | 0,0% con l'acceleratore della 3.6 (circa 1,4% senza, era circa 65% fino alla 2.5) |
 | H.264 8 bit 1920x1080 | 0% nei tratti senza salti con l'acceleratore della 3.0 (circa 14% nella 2.8, One Piece) |
 | H.264 10 bit (Hi10p) 1280x720 | circa 78% (misurato con la versione 1.0) |
 
@@ -499,7 +527,7 @@ MC_CRT_VPOS=2
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER`, `MC_CRT_ASPECT`, `MC_CRT_PANSCAN` | Le regolazioni di [Regola CRT](#regola-crt-geometria), scritte dalla schermata stessa |
 | `MC_FIELDS=1` | DVD e video interlacciati: il lettore non fonde i due semiquadri. Il CRT li riceve intatti, come da un vero lettore DVD (più nitido e più fluido nel movimento); sull'HDMI li fonde lo scaler del Main, senza pettini. Consigliato con il CRT. Senza questa riga il lettore fonde le righe per tutte e due le uscite |
 | `MC_NOYUV=1` | Fa convertire i colori all'ARM invece che all'FPGA |
-| `MC_NOACC=1` | Spegne l'acceleratore H.264 della 3.0: i video 1080p li decodifica l'ARM come nella 2.8 |
+| `MC_NOACC=1` | Spegne l'acceleratore H.264: i video 720p, 810p e 1080p li decodifica l'ARM (per il 1080p come nella 2.8) |
 | `MC_NOBOOTWAIT=1` | Subito dopo l'accensione il video parte senza aspettare la fine dell'avvio della MiSTer |
 | `MC_NOPRIO=1` | Il video non ha la precedenza sugli altri programmi |
 | `MC_NOPAUSE=1` | MiSTer Remote non viene messo in pausa durante il video |

@@ -40,9 +40,12 @@ static double video_aspect = 4.0 / 3.0;
 
 #define MC_AUDIO_RATE 48000
 #define MC_AUDIO_LEAD 0.3
-#define MC_VQ_MAX 40  // pictures the queue can hold
+#define MC_VQ_MAX 64  // pictures the queue can hold
 #define MC_VQ_FILE 12 // pictures decoded ahead for files
-#define MC_VQ_ACC 24  // with the FPGA accelerator (1080p): a deeper reserve for the heavy moments
+#define MC_VQ_ARM 24  // with the video thread and no accelerator: a reserve for the start and the heavy moments
+#define MC_VQ_ACC 48  // with the FPGA accelerator (1080p): a deeper reserve for the heavy moments
+#define MC_ACC_SPARE 10 // FPGA picture slots kept free for the pictures being decoded
+#define MC_PREROLL 2.0 // seconds the start waits for the reserve, at most
 #define MC_PENDING_SECONDS 4
 #define MC_SKIP_SECONDS 60.0
 
@@ -195,6 +198,7 @@ static void zcp_open(AVCodecContext *ctx, int width, int half);
 static void zcp_close(void);
 static void zcp_mark(const AVFrame *f);
 static int zcp_get_buffer(AVCodecContext *s, AVFrame *f, int flags);
+static int zcp_free_slots(void);
 
 // FPGA accelerator (accel.c, accel_link.c)
 // it gave up on this file (1), or only while the picture format is one the
@@ -477,12 +481,25 @@ static void push_audio(AVFrame *f)
 // slow pictures, which otherwise end in pictures skipped or dropped late.
 static int vq_depth(void)
 {
-	return acc.on ? MC_VQ_ACC : MC_VQ_FILE;
+	if (acc.on) return MC_VQ_ACC;
+	return svcd_on ? MC_VQ_FILE : MC_VQ_ARM; // Video CD / Super Video CD as before
 }
 
-// At the start (and after fast forward / rewind) with the accelerator the
-// clock and the sound wait until the decoder is MC_VQ_ACC pictures ahead,
-// for one second at most: the queue starts full instead of empty.
+// The queue is full. With the accelerator every picture in it holds a slot
+// of the FPGA memory (64 slots, the decoder's reference pictures take some
+// too): it is also full while fewer than MC_ACC_SPARE slots are free. The
+// same holds for the zero-copy pool (1080p decoded by the ARM).
+static int vq_full(void)
+{
+	if (mc.vq_count >= vq_depth()) return 1;
+	if (acc.on) return ACC_SLOTS - __builtin_popcountll(__atomic_load_n(&acc.slots_used, __ATOMIC_SEQ_CST)) < MC_ACC_SPARE;
+	return zcp_free_slots() < MC_ACC_SPARE;
+}
+
+// At the start (and after fast forward / rewind) the clock and the sound
+// wait until the queue is full (MC_VQ_ACC pictures ahead with the
+// accelerator, MC_VQ_ARM without), for MC_PREROLL seconds at most: the queue
+// starts full instead of empty. Not for Video CD / Super Video CD.
 static int preroll;
 static double preroll_t0;
 
@@ -646,7 +663,7 @@ static struct
 
 static void preroll_start(void)
 {
-	preroll = acc.on && vt.on;
+	preroll = vt.on && !svcd_on;
 	preroll_t0 = now_seconds();
 }
 
@@ -806,7 +823,7 @@ static void *video_thread(void *arg)
 	pthread_mutex_lock(&vt.lock);
 	while (vt.run && frame)
 	{
-		if (!vt.count || mc.vq_count >= vq_depth())
+		if (!vt.count || vq_full())
 		{
 			pthread_cond_wait(&vt.cond, &vt.lock);
 			continue;
@@ -993,10 +1010,11 @@ static int need_more(void)
 	{
 		// keep a few packets ready for the video thread; reading further
 		// ahead is driven by the sound
-		// (not beyond a second ahead: when only key pictures are decoded
-		// the thread empties its queue at once)
+		// (not beyond a second ahead for Video CD, 1.5 s for the other files
+		// and 2.5 s with the accelerator, to fit their deeper queues: when
+		// only key pictures are decoded the thread empties its queue at once)
 		pthread_mutex_lock(&vt.lock);
-		int more = vt.count < 8 && mc.vq_count < vq_depth() && !(mc.read_vpts > mc.clock + (acc.on ? 1.5 : 1.0));
+		int more = vt.count < 8 && !vq_full() && !(mc.read_vpts > mc.clock + (acc.on ? 2.5 : svcd_on ? 1.0 : 1.5));
 		pthread_mutex_unlock(&vt.lock);
 		if (more) return 1;
 	}
@@ -1711,6 +1729,67 @@ static void pack_yuyv_map(uint8_t *dst, const uint8_t *y, const uint8_t *u, cons
 	}
 }
 
+// pack_yuyv_map with NEON: a block of 16 output pixels takes its luma from a
+// 32-byte window of the source row and its colour from a 16-byte window
+// (byte lookups), the same pixels as pack_yuyv_map. map16_build fills the
+// windows; it returns 0 when a block does not fit (narrowing by about 2:1 or
+// more) and pack_yuyv_map is used instead.
+typedef struct { uint16_t y0, c0; uint8_t ye[8], yo[8], c[8]; } map16_t;
+
+static int map16_build(map16_t *b, const int *map, int w, int src_w)
+{
+	int cw = src_w / 2;
+	if (src_w < 32 || src_w > 65535) return 0;
+	for (int k = 0; k * 16 + 16 <= w; k++)
+	{
+		int x = k * 16;
+		int base = map[x] < src_w - 32 ? map[x] : src_w - 32;
+		int cb = map[x] / 2 < cw - 16 ? map[x] / 2 : cw - 16;
+		if (map[x + 15] - base > 31 || map[x + 14] / 2 - cb > 15 || base < 0 || cb < 0) return 0;
+		b[k].y0 = (uint16_t)base;
+		b[k].c0 = (uint16_t)cb;
+		for (int p = 0; p < 8; p++)
+		{
+			b[k].ye[p] = (uint8_t)(map[x + 2 * p] - base);
+			b[k].yo[p] = (uint8_t)(map[x + 2 * p + 1] - base);
+			b[k].c[p] = (uint8_t)(map[x + 2 * p] / 2 - cb);
+		}
+	}
+	return 1;
+}
+
+static void pack_yuyv_map16(uint8_t *dst, const uint8_t *y, const uint8_t *u, const uint8_t *v, const map16_t *b,
+	const int *map, int w)
+{
+	int x = 0;
+#if defined(__arm__)
+	for (; x + 16 <= w; x += 16, b++)
+	{
+		uint8x16_t a0 = vld1q_u8(y + b->y0), a1 = vld1q_u8(y + b->y0 + 16);
+		uint8x8x4_t t = { { vget_low_u8(a0), vget_high_u8(a0), vget_low_u8(a1), vget_high_u8(a1) } };
+		uint8x16_t cu = vld1q_u8(u + b->c0), cv = vld1q_u8(v + b->c0);
+		uint8x8x2_t tu = { { vget_low_u8(cu), vget_high_u8(cu) } }, tv = { { vget_low_u8(cv), vget_high_u8(cv) } };
+		uint8x8_t ic = vld1_u8(b->c);
+		uint8x8x4_t o;
+		o.val[0] = vtbl4_u8(t, vld1_u8(b->ye));
+		o.val[1] = vtbl2_u8(tu, ic);
+		o.val[2] = vtbl4_u8(t, vld1_u8(b->yo));
+		o.val[3] = vtbl2_u8(tv, ic);
+		vst4_u8(dst + 2 * x, o);
+	}
+#else
+	(void)b;
+#endif
+	for (; x + 1 < w; x += 2)
+	{
+		int s = map[x];
+		dst[2 * x] = y[s];
+		dst[2 * x + 1] = u[s / 2];
+		dst[2 * x + 2] = y[map[x + 1]];
+		dst[2 * x + 3] = v[s / 2];
+	}
+}
+
 // pack_yuyv narrowing by exactly 3:2 (a 1920-wide picture on a 1280-wide
 // screen): every 3 source pixels give 2, each weighing the nearer pixel 2/3
 // and its neighbour 1/3; the colour likewise (3 samples give 2). w is the
@@ -1979,6 +2058,8 @@ static void yuv_draw(void)
 	// A picture wider than the framebuffer (only when it is wider than the
 	// screen) is narrowed here, while it is copied.
 	static int *map, map_src, map_w;
+	static map16_t *m16;
+	static int m16_ok;
 	int narrow = f && f->width > fb_w;
 	// exactly 3:2 (1920 on a 1280 screen): narrowed with NEON, averaging
 	int narrow32 = narrow && f->width * 2 == w * 3 && !(w & 3);
@@ -1990,6 +2071,9 @@ static void yuv_draw(void)
 		map_w = map ? w : 0;
 		if (!map) return;
 		for (int x = 0; x < w; x++) map[x] = x * f->width / w;
+		free(m16);
+		m16 = (map16_t *)malloc((size_t)(w / 16 + 1) * sizeof(map16_t));
+		m16_ok = m16 && map16_build(m16, map, w, f->width);
 	}
 	// 1080p: the core draws the lines above the controls (zerocopy.c)
 	int core_rows = 0;
@@ -2001,8 +2085,12 @@ static void yuv_draw(void)
 	// exactly 2:1 (1920 on 960, the 4:3 format): the core narrows the
 	// accelerator's pictures too, when it can (acc_can21)
 	int narrow21 = narrow && f->width == w * 2 && !(w & 31) && acc_can21();
-	if (have_frame && f) acc_layout_note((narrow32 || narrow21) && yuv_half && w == fb_w && !(fb_w & 31));
-	if ((narrow32 || (accf && narrow21)) && yuv_half && have_frame && f && f->data[0] && w == fb_w)
+	int old_core = (narrow32 || narrow21) && yuv_half && w == fb_w && !(fb_w & 31);
+	// any other format, when the core resamples (an accelerator's picture
+	// only: the ARM draws its own the same way)
+	int rs_core = f && !old_core && w == fb_w && acc_rs_fits(f->width, yuv_half ? f->height / 2 : f->height, fb_w, fb_h);
+	if (have_frame && f) acc_layout_note(old_core || rs_core);
+	if (((narrow32 || (accf && narrow21)) && yuv_half || (accf && rs_core)) && have_frame && f && f->data[0] && w == fb_w)
 	{
 		int rows = (ovl_shown && ovl_a && ovl_y < fb_h && !accf) ? (ovl_y > 0 ? ovl_y : 0) : fb_h;
 		if (zcp_draw(f, rows)) core_rows = rows;
@@ -2037,7 +2125,10 @@ static void yuv_draw(void)
 	{
 		uint8_t *out = fb_mem + (size_t)y * fb_stride;
 		int band = y >= ovl_y && ovl_shown && ovl_a;
-		int ly = yuv_half ? 2 * y : y, cy = yuv_half ? y : y / 2;
+		// a picture taller than the framebuffer (shortened, draw_video_frame)
+		// gives the nearest line
+		int ly = yuv_half ? 2 * y : (f && f->height > fb_h) ? y * f->height / fb_h : y;
+		int cy = yuv_half ? y : ly / 2;
 		// rows are packed straight into the framebuffer; only rows under the
 		// controls go through row_buf, as the blend reads them back
 		uint8_t *dst = band ? row_buf : out;
@@ -2051,6 +2142,9 @@ static void yuv_draw(void)
 			if (narrow32)
 				pack_yuyv_32(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], w);
+			else if (narrow && m16_ok)
+				pack_yuyv_map16(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+					f->data[2] + (size_t)cy * f->linesize[2], m16, map, w);
 			else if (narrow)
 				pack_yuyv_map(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], map, w);
@@ -2104,6 +2198,15 @@ static void draw_video_frame(AVFrame *f)
 		}
 		if (sw >= 320 && fw > sw) fw = sw;
 		if (sh >= 240 && fh > sh) fh = sh;
+		// 1440 wide pictures of the FPGA accelerator (810p): the core narrows
+		// only by 3:2 or 2:1, so they get a 960 wide frame buffer (also while
+		// the normal decoder waits for the format to be drawable again)
+		int w32 = f->width * 2 / 3;
+		if (f->width == 1440 && half && ((acc.on && acc_buf_of(f)) || acc_file_off == 2) && fw > w32 && fw * 2 != f->width)
+			fw = w32;
+		// the core's resampling makes lines of a multiple of 32 pixels
+		else if (((acc.on && acc_buf_of(f)) || acc_file_off == 2) && acc_can_rs() && (fw & 31) && fw > 32)
+			fw &= ~31;
 		pic_fields = (f->flags & AV_FRAME_FLAG_INTERLACED) && fh == h && getenv("MC_FIELDS") && atoi(getenv("MC_FIELDS"));
 		// A picture drawn at its own size goes to the framebuffer as YUV and
 		// the FPGA converts the colours: the ARM only copies it. Decided on
@@ -2112,15 +2215,21 @@ static void draw_video_frame(AVFrame *f)
 		// A picture wider than the screen is narrowed while it is copied, still
 		// in YUV (before, it went to RGB on the ARM: about 90 ms a picture).
 		int narrow = mx == 1 && fw < f->width;
+		// A picture taller than the window of its aspect (a 2.40 film of
+		// 1728x720 on a 1280x720 screen: 1280x533) is shortened while it is
+		// copied, still in YUV (before, it went to RGB on the ARM: about 34 ms
+		// a picture). Not for light mode or interlaced pictures.
+		int shorten = mx == 1 && my == 1 && !half && fh < h && !(f->flags & AV_FRAME_FLAG_INTERLACED);
 		if (yuv_stream < 0)
 			yuv_stream = yuv_ok && !getenv("MC_NOYUV") && !frame_overlay && f->format == AV_PIX_FMT_YUV420P &&
-				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && (fw == f->width || narrow) && fh == h && !(fw & 1);
-		int yuv = yuv_stream && yuv_ok && (fw == f->width || narrow) && fh == h && f->format == AV_PIX_FMT_YUV420P;
+				!(f->flags & AV_FRAME_FLAG_INTERLACED) && mx == 1 && (fw == f->width || narrow) && (fh == h || shorten) && !(fw & 1);
+		int yuv = yuv_stream && yuv_ok && (fw == f->width || narrow) && (fh == h || shorten) && f->format == AV_PIX_FMT_YUV420P;
 		// DVD pictures too (step 3), when they are drawn at their own size: the
 		// subtitles, buttons and line blending are done while copying.
 		int dvd_yuv = frame_overlay && yuv_ovl_row && yuv_ok && !getenv("MC_NOYUV") && f->format == AV_PIX_FMT_YUV420P &&
 			mx == 1 && fw == f->width && fh == h && !(fw & 1);
 		if (dvd_yuv) yuv = 1;
+		if (yuv && shorten) fh &= ~1; // whole colour rows
 		crt_video_std(f);
 		fb_native_fmt(fw, fh, fb_aspect, yuv);
 		if (yuv && !fb_yuv) fb_native_fmt(fw, fh, fb_aspect, 0); // refused
@@ -2556,8 +2665,9 @@ static int media_play(int in_playlist)
 			{
 				pthread_mutex_lock(&vt.lock);
 				int ready = mc.vq_count;
+				int full = vq_full();
 				pthread_mutex_unlock(&vt.lock);
-				if (ready >= MC_VQ_ACC || t - preroll_t0 > 1.0 || mc.eof || !acc.on || !vt.on)
+				if (ready >= vq_depth() || full || t - preroll_t0 > MC_PREROLL || mc.eof || !vt.on)
 				{
 					preroll = 0;
 					if (dd.on) printf("mediacenter: diag partenza: %d immagini pronte dopo %.0f ms\n", ready, 1000 * (t - preroll_t0));

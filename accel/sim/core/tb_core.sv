@@ -135,7 +135,7 @@ end
 // DDR: reads in order LAT clocks after the request, a word a clock
 integer qa[0:255], qb[0:255], qt[0:255];
 integer qh = 0, qtl = 0, beat = 0, seed = 11;
-integer wbeat = 0;
+integer wbeat = 0, wb_a = 0, wb_n = 0;
 always @(posedge clk) begin
 	dout_ready <= 0;
 	busy <= ($random(seed) & 7) == 0;
@@ -145,8 +145,14 @@ always @(posedge clk) begin
 		qt[qtl % 256] = clocks + `LAT;
 		qtl = qtl + 1;
 	end
+	// a write burst gives all its words one after the other, same address
+	if (wbeat != 0 && (!bus_we || bus_rd || bus_addr != wb_a || bus_burst != wb_n)) begin
+		$display("write burst broken at clock %0d: beat %0d of %0d", clocks, wbeat, wb_n);
+		$finish;
+	end
 	if (bus_we && !busy) begin
 		mem_write(bus_addr + wbeat, bus_din);
+		if (wbeat == 0) begin wb_a = bus_addr; wb_n = bus_burst; end
 		wbeat = (wbeat + 1 == bus_burst) ? 0 : wbeat + 1;
 	end
 	if (qh != qtl && qt[qh % 256] <= clocks) begin

@@ -210,6 +210,17 @@ static zcp_slot_t *zcp_take(size_t need)
 	return s;
 }
 
+// Pool slots not holding a picture (all of them while zero-copy is off).
+static int zcp_free_slots(void)
+{
+	if (!zcp_on) return ZCP_SLOTS;
+	pthread_mutex_lock(&zcp_lock);
+	int used = 0;
+	for (int i = 0; i < zcp_nslots; i++) used += zcp_slot[i].used;
+	pthread_mutex_unlock(&zcp_lock);
+	return ZCP_SLOTS - used;
+}
+
 static zcp_slot_t *zcp_slot_of(const uint8_t *p)
 {
 	for (int i = 0; i < zcp_nslots; i++)

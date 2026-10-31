@@ -52,7 +52,9 @@ module acc_dbk #(
 
 	output reg        wb_we,
 	output reg [AW-1:0] wb_addr,
-	output reg [63:0] wb_din,
+	output reg [63:0] wb_din,     // the word, or the first of two
+	output reg [63:0] wb_din2,    // the second word of a burst of two
+	output reg        wb_two,     // burst of two words (wb_addr, wb_addr + 1)
 	input             mem_busy,
 	input             mc_rd       // the MC has a request: no new write
 );
@@ -366,9 +368,10 @@ wire        rows_out = ri < 16 && (ri >= 4 || cur_y != 0);
 wire  [2:0] lwant = !cur_ok ? 3'd0 : {rows_out && cur_end, rows_out, rows_out && cur_x != 0};
 // line buffer items (rows 16..19): 0 C0 -> x, 1 L -> x - 1, 2 C1 -> x (row end)
 wire  [2:0] lbwant = !cur_ok || ri < 16 ? 3'd0 : {cur_end, cur_x != 0, 1'b1};
-// chroma: 0 UL, 1 VL, 2 UC, 3 VC to DDR; line buffer rows 8, 9: same items
+// chroma to DDR: 0 UL, 1 UC, 2 VL, 3 VC (each plane's two words side by side);
+// line buffer rows 8, 9: 0 UL, 1 VL, 2 UC, 3 VC
 wire        crows_out = ri < 8 && (ri >= 2 || cur_y != 0);
-wire  [3:0] cwant = !cur_ok || !crows_out ? 4'd0 : {cur_end, cur_end, cur_x != 0, cur_x != 0};
+wire  [3:0] cwant = !cur_ok || !crows_out ? 4'd0 : {cur_end, cur_x != 0, cur_end, cur_x != 0};
 wire  [3:0] cbwant = !cur_ok || ri < 8 ? 4'd0 : {cur_end, cur_end, cur_x != 0, cur_x != 0};
 
 // first item at or after i of a want mask (4 = none)
@@ -381,8 +384,12 @@ wire  [2:0] lb_i  = nexti({1'b0, lbwant}, li);
 wire  [2:0] cw_i  = nexti(cwant, wi);
 wire  [2:0] cb_i  = nexti(cbwant, li);
 
-// the DDR port: a new word goes out when the last one is taken and the MC
-// has nothing waiting
+// two neighbouring words of the row go out together, as one burst of two
+wire        lw_two = (lw_i == 0 && lwant[1]) || (lw_i == 1 && lwant[2]);
+wire        cw_two = !cw_i[0] && (cw_i[1] ? cwant[3] : cwant[1]);
+
+// the DDR port: a new write (one word, or two neighbours as one burst) goes
+// out when the last one is taken and the MC has nothing waiting
 wire        port_free = (!wb_we || !mem_busy) && !mc_rd;
 
 // flush counters
@@ -591,8 +598,10 @@ always @(posedge clk) begin
 		if (lw_i != 4 && port_free) begin
 			wb_we <= 1;
 			wb_addr <= yaddr({cur_y, 4'd0} + ri - 12'd4, {cur_x, 1'b0} + lw_i[1:0] - 9'd1);
-			wb_din <= Y[0][lw_i * 64 +: 64];
-			wi <= lw_i + 1'd1;
+			wb_din <= lw_i[1] ? Y[0][191:128] : lw_i[0] ? Y[0][127:64] : Y[0][63:0];
+			wb_din2 <= lw_i[0] ? Y[0][191:128] : Y[0][127:64];
+			wb_two <= lw_two;
+			wi <= lw_i + 1'd1 + lw_two;
 		end
 		if (lb_i != 4) begin
 			lb_we <= 1;
@@ -620,9 +629,11 @@ always @(posedge clk) begin
 		if (rj == 2) nw1 <= crd;
 		if (cw_i != 4 && port_free) begin
 			wb_we <= 1;
-			wb_addr <= caddr(cw_i[0], {cur_y, 3'd0} + ri - 11'd2, cur_x + cw_i[1] - 8'd1);
-			wb_din <= cw_i[0] ? CV[0][cw_i[1] * 64 +: 64] : CU[0][cw_i[1] * 64 +: 64];
-			wi <= cw_i + 1'd1;
+			wb_addr <= caddr(cw_i[1], {cur_y, 3'd0} + ri - 11'd2, cur_x + cw_i[0] - 8'd1);
+			wb_din <= cw_i[1] ? CV[0][cw_i[0] * 64 +: 64] : CU[0][cw_i[0] * 64 +: 64];
+			wb_din2 <= cw_i[1] ? CV[0][127:64] : CU[0][127:64];
+			wb_two <= cw_two;
+			wi <= cw_i + 1'd1 + cw_two;
 		end
 		if (cb_i != 4) begin
 			clb_we <= 1;
@@ -669,6 +680,7 @@ always @(posedge clk) begin
 			wb_we <= 1;
 			wb_addr <= yaddr({cur_h, 4'd0} - 12'd4 + fr, fk[8:0]);
 			wb_din <= nw0;
+			wb_two <= 0;
 			fs <= 0;
 			fk <= fk + 1'd1;
 			if (fk == {cur_w, 1'b0} - 1'd1) begin
@@ -686,6 +698,7 @@ always @(posedge clk) begin
 			wb_we <= 1;
 			wb_addr <= caddr(fp, {cur_h, 3'd0} - 11'd2 + fr, fk[7:0]);
 			wb_din <= nw0;
+			wb_two <= 0;
 			fs <= 0;
 			fp <= ~fp;
 			if (fp) begin
@@ -711,6 +724,7 @@ always @(posedge clk) begin
 		q <= Q_IDLE;
 		cur_ok <= 0;
 		wb_we <= 0;
+		wb_two <= 0;
 		lv_on <= 0;
 		lh_on <= 0;
 		cv_on <= 0;

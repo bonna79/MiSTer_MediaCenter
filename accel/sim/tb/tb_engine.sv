@@ -31,7 +31,7 @@ wire cmd_valid = cp < ncmd;
 wire mem_rd, mem_we;
 wire [27:0] mem_addr;
 wire [7:0] mem_burst, mem_be;
-wire [63:0] mem_din;
+wire [63:0] mem_din, mem_din2;
 reg  mem_busy = 0;
 reg  [63:0] mem_dout;
 reg  mem_dout_ready = 0;
@@ -43,7 +43,7 @@ acc_engine #(.SLOT_L2(`SLOT_L2), .YSTRIDE_L2(`YS_L2), .CSTRIDE_L2(`CS_L2), .UOFF
 (
 	.clk(clk), .reset(reset),
 	.cmd_valid(cmd_valid), .cmd_data(cmd[cp]), .cmd_ready(cmd_ready),
-	.mem_rd(mem_rd), .mem_we(mem_we), .mem_addr(mem_addr), .mem_burst(mem_burst), .mem_din(mem_din), .mem_be(mem_be),
+	.mem_rd(mem_rd), .mem_we(mem_we), .mem_addr(mem_addr), .mem_burst(mem_burst), .mem_din(mem_din), .mem_din2(mem_din2), .mem_be(mem_be),
 	.mem_busy(mem_busy), .mem_dout(mem_dout), .mem_dout_ready(mem_dout_ready),
 	.pic_done(pic_done), .pic_slot(pic_slot), .error(error), .mb_count(mb_count)
 );
@@ -71,7 +71,11 @@ always @(posedge clk) begin
 		qt[qtl % 256] = clocks + `LAT;
 		qtl = qtl + 1;
 	end
-	if (mem_we && !mem_busy) mem[maddr(mem_addr)] <= mem_din;
+	if (mem_we && !mem_busy) begin
+		mem[maddr(mem_addr)] <= mem_din;
+		if (mem_burst == 2) mem[maddr(mem_addr + 1)] <= mem_din2;
+		else if (mem_burst != 1) begin $display("write burst %0d", mem_burst); $finish; end
+	end
 	if (qh != qtl && qt[qh % 256] <= clocks) begin
 		mem_dout <= mem[maddr(qa[qh % 256] + beat)];
 		mem_dout_ready <= 1;

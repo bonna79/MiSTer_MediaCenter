@@ -23,10 +23,19 @@
 //  10 [15:0] U/V bytes between output lines  [16] U/V line = output line / 2
 //     [17] narrow by 2:1 instead of 3:2 (at most 256 output words a line)
 //     [18] the player's controls are blended over the lines from word 12 on
+//     [19] resample (any width, see below) instead of 3:2 or 2:1
 //  11 controls (physical byte address, outside Linux): for each blended
 //     line, one 64-bit word per output word, bytes a0 g0 a1 g1 a2 g2 a3 g3
 //     (coverage a and grey g = 16 + v * 219 / 255 of its 4 pixels)
 //  12 [15:0] first line with the controls
+//  13 resample: [15:0] source pixels a line  [31:16] source lines
+// Resample, as the player's pack_yuyv_map and yuv_draw: output pixel x takes
+// source pixel s = x * source pixels / output pixels (whole part) and each
+// output pair the colour of s / 2 of its first pixel; output line r takes
+// source line l = r * source lines / output lines (word 7 apart), and the
+// colour line l / 2 (word 10 bit 16) or l (word 10 apart). Output pixels
+// from source pixels up to twice as many (2048 at most), and the same for
+// the lines. The lines' places are counted one by one (no division).
 // Blending, as the player's yuv_band: Y = (Y * (255 - a) + g * a + 127) / 255
 // for each pixel; U and V the same toward 128 with (a0 + a1 + 1) / 2 of
 // their two pixels.
@@ -71,9 +80,10 @@ localparam S_WAIT   = 0,  // waiting to look at the mailbox
            S_TABLE  = 4,  // reading the page table
            S_ROWS   = 5,  // making the lines
            S_ANSWER = 6,  // writing the answer
-           S_DEAD   = 7;  // the memory never answered: stay out of the way
+           S_DEAD   = 7,  // the memory never answered: stay out of the way
+           S_MAP    = 8;  // resample: the source pixel of each output pixel
 
-reg  [2:0] state = S_WAIT;
+reg  [3:0] state = S_WAIT;
 reg [11:0] poll = 0;
 reg [31:0] hdr[16];
 reg [31:0] last_seq = 0;
@@ -118,6 +128,50 @@ wire        c_half = hdr[10][16];
 wire        n21    = hdr[10][17];   // 2:1 (the mailbox is not read again while lines are made)
 wire        ov_on  = hdr[10][18];
 wire [15:0] ov_y0  = hdr[12][15:0];
+wire        rs     = hdr[10][19];   // resample
+wire [11:0] rs_sw  = hdr[13][11:0]; // source pixels a line (checked: 2048 at most)
+wire [15:0] rs_sh  = hdr[13][31:16];// source lines
+
+// resample: for output word n, its first source pixel (y0) and how far the
+// other three are from it (d1, d2, d3, at most 7)
+reg  [19:0] xm[512];
+reg  [19:0] xq;
+reg  [11:0] mx_k;           // output pixel
+reg  [10:0] mx_s;           // its source pixel
+reg  [12:0] mx_f;           // x * source pixels - mx_s * output pixels
+reg  [10:0] mx_y0;
+reg   [5:0] mx_d;           // d1, d2 of the word being made
+reg  [12:0] mx_w;           // output pixels a line
+reg         xm_we = 0;
+reg   [8:0] xm_wa;
+reg  [19:0] xm_wd;
+always @(posedge clk) if(xm_we) xm[xm_wa] <= xm_wd;
+// resample: source line of the next line to read, and its fraction
+reg  [15:0] v_l;
+reg  [16:0] v_f;
+// worked out a clock ahead (the lines are read many clocks apart): the
+// step to the line after (0, 1 or 2 source lines, 0 to 2 colour lines)
+// and the fraction there; and for the map, the source pixels less the
+// output pixels once and twice
+reg   [1:0] v_n, v_cn;
+reg  [16:0] v_fn;
+reg  [17:0] kv1, kv2;
+reg  [13:0] kx1, kx2;
+always @(posedge clk) begin
+	reg [17:0] a, b, c;
+	kv1 <= {2'b0, rs_sh} - {2'b0, rows};
+	kv2 <= {2'b0, rs_sh} - {1'b0, rows, 1'b0};
+	// from the mailbox, steady from S_CHECK on (mx_w is set there)
+	kx1 <= {2'b0, rs_sw} - {2'b0, hdr[5][25:16], 2'b00};
+	kx2 <= {2'b0, rs_sw} - {1'b0, hdr[5][25:16], 3'b000};
+	a = {1'b0, v_f} + rs_sh;
+	b = {1'b0, v_f} + kv1;
+	c = {1'b0, v_f} + kv2;
+	v_n  <= !c[17] ? 2'd2 : !b[17] ? 2'd1 : 2'd0;
+	v_fn <= !c[17] ? c[16:0] : !b[17] ? b[16:0] : a[16:0];
+	// colour line l / 2: one more when l odd and 1 more line, or 2 more
+	v_cn <= !c_half ? (!c[17] ? 2'd2 : !b[17] ? 2'd1 : 2'd0) : (!c[17] || (!b[17] && v_l[0])) ? 2'd1 : 2'd0;
+end
 
 // ---------------------------------------------------------------- page table
 reg  [31:0] tab_lo[1024], tab_hi[1024];
@@ -190,12 +244,32 @@ reg        mk_go = 0;
 reg  [2:0] p1_ys, p1_cs;   // byte of the first Y, U
 reg        p1_yodd, p1_codd; // the first word is an odd one
 
+// p0: the resample word of the map (a step for every mode)
+reg        p0_v = 0;
+reg  [9:0] p0_n;
+reg [12:0] p0_y;
+reg [11:0] p0_c;
+always @(posedge clk) begin
+	xq   <= xm[mk_n[8:0]];
+	p0_v <= mk_on;
+	p0_n <= mk_n;
+	p0_y <= mk_y;
+	p0_c <= mk_c;
+end
+
+reg  [2:0] p1_d1, p1_d2, p1_d3;  // resample: Y bytes 1, 2, 3 from the first
+reg  [1:0] p1_dc;                // and the second U, V byte from the first
 always @(posedge clk) begin
 	reg [7:0] ya, yb;
 	reg [6:0] ca, cb;
-	ya = mk_y[12:3];       // first Y word
+	reg [12:0] yy;
+	reg [11:0] cc, c2;
+	yy = rs ? {2'b0, xq[10:0]} : p0_y;
+	cc = rs ? {2'b0, xq[10:1]} : p0_c;
+	c2 = rs ? ({1'b0, xq[10:0]} + xq[16:14]) >> 1 : 12'd0;
+	ya = yy[12:3];         // first Y word
 	yb = ya + 1'd1;
-	ca = mk_c[11:3];
+	ca = cc[11:3];
 	cb = ca + 1'd1;
 	// even/odd words: the word a and a+1, one of them even
 	ye_q <= ye[{mk_bank, ya[0] ? yb[7:1] : ya[7:1]}];
@@ -204,13 +278,17 @@ always @(posedge clk) begin
 	uo_q <= uo[{mk_bank, ca[6:1]}];
 	ve_q <= ve[{mk_bank, ca[0] ? cb[6:1] : ca[6:1]}];
 	vo_q <= vo[{mk_bank, ca[6:1]}];
-	ov_q <= abuf[{mk_bank, mk_n[8:0]}];
-	p1_v    <= mk_on;
-	p1_n    <= mk_n[8:0];
-	p1_ys   <= mk_y[2:0];
-	p1_cs   <= mk_c[2:0];
+	ov_q <= abuf[{mk_bank, p0_n[8:0]}];
+	p1_v    <= p0_v;
+	p1_n    <= p0_n[8:0];
+	p1_ys   <= yy[2:0];
+	p1_cs   <= cc[2:0];
 	p1_yodd <= ya[0];
 	p1_codd <= ca[0];
+	p1_d1   <= xq[13:11];
+	p1_d2   <= xq[16:14];
+	p1_d3   <= xq[19:17];
+	p1_dc   <= c2[1:0] - cc[1:0];
 end
 
 // (a + b + 1) / 2
@@ -247,7 +325,12 @@ always @(posedge clk) begin
 	s2_n  <= p1_n;
 	s2_ov <= ov_q;
 	// bytes in memory order: Y0 U Y1 V Y2 U Y3 V
-	if(n21)
+	if(rs)
+		s2_d <= {v4[{p1_dc, 3'b000} +: 8], y8[{p1_d3, 3'b000} +: 8],
+		        u4[{p1_dc, 3'b000} +: 8], y8[{p1_d2, 3'b000} +: 8],
+		        v4[7:0],                  y8[{p1_d1, 3'b000} +: 8],
+		        u4[7:0],                  y8[7:0]};
+	else if(n21)
 		s2_d <= {avg2(v4[23:16], v4[31:24]),   avg2(y8[55:48], y8[63:56]),
 		        avg2(u4[23:16], u4[31:24]),   avg2(y8[39:32], y8[47:40]),
 		        avg2(v4[7:0],   v4[15:8]),    avg2(y8[23:16], y8[31:24]),
@@ -328,7 +411,7 @@ always @(posedge clk) begin
 	end
 end
 
-wire mk_busy = mk_on | p1_v | s2_v | sa_v | s3_v | s4_v | owe;
+wire mk_busy = mk_on | p0_v | p1_v | s2_v | sa_v | s3_v | s4_v | owe;
 
 // ---------------------------------------------------------------- the bus
 // output line word for the write: always the word at wr_idx
@@ -355,9 +438,12 @@ always @(posedge clk) begin
 	reg [31:0] pa;
 	reg [11:0] to_end;
 	reg [10:0] n;
+	reg [13:0] f, f1, f2;
+	reg [10:0] dd;
 
 	bwe   <= 0;
 	twe   <= 0;
+	xm_we <= 0;
 	mk_go <= 0;
 	if(state != S_WAIT && state != S_DEAD) cycles <= cycles + 1'd1;
 
@@ -499,17 +585,54 @@ always @(posedge clk) begin
 				cycles   <= 0;
 				ow       <= hdr[5][25:16];
 				// source words: 3/4 and 3/8 of the output words (2:1: as many, half)
-				ny       <= n21 ? {1'b0, hdr[5][25:16]} : {1'b0, hdr[5][25:16]} - hdr[5][25:18];
-				nc       <= n21 ? {2'b0, hdr[5][25:17]} : hdr[5][25:17] - hdr[5][25:19];
+				ny       <= rs ? (rs_sw + 4'd7) >> 3 : n21 ? {1'b0, hdr[5][25:16]} : {1'b0, hdr[5][25:16]} - hdr[5][25:18];
+				nc       <= rs ? (rs_sw + 4'd15) >> 4 : n21 ? {2'b0, hdr[5][25:17]} : hdr[5][25:17] - hdr[5][25:19];
+				mx_w     <= {hdr[5][25:16], 2'b00};
 				rows     <= hdr[3][31:16];
 				tab_n    <= hdr[5][10:0];
 				// output words: a multiple of 8, at most 340 (Y fits 256 words);
 				// 2048 pages at most; addresses on 8 bytes
-				refused  <= !hdr[5][25:16] || hdr[5][18:16] || hdr[5][25:16] > (n21 ? 10'd256 : 10'd340) ||
+				// resample: output pixels at most the source's, at least half
+				// (more than half); lines the same; 2048 source pixels at most
+				refused  <= !hdr[5][25:16] || hdr[5][18:16] || hdr[5][25:16] > (rs ? 10'd512 : n21 ? 10'd256 : 10'd340) ||
+				            (rs && (hdr[13][15:0] > 16'd2048 || {hdr[5][25:16], 2'b00} > hdr[13][15:0] ||
+				                    {hdr[5][25:16], 3'b000} <= hdr[13][15:0] || hdr[3][31:16] > rs_sh ||
+				                    {hdr[3][31:16], 1'b0} <= {1'b0, rs_sh})) ||
 				            !hdr[5][15:0] || hdr[5][15:0] > 16'd2048 || !hdr[3][31:16] ||
 				            |{hdr[2][2:0], hdr[3][2:0], hdr[4][2:0], hdr[6][2:0], hdr[7][2:0], hdr[8][2:0], hdr[9][2:0], hdr[10][2:0]} ||
 				            (hdr[10][18] && hdr[11][2:0]);
-				state    <= S_TABLE;
+				mx_k     <= 0;
+				mx_s     <= 0;
+				mx_f     <= 0;
+				v_l      <= 0;
+				v_f      <= 0;
+				state    <= rs ? S_MAP : S_TABLE;
+			end
+
+		S_MAP: begin
+				// one output pixel a clock: s and f for x + 1 from those of x
+				f  = {1'b0, mx_f} + rs_sw;
+				f1 = {1'b0, mx_f} + kx1;
+				f2 = {1'b0, mx_f} + kx2;
+				dd = mx_s - mx_y0;
+				if(refused) state <= S_TABLE;
+				else begin
+					case(mx_k[1:0])
+						0: mx_y0 <= mx_s;
+						1: mx_d[2:0] <= dd[2:0];
+						2: mx_d[5:3] <= dd[2:0];
+						3: begin
+								xm_we <= 1;
+								xm_wa <= mx_k[10:2];
+								xm_wd <= {dd[2:0], mx_d, mx_y0};
+							end
+					endcase
+					if(!f2[13]) begin mx_s <= mx_s + 2'd2; mx_f <= f2[12:0]; end
+					else if(!f1[13]) begin mx_s <= mx_s + 1'd1; mx_f <= f1[12:0]; end
+					else mx_f <= f[12:0];
+					mx_k <= mx_k + 1'd1;
+					if(mx_k + 1'd1 == mx_w) state <= S_TABLE;
+				end
 			end
 
 		S_TABLE: begin
@@ -564,10 +687,21 @@ always @(posedge clk) begin
 					rd_o    <= ov_a;
 					if(ov_on && row_r >= ov_y0) ov_a <= ov_a + {ow, 3'b000};
 					// the line after
-					y_off   <= y_off + y_step;
-					if(!c_half || row_r[0]) begin
-						u_off <= u_off + c_step;
-						v_off <= v_off + c_step;
+					if(rs) begin
+						// source line l + n, n = 0, 1 or 2 (whole part of
+						// (r + 1) * source lines / lines); its colour line
+						v_f   <= v_fn;
+						v_l   <= v_l + v_n;
+						y_off <= y_off + (v_n == 2 ? {y_step[30:0], 1'b0} : v_n == 1 ? y_step : 32'd0);
+						u_off <= u_off + (v_cn == 2 ? {15'd0, c_step, 1'b0} : v_cn == 1 ? {16'd0, c_step} : 32'd0);
+						v_off <= v_off + (v_cn == 2 ? {15'd0, c_step, 1'b0} : v_cn == 1 ? {16'd0, c_step} : 32'd0);
+					end
+					else begin
+						y_off   <= y_off + y_step;
+						if(!c_half || row_r[0]) begin
+							u_off <= u_off + c_step;
+							v_off <= v_off + c_step;
+						end
 					end
 				end
 				if(rd_on && !rd_go && !rd_left && !pend && rx == ny + nc + nc + (rd_band ? ow : 10'd0)) rd_on <= 0;

@@ -26,12 +26,14 @@ module acc_engine #(
 	input      [31:0] cmd_data,
 	output            cmd_ready,
 
-	// memory (DDRAM style: 64-bit words, bursts, in-order read data)
+	// memory (DDRAM style: 64-bit words, bursts, in-order read data;
+	// writes of 1 or 2 words, the second in mem_din2)
 	output            mem_rd,
 	output            mem_we,
 	output [AW-1:0]   mem_addr,
 	output      [7:0] mem_burst,
 	output     [63:0] mem_din,
+	output     [63:0] mem_din2,     // second word of a write burst of two
 	output      [7:0] mem_be,
 	input             mem_busy,
 	input      [63:0] mem_dout,
@@ -399,6 +401,11 @@ end
 
 reg        mc_start;
 wire       mc_done;
+// the windows of an inter macroblock are read as soon as stage A has its
+// vectors and references (a_pre_want), while B still works on the one before
+reg        a_pre_want, mc_pre_start;
+wire       mc_pre_full;
+wire [511:0] a_mv_flat, a_mv1_flat;
 wire       mc_px_valid;
 wire [1:0] mc_px_plane;
 wire [3:0] mc_px_x, mc_px_y;
@@ -419,6 +426,8 @@ generate
 	for (gq = 0; gq < 16; gq = gq + 1) begin : mvf
 		assign mv_flat[gq * 32 +: 32] = mv[gq];
 		assign mv1_flat[gq * 32 +: 32] = mv1[gq];
+		assign a_mv_flat[gq * 32 +: 32] = a_mv[gq];
+		assign a_mv1_flat[gq * 32 +: 32] = a_mv1[gq];
 	end
 endgenerate
 
@@ -426,12 +435,16 @@ acc_mc #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRID
 (
 	.clk(clk), .reset(reset),
 	.start(mc_start),
-	.mbx(mbx), .mby(mby), .wmb(wmb), .hmb(hmb),
+	.wmb(wmb), .hmb(hmb),
 	.mvs(mv_flat), .mvs1(mv1_flat),
 	.qref({qref[3], qref[2], qref[1], qref[0]}),
 	.iw({iw[3], iw[2], iw[1], iw[0]}),
-	.qslot({q_slot[3], q_slot[2], q_slot[1], q_slot[0]}),
-	.qslot1({q_slot1[3], q_slot1[2], q_slot1[1], q_slot1[0]}),
+	.pre_start(mc_pre_start), .pre_full(mc_pre_full),
+	.pre_mbx(a_mbx), .pre_mby(a_mby),
+	.pre_mvs(a_mv_flat), .pre_mvs1(a_mv1_flat),
+	.pre_qref({a_qref[3], a_qref[2], a_qref[1], a_qref[0]}),
+	.pre_qslot({a_q_slot[3], a_q_slot[2], a_q_slot[1], a_q_slot[0]}),
+	.pre_qslot1({a_q_slot1[3], a_q_slot1[2], a_q_slot1[1], a_q_slot1[0]}),
 	.qwt({q_wt[3], q_wt[2], q_wt[1], q_wt[0]}),
 	.qwt1({q_wt1[3], q_wt1[2], q_wt1[1], q_wt1[0]}),
 	.use_w(use_w), .use_wc(use_wc), .lden(lden), .cden(cden),
@@ -445,8 +458,9 @@ acc_mc #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRID
 // The deblocking filter (acc_dbk) takes a finished macroblock from acc_recon
 // and writes the filtered pixels to memory while B already predicts the
 // next one into the other half of acc_recon. It shares the memory port with
-// the MC fetch: it starts a word only when the MC has no request waiting,
-// and the MC sees the port busy while a word is out.
+// the MC fetch: it starts a write (one word, or two neighbours of a row as
+// one burst) only when the MC has no request waiting, and the MC sees the
+// port busy while a write is out.
 
 reg        pbuf;              // recon buffer B predicts into
 reg  [1:0] lbk;
@@ -471,7 +485,8 @@ acc_bs bs
 );
 wire       wb_we;
 wire [AW-1:0] wb_addr;
-wire [63:0] wb_din;
+wire [63:0] wb_din, wb_din2;
+wire        wb_two;
 wire  [6:0] rc_addr;
 wire [63:0] wb_word;
 
@@ -481,14 +496,15 @@ acc_dbk #(.AW(AW), .SLOT_L2(SLOT_L2), .YSTRIDE_L2(YSTRIDE_L2), .CSTRIDE_L2(CSTRI
 	.start(dbk_start), .fin(dbk_fin), .sbuf(~pbuf), .mbx(mbx), .mby(mby), .wmb(wmb), .hmb(hmb), .slot(cur_slot),
 	.prm_on(b_dbk_on), .prm({bs_h, bs_v, b_dbk[95:32], b_dbk[31:2], bs_strong}), .busy(dbk_busy),
 	.rc_addr(rc_addr), .rc_word(wb_word),
-	.wb_we(wb_we), .wb_addr(wb_addr), .wb_din(wb_din), .mem_busy(mem_busy), .mc_rd(mc_rd)
+	.wb_we(wb_we), .wb_addr(wb_addr), .wb_din(wb_din), .wb_din2(wb_din2), .wb_two(wb_two), .mem_busy(mem_busy), .mc_rd(mc_rd)
 );
 
 assign mem_rd    = wb_we ? 1'b0 : mc_rd;
 assign mem_we    = wb_we;
 assign mem_addr  = wb_we ? wb_addr : mc_addr;
-assign mem_burst = wb_we ? 8'd1 : mc_burst;
+assign mem_burst = wb_we ? {6'd0, wb_two, !wb_two} : mc_burst;
 assign mem_din   = wb_din;
+assign mem_din2  = wb_din2;
 assign mem_be    = 8'hFF;
 
 // ------------------------------------------------------------- commands
@@ -654,6 +670,12 @@ always @(posedge clk) begin
 	idct_wr <= 0;
 	idct_go <= 0;
 	mc_start <= 0;
+	mc_pre_start <= 0;
+	// the next macroblock's windows: to acc_mc as soon as it has room
+	if (a_pre_want && !mc_pre_full && !mc_pre_start) begin
+		mc_pre_start <= 1;
+		a_pre_want <= 0;
+	end
 	pic_done <= 0;
 	dbk_start <= 0;
 	dbk_fin <= 0;
@@ -705,6 +727,7 @@ always @(posedge clk) begin
 	end
 
 	if (reset) begin
+		a_pre_want <= 0;
 		a_dbk_on <= 0;
 		pbuf <= 0;
 		sa <= S_CMD;
@@ -811,7 +834,7 @@ always @(posedge clk) begin
 				end
 				else if (icnt < 20) a_mv[icnt - 4] <= cmd_data;
 				else a_mv1[icnt - 20] <= cmd_data;
-				if (icnt == 35) sa <= S_NCOEF;
+				if (icnt == 35) begin sa <= S_NCOEF; a_pre_want <= 1; end
 			end
 		end
 
@@ -874,7 +897,7 @@ always @(posedge clk) begin
 
 		// macroblock to memory, one word per write
 		// hand the macroblock to B once B is idle and the transform is done
-		S_HAND: if (b_free && !bs_busy && !idct_busy && !idct_go && !idct_rv) begin
+		S_HAND: if (b_free && !bs_busy && !idct_busy && !idct_go && !idct_rv && !a_pre_want && !mc_pre_start) begin
 			mbx <= a_mbx;
 			mby <= a_mby;
 			mtype <= a_mtype;
