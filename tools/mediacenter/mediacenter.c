@@ -1729,6 +1729,67 @@ static void pack_yuyv_map(uint8_t *dst, const uint8_t *y, const uint8_t *u, cons
 	}
 }
 
+// pack_yuyv_map with NEON: a block of 16 output pixels takes its luma from a
+// 32-byte window of the source row and its colour from a 16-byte window
+// (byte lookups), the same pixels as pack_yuyv_map. map16_build fills the
+// windows; it returns 0 when a block does not fit (narrowing by about 2:1 or
+// more) and pack_yuyv_map is used instead.
+typedef struct { uint16_t y0, c0; uint8_t ye[8], yo[8], c[8]; } map16_t;
+
+static int map16_build(map16_t *b, const int *map, int w, int src_w)
+{
+	int cw = src_w / 2;
+	if (src_w < 32 || src_w > 65535) return 0;
+	for (int k = 0; k * 16 + 16 <= w; k++)
+	{
+		int x = k * 16;
+		int base = map[x] < src_w - 32 ? map[x] : src_w - 32;
+		int cb = map[x] / 2 < cw - 16 ? map[x] / 2 : cw - 16;
+		if (map[x + 15] - base > 31 || map[x + 14] / 2 - cb > 15 || base < 0 || cb < 0) return 0;
+		b[k].y0 = (uint16_t)base;
+		b[k].c0 = (uint16_t)cb;
+		for (int p = 0; p < 8; p++)
+		{
+			b[k].ye[p] = (uint8_t)(map[x + 2 * p] - base);
+			b[k].yo[p] = (uint8_t)(map[x + 2 * p + 1] - base);
+			b[k].c[p] = (uint8_t)(map[x + 2 * p] / 2 - cb);
+		}
+	}
+	return 1;
+}
+
+static void pack_yuyv_map16(uint8_t *dst, const uint8_t *y, const uint8_t *u, const uint8_t *v, const map16_t *b,
+	const int *map, int w)
+{
+	int x = 0;
+#if defined(__arm__)
+	for (; x + 16 <= w; x += 16, b++)
+	{
+		uint8x16_t a0 = vld1q_u8(y + b->y0), a1 = vld1q_u8(y + b->y0 + 16);
+		uint8x8x4_t t = { { vget_low_u8(a0), vget_high_u8(a0), vget_low_u8(a1), vget_high_u8(a1) } };
+		uint8x16_t cu = vld1q_u8(u + b->c0), cv = vld1q_u8(v + b->c0);
+		uint8x8x2_t tu = { { vget_low_u8(cu), vget_high_u8(cu) } }, tv = { { vget_low_u8(cv), vget_high_u8(cv) } };
+		uint8x8_t ic = vld1_u8(b->c);
+		uint8x8x4_t o;
+		o.val[0] = vtbl4_u8(t, vld1_u8(b->ye));
+		o.val[1] = vtbl2_u8(tu, ic);
+		o.val[2] = vtbl4_u8(t, vld1_u8(b->yo));
+		o.val[3] = vtbl2_u8(tv, ic);
+		vst4_u8(dst + 2 * x, o);
+	}
+#else
+	(void)b;
+#endif
+	for (; x + 1 < w; x += 2)
+	{
+		int s = map[x];
+		dst[2 * x] = y[s];
+		dst[2 * x + 1] = u[s / 2];
+		dst[2 * x + 2] = y[map[x + 1]];
+		dst[2 * x + 3] = v[s / 2];
+	}
+}
+
 // pack_yuyv narrowing by exactly 3:2 (a 1920-wide picture on a 1280-wide
 // screen): every 3 source pixels give 2, each weighing the nearer pixel 2/3
 // and its neighbour 1/3; the colour likewise (3 samples give 2). w is the
@@ -1997,6 +2058,8 @@ static void yuv_draw(void)
 	// A picture wider than the framebuffer (only when it is wider than the
 	// screen) is narrowed here, while it is copied.
 	static int *map, map_src, map_w;
+	static map16_t *m16;
+	static int m16_ok;
 	int narrow = f && f->width > fb_w;
 	// exactly 3:2 (1920 on a 1280 screen): narrowed with NEON, averaging
 	int narrow32 = narrow && f->width * 2 == w * 3 && !(w & 3);
@@ -2008,6 +2071,9 @@ static void yuv_draw(void)
 		map_w = map ? w : 0;
 		if (!map) return;
 		for (int x = 0; x < w; x++) map[x] = x * f->width / w;
+		free(m16);
+		m16 = (map16_t *)malloc((size_t)(w / 16 + 1) * sizeof(map16_t));
+		m16_ok = m16 && map16_build(m16, map, w, f->width);
 	}
 	// 1080p: the core draws the lines above the controls (zerocopy.c)
 	int core_rows = 0;
@@ -2072,6 +2138,9 @@ static void yuv_draw(void)
 			if (narrow32)
 				pack_yuyv_32(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], w);
+			else if (narrow && m16_ok)
+				pack_yuyv_map16(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
+					f->data[2] + (size_t)cy * f->linesize[2], m16, map, w);
 			else if (narrow)
 				pack_yuyv_map(dst, f->data[0] + (size_t)ly * f->linesize[0], f->data[1] + (size_t)cy * f->linesize[1],
 					f->data[2] + (size_t)cy * f->linesize[2], map, w);
