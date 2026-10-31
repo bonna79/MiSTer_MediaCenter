@@ -2085,8 +2085,12 @@ static void yuv_draw(void)
 	// exactly 2:1 (1920 on 960, the 4:3 format): the core narrows the
 	// accelerator's pictures too, when it can (acc_can21)
 	int narrow21 = narrow && f->width == w * 2 && !(w & 31) && acc_can21();
-	if (have_frame && f) acc_layout_note((narrow32 || narrow21) && yuv_half && w == fb_w && !(fb_w & 31));
-	if ((narrow32 || (accf && narrow21)) && yuv_half && have_frame && f && f->data[0] && w == fb_w)
+	int old_core = (narrow32 || narrow21) && yuv_half && w == fb_w && !(fb_w & 31);
+	// any other format, when the core resamples (an accelerator's picture
+	// only: the ARM draws its own the same way)
+	int rs_core = f && !old_core && w == fb_w && acc_rs_fits(f->width, yuv_half ? f->height / 2 : f->height, fb_w, fb_h);
+	if (have_frame && f) acc_layout_note(old_core || rs_core);
+	if (((narrow32 || (accf && narrow21)) && yuv_half || (accf && rs_core)) && have_frame && f && f->data[0] && w == fb_w)
 	{
 		int rows = (ovl_shown && ovl_a && ovl_y < fb_h && !accf) ? (ovl_y > 0 ? ovl_y : 0) : fb_h;
 		if (zcp_draw(f, rows)) core_rows = rows;
@@ -2200,6 +2204,9 @@ static void draw_video_frame(AVFrame *f)
 		int w32 = f->width * 2 / 3;
 		if (f->width == 1440 && half && ((acc.on && acc_buf_of(f)) || acc_file_off == 2) && fw > w32 && fw * 2 != f->width)
 			fw = w32;
+		// the core's resampling makes lines of a multiple of 32 pixels
+		else if (((acc.on && acc_buf_of(f)) || acc_file_off == 2) && acc_can_rs() && (fw & 31) && fw > 32)
+			fw &= ~31;
 		pic_fields = (f->flags & AV_FRAME_FLAG_INTERLACED) && fh == h && getenv("MC_FIELDS") && atoi(getenv("MC_FIELDS"));
 		// A picture drawn at its own size goes to the framebuffer as YUV and
 		// the FPGA converts the colours: the ARM only copies it. Decided on

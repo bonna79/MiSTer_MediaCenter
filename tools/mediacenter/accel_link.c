@@ -567,15 +567,38 @@ static void al_close(void)
 #ifndef ACC_FAKE
 // ---------------------------------------------------------------- the player
 
+// The core's zero-copy block can also resample any width and height (from
+// up to twice the frame buffer's pixels and lines, 2048 wide at most, the
+// same pixels as the player's pack_yuyv_map): said by mc_acc in its answer
+// (word 20, bit 20); kept once seen.
+static int acc_core_rs;
+static int acc_can_rs(void)
+{
+	if (acc.on && al.mb && (al.mb[20] & 0x100000)) acc_core_rs = 1;
+	return acc_core_rs;
+}
+
+// A picture sw x sh (source lines, half of them in light mode) drawn by the
+// core's resampling on a frame buffer w x rows.
+static int acc_rs_fits(int sw, int sh, int w, int rows)
+{
+	return acc_can_rs() && w > 0 && !(w & 31) && rows > 0 && sw <= 2048 && w <= sw && sw < 2 * w && rows <= sh && sh < 2 * rows;
+}
+
 // Turns the accelerator on for a new video decoder when it can do the
 // stream: H.264, 8-bit 4:2:0, 1920 wide (or 1440: 810p, drawn on a 960
 // wide frame buffer), drawn with half its lines by the zero-copy block
-// (light mode). MC_NOACC=1 turns it off.
+// (light mode). With a core that resamples (acc_can_rs), also any other
+// H.264 from 1024 x 400 to 2048 x 1088 (720p, 1728 x 720...): when the core
+// turns out not to resample, it is turned off again. MC_NOACC=1 turns it off.
 static void acc_try(AVCodecContext *ctx, const AVStream *st)
 {
 	const char *e = getenv("MC_NOACC");
-	if (ctx->codec_id != AV_CODEC_ID_H264 || st->codecpar->format != AV_PIX_FMT_YUV420P || (st->codecpar->width != 1920 && st->codecpar->width != 1440) ||
-		!half_lines || fb_fake || zc_get_buffer2 || acc_file_off || (e && atoi(e))) return;
+	int w = st->codecpar->width, h = st->codecpar->height;
+	int old = (w == 1920 || w == 1440) && half_lines;
+	int rs = !old && w >= 1024 && w <= 2048 && !(w & 1) && h >= 400 && h <= 1088;
+	if (ctx->codec_id != AV_CODEC_ID_H264 || st->codecpar->format != AV_PIX_FMT_YUV420P || (!old && !rs) ||
+		fb_fake || zc_get_buffer2 || acc_file_off || (e && atoi(e))) return;
 	char why[96];
 	if (zcp_map())
 	{
@@ -607,6 +630,15 @@ static void acc_try(AVCodecContext *ctx, const AVStream *st)
 	// Word 20 comes just after the words al_open waited for: every core
 	// since 3.0 sets bit 16 in it, so once bit 16 is there the word is new.
 	for (int i = 0; i < 40 && !(al.mb[20] & 0x10000); i++) usleep(500);
+	if (rs && !(al.mb[20] & 0x100000))
+	{
+		printf("mediacenter: diag acceleratore: spento (%dx%d: il core non sa ridimensionare, serve il core nuovo)\n", w, h);
+		al_close();
+		al.pinned = 0;
+		zcp_unpin();
+		return;
+	}
+	if (rs) acc_core_rs = 1;
 	e = getenv("MC_NODEBLOCK");
 	int dbk_core = (al.mb[20] & 0x40000) != 0, dbk_off = e && atoi(e);
 	acc.hooks.deblock = dbk_core && !dbk_off;
@@ -772,7 +804,11 @@ static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows)
 		return 0;
 	}
 	int n21 = fb_w * 2 == f->width && acc_can21();
-	if ((fb_w * 3 != f->width * 2 && !n21) || (fb_w & 31) || rows <= 0 || f->height < 2 * rows)
+	int old = (fb_w * 3 == f->width * 2 || n21) && yuv_half && !(fb_w & 31) && rows > 0 && f->height >= 2 * rows;
+	// any other format: resampled (the lines in light mode are every other one)
+	int sh = yuv_half ? f->height / 2 : f->height;
+	int rs = !old && acc_rs_fits(f->width, sh, fb_w, rows);
+	if (!old && !rs)
 	{
 		acc_fail_layout("the picture format is not drawn by the core");
 		return 0;
@@ -806,12 +842,14 @@ static int acc_zc_draw(AVFrame *f, acc_buf_t *b, int rows)
 	m[4] = ZCP_MBOX + ACC_ZC_TABLES + (uint32_t)b->slot * 4096;
 	m[5] = ACC_SLOT_PAGES | (uint32_t)(fb_w / 4) << 16;
 	m[6] = y_off;
-	m[7] = 2 * ACC_Y_STRIDE;
+	m[7] = (rs && !yuv_half ? 1 : 2) * ACC_Y_STRIDE;
 	m[8] = u_off;
 	m[9] = v_off;
-	m[10] = ACC_C_STRIDE | (n21 ? 1u << 17 : 0) | (acc_ovl_on ? 1u << 18 : 0);
+	// resample: colour line = line / 2 when every line is used
+	m[10] = ACC_C_STRIDE | (rs ? 1u << 19 | (yuv_half ? 0 : 1u << 16) : n21 ? 1u << 17 : 0) | (acc_ovl_on ? 1u << 18 : 0);
 	m[11] = ACC_OVL_BASE;
 	m[12] = (uint32_t)ovl_y;
+	m[13] = rs ? (uint32_t)f->width | (uint32_t)sh << 16 : 0;
 	m[0] = ZCP_MAGIC;
 	__sync_synchronize();
 	unsigned seq = ++zcp_seq;
