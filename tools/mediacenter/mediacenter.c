@@ -42,6 +42,7 @@ static double video_aspect = 4.0 / 3.0;
 #define MC_AUDIO_LEAD 0.3
 #define MC_VQ_MAX 64  // pictures the queue can hold
 #define MC_VQ_FILE 12 // pictures decoded ahead for files
+#define MC_VQ_ARM 24  // with the video thread and no accelerator: a reserve for the start and the heavy moments
 #define MC_VQ_ACC 48  // with the FPGA accelerator (1080p): a deeper reserve for the heavy moments
 #define MC_ACC_SPARE 10 // FPGA picture slots kept free for the pictures being decoded
 #define MC_PREROLL 2.0 // seconds the start waits for the reserve, at most
@@ -197,6 +198,7 @@ static void zcp_open(AVCodecContext *ctx, int width, int half);
 static void zcp_close(void);
 static void zcp_mark(const AVFrame *f);
 static int zcp_get_buffer(AVCodecContext *s, AVFrame *f, int flags);
+static int zcp_free_slots(void);
 
 // FPGA accelerator (accel.c, accel_link.c)
 // it gave up on this file (1), or only while the picture format is one the
@@ -479,22 +481,25 @@ static void push_audio(AVFrame *f)
 // slow pictures, which otherwise end in pictures skipped or dropped late.
 static int vq_depth(void)
 {
-	return acc.on ? MC_VQ_ACC : MC_VQ_FILE;
+	if (acc.on) return MC_VQ_ACC;
+	return svcd_on ? MC_VQ_FILE : MC_VQ_ARM; // Video CD / Super Video CD as before
 }
 
 // The queue is full. With the accelerator every picture in it holds a slot
 // of the FPGA memory (64 slots, the decoder's reference pictures take some
-// too): it is also full while fewer than MC_ACC_SPARE slots are free.
+// too): it is also full while fewer than MC_ACC_SPARE slots are free. The
+// same holds for the zero-copy pool (1080p decoded by the ARM).
 static int vq_full(void)
 {
 	if (mc.vq_count >= vq_depth()) return 1;
-	return acc.on && ACC_SLOTS - __builtin_popcountll(__atomic_load_n(&acc.slots_used, __ATOMIC_SEQ_CST)) < MC_ACC_SPARE;
+	if (acc.on) return ACC_SLOTS - __builtin_popcountll(__atomic_load_n(&acc.slots_used, __ATOMIC_SEQ_CST)) < MC_ACC_SPARE;
+	return zcp_free_slots() < MC_ACC_SPARE;
 }
 
-// At the start (and after fast forward / rewind) with the accelerator the
-// clock and the sound wait until the queue is full (MC_VQ_ACC pictures
-// ahead), for MC_PREROLL seconds at most: the queue starts full instead of
-// empty.
+// At the start (and after fast forward / rewind) the clock and the sound
+// wait until the queue is full (MC_VQ_ACC pictures ahead with the
+// accelerator, MC_VQ_ARM without), for MC_PREROLL seconds at most: the queue
+// starts full instead of empty. Not for Video CD / Super Video CD.
 static int preroll;
 static double preroll_t0;
 
@@ -658,7 +663,7 @@ static struct
 
 static void preroll_start(void)
 {
-	preroll = acc.on && vt.on;
+	preroll = vt.on && !svcd_on;
 	preroll_t0 = now_seconds();
 }
 
@@ -1005,11 +1010,11 @@ static int need_more(void)
 	{
 		// keep a few packets ready for the video thread; reading further
 		// ahead is driven by the sound
-		// (not beyond a second ahead, 2.5 s with the accelerator's deeper
-		// queue: when only key pictures are decoded the thread empties its
-		// queue at once)
+		// (not beyond a second ahead for Video CD, 1.5 s for the other files
+		// and 2.5 s with the accelerator, to fit their deeper queues: when
+		// only key pictures are decoded the thread empties its queue at once)
 		pthread_mutex_lock(&vt.lock);
-		int more = vt.count < 8 && !vq_full() && !(mc.read_vpts > mc.clock + (acc.on ? 2.5 : 1.0));
+		int more = vt.count < 8 && !vq_full() && !(mc.read_vpts > mc.clock + (acc.on ? 2.5 : svcd_on ? 1.0 : 1.5));
 		pthread_mutex_unlock(&vt.lock);
 		if (more) return 1;
 	}
@@ -2571,7 +2576,7 @@ static int media_play(int in_playlist)
 				int ready = mc.vq_count;
 				int full = vq_full();
 				pthread_mutex_unlock(&vt.lock);
-				if (ready >= MC_VQ_ACC || full || t - preroll_t0 > MC_PREROLL || mc.eof || !acc.on || !vt.on)
+				if (ready >= vq_depth() || full || t - preroll_t0 > MC_PREROLL || mc.eof || !vt.on)
 				{
 					preroll = 0;
 					if (dd.on) printf("mediacenter: diag partenza: %d immagini pronte dopo %.0f ms\n", ready, 1000 * (t - preroll_t0));
