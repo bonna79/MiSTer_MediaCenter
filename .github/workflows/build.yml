@@ -78,21 +78,22 @@ jobs:
       # The menu core is compiled by fpga.yml (Quartus, only when fpga/ changes).
       # The release takes the core build the user tested, by its run id: the
       # fit changes with the build date (sys/build_id.tcl), so a new build of
-      # the same sources can miss timing. 3.5: fpga.yml run 40 (seed 1).
+      # the same sources can miss timing. 3.6: fpga_seeds.yml run 41230928799,
+      # seed 9 (the file tested on the MiSTer, the only seed that meets timing).
       - name: Fetch the menu core
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: fpga.yml
-          run_id: 40599751430
-          name: mediacenter_rbf
+          workflow: fpga_seeds.yml
+          run_id: 41230928799
+          name: mediacenter_rbf_seed9
           path: rbf
 
       - name: Package release
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         run: |
           mkdir -p pkg/linux pkg/Scripts
-          cp rbf/menu_mediacenter.rbf pkg/linux/
+          cp rbf/menu_mediacenter_seed9.rbf pkg/linux/menu_mediacenter.rbf
           mkdir -p pkg/dvdcss
           # libdvdcss for protected DVDs, kept in the repository (dvdcss/)
           cp dvdcss/libdvdcss.so.2 pkg/dvdcss/

@@ -2,7 +2,7 @@
 
 [Italiano](README.md) · **English**
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.5 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.6 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
 
@@ -35,6 +35,33 @@ The package is made of these parts:
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
 The player's on-screen texts are in Italian.
+
+## What's new in version 3.6
+
+3.6 brings the H.264 accelerator in the FPGA to **720p** and **810p** video and to cinema-format films such as **Tears of Steel (1728x720)**, and makes it faster on 1080p.
+
+- **Accelerator for 720p, 810p and other widths too:** up to 3.5 the FPGA only rebuilt video 1920 pixels wide. Now it takes all 8-bit, 4:2:0, progressive H.264 video from 1024x400 to 2048x1088. The menu core then copies the picture into the frame buffer at the size of the screen, taking the same pixels and lines the ARM used to take. Tears of Steel goes from 29.6% of pictures not shown to 0.0%, and the ARM from about 41 ms to 3.8 ms per picture. With an older menu core the player turns the accelerator off by itself for these sizes.
+- **1440x810 video with the accelerator:** for example Inuyasha's MKVs. The core narrows the picture to 960x405 with the same 3:2 narrowing as 1080p; the ARM spends about 6 ms per picture instead of 17.
+- **Faster FPGA on 1080p:** the engine reads the reference windows of the next macroblock while it calculates the current one, reads small neighbouring blocks with the same vector through a single window, and the deblocking filter writes two words at a time to memory. HTC.mp4 goes from 23.5 to 20.3 ms of FPGA work per picture (-14%): more headroom for heavy scenes.
+- **Safer start:** with the accelerator the player prepares 48 pictures before starting (before, 24) and always keeps 10 FPGA places free; HTC.mp4 no longer has late pictures at the start (before, 6). Without the accelerator it prepares 24 (before, 12) and waits for them after a seek too: a 720p with two seeks goes from 5 late pictures to none.
+- **Films wider than 16:9 without the accelerator too:** when the ARM decodes the video, a 2.40:1 film narrowed to its window stays in YUV (the FPGA converts the colours) and the narrowing uses the processor's NEON instructions: drawing a picture goes from 14.3 to 7.8 ms.
+- **New picture** reading Ver. 3.6, shown for 3 seconds only when the mediacenter script is started from Scripts (not when a DVD, Video CD or Super Video CD starts).
+
+The 3.6 menu core uses 78% of the FPGA's logic, 37% of the internal memory blocks and 85% of the multipliers, and meets timing at 108 MHz at 100 °C and -40 °C (fitter seed 9, margin +0.066 ns). The player and the core must be updated together.
+
+Tested on a real MiSTer on 29–31 October 2026, on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together. Every test from the menu, with the sound always clean:
+
+| Test | Before | 3.6 |
+| --- | --- | --- |
+| Tears of Steel, H.264 1728x720 2.40:1, the first 241 s, with the heaviest scenes, from USB | 29.6% of pictures not shown, ARM about 41 ms per picture (at the limit) | **0.0%**, none late, none lost by the FPGA, ARM 3.8 ms |
+| One Piece Episode 938, H.264 1280x720, 156 s | 0.3% (3.5, no accelerator) | **0.1%** (in the first seconds), none late, none lost by the FPGA, ARM 1.7 ms |
+| Inuyasha, H.264 1440x810, 627 s, from the DVD | 0.2%, 10 late, ARM 16.9 ms (3.5) | **0.0%**, 2 late (two disc read pauses), none lost by the FPGA, ARM 5.6 ms |
+| One Piece Episode 940, H.264 1920x1080, 788 s | 0.3% (3.5) | **0.0%**, none late, none lost by the FPGA |
+| HTC.mp4, 1080p 29.97: FPGA work per picture | 23.5 ms (3.5) | **20.3 ms** (-14%), 0.1% of pictures not shown |
+| HTC.mp4, start | 6 late pictures in the first seconds | **none** |
+| 720p video decoded by the ARM (VisionQuest, before the 720p accelerator) with two seeks | 0.5%, 5 late | **0.2%**, none late |
+
+The pictures the core draws with the accelerator were first compared in simulation with FFmpeg's and the player's: identical pixel for pixel (16 resizing cases; Tears of Steel: 210 pictures in the model and 6 in the Verilog engine).
 
 ## What's new in version 3.5
 
@@ -204,9 +231,9 @@ It is the MiSTer menu core with two additions, which read the same frame buffer 
 
 The two outputs work together: the same picture goes to HDMI and VGA at the same time. There is a single sound stream, which reaches HDMI, the analog output and the optical output together.
 
-- **H.264 accelerator (modules `mc_acc`, `acc_engine`, `mc_zc`, from 3.0):** for 1080p video FFmpeg on the ARM reads the video (CABAC, motion vectors, coefficients) but does not rebuild the pictures: for each picture it writes the engine's commands (about 1 MB) into a ring in memory. The engine in the FPGA, at 108 MHz, reads them from DDR memory and rebuilds the pictures (inverse transform, intra prediction, motion compensation with the weights of B pictures) in 64 slots of 4 MB; then the zero-copy block narrows the picture to 1280 or 960 pixels and writes it into the frame buffer in YUV. The ARM no longer touches the pixels. With the 3.0 core the menu core uses 55% of the FPGA's logic, 17% of its internal memory and 85% of its multipliers. How it all works, for anyone who wants to change or improve it, is in the [accelerator technical sheet](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md) ([Italiano](docs/SCHEDA_TECNICA_ACCELERATORE_IT.md)).
+- **H.264 accelerator (modules `mc_acc`, `acc_engine`, `mc_zc`, from 3.0):** for high-definition H.264 video (from 3.6, 1024x400 to 2048x1088: 720p, 810p, 1080p) FFmpeg on the ARM reads the video (CABAC, motion vectors, coefficients) but does not rebuild the pictures: for each picture it writes the engine's commands (about 1 MB) into a ring in memory. The engine in the FPGA, at 108 MHz, reads them from DDR memory and rebuilds the pictures (inverse transform, intra prediction, motion compensation with the weights of B pictures) in 64 slots of 4 MB; then the zero-copy block brings the picture to the size of the screen (it narrows 1080p to 1280 or 960 pixels and resamples the other sizes) and writes it into the frame buffer in YUV. The ARM no longer touches the pixels. With the 3.0 core the menu core uses 55% of the FPGA's logic, 17% of its internal memory and 85% of its multipliers. How it all works, for anyone who wants to change or improve it, is in the [accelerator technical sheet](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md) ([Italiano](docs/SCHEDA_TECNICA_ACCELERATORE_IT.md)).
 
-The FPGA has no room for a complete H.264 decoder: that is why it shares the work with the ARM, which reads the video, and only for progressive 8-bit H.264 1920 pixels wide. All other video is decoded by the ARM.
+The FPGA has no room for a complete H.264 decoder: that is why it shares the work with the ARM, which reads the video, and only for progressive 8-bit H.264 from 1024x400 to 2048x1088 (720p, 810p, 1080p). All other video is decoded by the ARM.
 
 ## What's new in version 2.0
 
@@ -312,16 +339,17 @@ MMC is made for standard-definition video. These are the recommended maximum res
 | Super Video CD (MPEG-2) | 480x576 (PAL), 480x480 (NTSC) | Perfect |
 | DivX, Xvid (MPEG-4) | 720x576 | Smooth |
 | MP4, MKV in 8-bit H.264 | 1280x720 | Smooth |
-| MP4, MKV in progressive 8-bit H.264 | 1920x1080, with the 3.0 accelerator | Smooth |
+| MP4, MKV in progressive 8-bit H.264 | 1920x1080 (up to 2048x1088), with the accelerator in the FPGA: from 3.6 also 720p, 810p and films such as 1728x720 | Smooth |
 | Music | Any | Perfect |
 
-**Video above 720p that is not progressive 8-bit H.264 1920x1080, 10-bit H.264 (Hi10p) and HEVC/H.265 are not recommended.** They play, with smooth audio, but the MiSTer cannot show every frame and the picture stutters. Measured on a real MiSTer:
+**Video above 720p that is not progressive 8-bit H.264 (up to 2048x1088), 10-bit H.264 (Hi10p) and HEVC/H.265 are not recommended.** They play, with smooth audio, but the MiSTer cannot show every frame and the picture stutters. Measured on a real MiSTer:
 
 | Video | Frames not shown |
 | --- | --- |
 | DVD (MPEG-2 720x576) | less than 1% |
-| 8-bit H.264 1280x720 | 0.1% at full resolution in 2.7 (1.4–2.5% in earlier versions, 10% before the FPGA converted the colours) |
-| 8-bit H.264 1440x810 | about 1.4% (was about 65% up to 2.5) |
+| 8-bit H.264 1280x720 | 0.1% with the 3.6 accelerator (One Piece Episode 938); without it, 0.1% at full resolution in 2.7 (1.4–2.5% in earlier versions, 10% before the FPGA converted the colours) |
+| 8-bit H.264 1728x720 (2.40:1) | 0.0% with the 3.6 accelerator (Tears of Steel; 29.6% before) |
+| 8-bit H.264 1440x810 | 0.0% with the 3.6 accelerator (about 1.4% without it, was about 65% up to 2.5) |
 | 8-bit H.264 1920x1080 | 0% in stretches without seeks with the 3.0 accelerator (about 14% in 2.8, One Piece) |
 | 10-bit H.264 (Hi10p) 1280x720 | about 78% (measured with version 1.0) |
 
@@ -501,7 +529,7 @@ MC_CRT_VPOS=2
 | `MC_CRT_HSIZE`, `MC_CRT_HPOS`, `MC_CRT_VSIZE`, `MC_CRT_VPOS`, `MC_CRT_MODE`, `MC_CRT_FILTER`, `MC_CRT_ASPECT`, `MC_CRT_PANSCAN` | The [CRT Adjust](#crt-adjust-geometry) settings, written by its screen |
 | `MC_FIELDS=1` | Interlaced DVDs and videos: the player does not blend the two fields. The CRT gets them whole, as from a real DVD player (sharper and smoother in motion); on HDMI the Main's scaler blends them, with no combing. Recommended with a CRT. Without this line the player blends the lines for both outputs |
 | `MC_NOYUV=1` | Has the ARM convert the colours instead of the FPGA |
-| `MC_NOACC=1` | Turns off the 3.0 H.264 accelerator: 1080p videos are decoded by the ARM as in 2.8 |
+| `MC_NOACC=1` | Turns off the H.264 accelerator: 720p, 810p and 1080p videos are decoded by the ARM (1080p as in 2.8) |
 | `MC_NOBOOTWAIT=1` | Right after power-on the video starts without waiting for the MiSTer's start-up to end |
 | `MC_NOPRIO=1` | The video does not come before the other programs |
 | `MC_NOPAUSE=1` | MiSTer Remote is not paused during the video |
