@@ -1,0 +1,43 @@
+name: Parser (4.0) synthesis (size and timing)
+
+# Step 1 of 4.0: the CABAC block alone, to measure it. Not part of any core.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'accel/parse/rtl/**'
+      - 'accel/parse/syn/**'
+      - '.github/workflows/parse.yml'
+
+jobs:
+  cabac:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synthesis, fit and timing with Quartus
+        run: |
+          cp accel/parse/rtl/*.hex accel/parse/syn/
+          Q="docker run --rm -v $PWD/accel:/build -w /build/parse/syn theypsilon/quartus-lite-c5:17.0.2"
+          $Q quartus_map cab > map.log 2>&1 || (grep -E "Error" map.log | head -40; exit 1)
+          R=$(dirname $(find accel/parse/syn -name cab.map.rpt | head -1))
+          echo "--- synthesis: resources by entity"
+          grep -A30 "; Analysis & Synthesis Resource Utilization by Entity" $R/cab.map.rpt | head -40 || true
+          echo "--- synthesis: RAM inferred"
+          grep -A30 "; Analysis & Synthesis RAM Summary" $R/cab.map.rpt | head -40 || true
+          grep -E "Implemented|Info \(276|Warning \(276|readmem|Warning \(10" map.log | head -40 || true
+          echo "--- fit"
+          if $Q quartus_fit cab > fit.log 2>&1; then
+            cat $R/cab.fit.summary || true
+            grep -A20 "; Compilation Hierarchy Node" $R/cab.fit.rpt | head -30 || true
+            $Q quartus_sta cab > sta.log 2>&1 || true
+            echo "--- timing"
+            grep -B2 -A12 "Slow 1100mV 100C Model Setup Summary" $R/cab.sta.rpt | head -30 || true
+            grep -B2 -A12 "Slow 1100mV -40C Model Setup Summary" $R/cab.sta.rpt | head -30 || true
+            $Q quartus_sta -t paths.tcl > paths.log 2>&1 || true
+            cat accel/parse/syn/fmax.txt || true
+            echo "--- worst paths"
+            python3 accel/syn/paths.py accel/parse/syn/paths.txt || true
+          else
+            grep -E "Error" fit.log | head -20
+            exit 1
+          fi
