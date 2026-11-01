@@ -1,0 +1,2300 @@
+// acc_parse, step 2 of 4.0 (measure only: not in the core yet). From what the
+// ARM gives it for each CABAC slice (descriptor + slice data, below) it reads
+// every macroblock: CABAC (cab_dec), macroblock syntax, motion vector and
+// direct prediction, intra modes, dequantisation, DC transforms. It writes the
+// engine commands of each macroblock (A5 + A3 + modes/vectors + coefficients,
+// accel/doc/comandi.md), the same words the ARM writes today (A1, A2 and A4
+// stay with the ARM).
+//
+// Progressive frames, 4:2:0, 8 bit, CABAC only. The logic follows the C model
+// accel/parse/sim/pmodel.c, a port of FFmpeg's H.264 decoder (LGPL 2.1 or
+// later), keeping its caches (scan8 layout) so that every word matches.
+//
+// Slice descriptor (32-bit words):
+//   D0  [31:24] 0x5C, [23:16] slot of the picture, [15:8] slot of the
+//       co-located picture (list 1 [0]), [7:0] picture tag
+//   D1  [7:0] mb_w, [15:8] mb_h, [23:16] first mb_x, [31:24] first mb_y
+//   D2  [15:0] slice_num, [21:16] QP, [23:22] type (0 P, 1 B, 2 I),
+//       [25:24] cabac_init_idc, [27:26] list_count, [29:28] deblocking_filter,
+//       [31:30] use_weight
+//   D3  [5:0] ref_count0, [11:6] ref_count1, [12] direct_spatial,
+//       [13] transform_8x8_mode, [14] constrained_intra_pred,
+//       [15] direct_8x8_inference, [16] x264_build > 33, [17] list 1 [0] is a
+//       long-term reference, [22:18] chroma_qp_index_offset 0, [27:23] offset 1
+//   D4  [7:0] slice_alpha_c0_offset, [15:8] slice_beta_offset (signed)
+//   B slices with temporal direct: 32 words dist_scale_factor (signed, 15:0),
+//       64 words map_col_to_list0 [list 0 then 1][32] (7:0)
+//   use_weight 2: ref_count0 x ref_count1 words implicit_weight (8:0)
+//   24 words scaling_matrix4 [6][16] bytes (byte i in bits 8 * (i % 4))
+//   transform_8x8_mode: 32 words scaling_matrix8 [0] and [3], 64 bytes each
+//   1 word: bytes of slice data, then the data words (first byte in 31:24),
+//   from the byte after cabac_alignment_one_bit (the RBSP)
+//
+// Motion memory (32-bit words, for the co-located picture of B slices): each
+// macroblock writes 35 words at slot * SLOT_WORDS + mb * 36: packed mb_type,
+// ref_index list 0 (4 bytes), list 1, then 16 + 16 motion vectors (x | y << 16).
+// mem_req holds until mem_ack; reads return in order on mem_rvalid.
+`default_nettype none
+module acc_parse #(
+	parameter integer MAXW = 128,
+	parameter [31:0]  SLOT_WORDS = 32'd294912
+) (
+	input  wire        clk,
+	input  wire        reset,
+
+	input  wire        in_valid,
+	output wire        in_ready,
+	input  wire [31:0] in_data,
+
+	output wire        out_valid,
+	input  wire        out_ready,
+	output wire [31:0] out_data,
+
+	output reg         mem_req,
+	output reg         mem_we,
+	output reg  [31:0] mem_addr,
+	output reg  [31:0] mem_wdata,
+	input  wire        mem_ack,
+	input  wire        mem_rvalid,
+	input  wire [31:0] mem_rdata,
+
+	output reg         sl_done,
+	output reg         sl_err,
+	output wire        busy
+);
+
+`include "acc_parse_tables.svh"
+
+// ---------------------------------------------------------------- mb_type (FFmpeg's bits)
+localparam [31:0] MT_I4 = 32'h1, MT_I16 = 32'h2, MT_PCM = 32'h4, MT_16 = 32'h8, MT_168 = 32'h10,
+                  MT_816 = 32'h20, MT_88 = 32'h40, MT_DIR = 32'h100, MT_SKIP = 32'h800,
+                  MT_P0L0 = 32'h1000, MT_P1L0 = 32'h2000, MT_P0L1 = 32'h4000, MT_P1L1 = 32'h8000,
+                  MT_L0 = 32'h3000, MT_L1 = 32'hC000, MT_L0L1 = 32'hF000, MT_DCT = 32'h01000000,
+                  MT_16I = 32'h0F;    // 16x16 or intra
+
+function automatic logic uses(input [31:0] t, input logic l);
+	uses = l ? (t[15:14] != 2'd0) : (t[13:12] != 2'd0);
+endfunction
+function automatic logic isdir(input [31:0] t, input logic p, input logic l);
+	isdir = t[12 + {l, p}];
+endfunction
+function automatic logic intra(input [31:0] t); intra = t[2:0] != 3'd0; endfunction
+function automatic logic inter(input [31:0] t); inter = t[6:3] != 4'd0; endfunction
+function automatic [13:0] tpack(input [31:0] t); tpack = {t[24], t[15:11], t[8], t[6:0]}; endfunction
+function automatic [31:0] tunpack(input [13:0] p);
+	tunpack = {7'd0, p[13], 8'd0, p[12:8], 2'd0, p[7], 1'b0, p[6:0]};
+endfunction
+
+function automatic [3:0] t4(input [3:0] x); t4 = {x[1:0], x[3:2]}; endfunction
+function automatic [5:0] t8(input [5:0] x); t8 = {x[2:0], x[5:3]}; endfunction
+
+function automatic signed [15:0] mid_pred(input signed [15:0] a, input signed [15:0] b, input signed [15:0] c);
+	reg signed [15:0] r;
+	begin
+		r = b;
+		if (a > b) begin if (c > b) r = c > a ? a : c; end
+		else begin if (b > c) r = c > a ? c : a; end
+		mid_pred = r;
+	end
+endfunction
+
+function automatic [4:0] d4init(input [2:0] m, input [1:0] c);
+	case ({m, c})
+	5'd0: d4init = 10; 5'd1: d4init = 13; 5'd2: d4init = 16;
+	5'd4: d4init = 11; 5'd5: d4init = 14; 5'd6: d4init = 18;
+	5'd8: d4init = 13; 5'd9: d4init = 16; 5'd10: d4init = 20;
+	5'd12: d4init = 14; 5'd13: d4init = 18; 5'd14: d4init = 23;
+	5'd16: d4init = 16; 5'd17: d4init = 20; 5'd18: d4init = 25;
+	5'd20: d4init = 18; 5'd21: d4init = 23; 5'd22: d4init = 29;
+	default: d4init = 0;
+	endcase
+endfunction
+function automatic [5:0] d8init(input [2:0] m, input [2:0] c);
+	reg [35:0] r;
+	begin
+		case (m)
+		3'd0: r = {6'd24, 6'd25, 6'd19, 6'd32, 6'd18, 6'd20};
+		3'd1: r = {6'd26, 6'd28, 6'd21, 6'd35, 6'd19, 6'd22};
+		3'd2: r = {6'd31, 6'd33, 6'd24, 6'd42, 6'd23, 6'd26};
+		3'd3: r = {6'd33, 6'd35, 6'd26, 6'd45, 6'd25, 6'd28};
+		3'd4: r = {6'd38, 6'd40, 6'd30, 6'd51, 6'd28, 6'd32};
+		default: r = {6'd43, 6'd46, 6'd34, 6'd58, 6'd32, 6'd36};
+		endcase
+		d8init = r[6 * c +: 6];
+	end
+endfunction
+function automatic [2:0] d8scan(input [3:0] i);
+	case (i)
+	4'd0: d8scan = 0; 4'd1: d8scan = 3; 4'd2: d8scan = 4; 4'd3: d8scan = 3;
+	4'd4: d8scan = 3; 4'd5: d8scan = 1; 4'd6: d8scan = 5; 4'd7: d8scan = 1;
+	4'd8: d8scan = 4; 4'd9: d8scan = 5; 4'd10: d8scan = 2; 4'd11: d8scan = 5;
+	4'd12: d8scan = 3; 4'd13: d8scan = 1; 4'd14: d8scan = 5; default: d8scan = 1;
+	endcase
+endfunction
+// QP / 6 and QP % 6, QP 0..51
+function automatic [6:0] qpdm(input [5:0] q);
+	reg [3:0] d;
+	begin
+		d = q >= 48 ? 4'd8 : q >= 42 ? 4'd7 : q >= 36 ? 4'd6 : q >= 30 ? 4'd5 : q >= 24 ? 4'd4 :
+		    q >= 18 ? 4'd3 : q >= 12 ? 4'd2 : q >= 6 ? 4'd1 : 4'd0;
+		qpdm = {d, 3'(q - 6'(d * 6))};
+	end
+endfunction
+function automatic [3:0] qdiv(input [5:0] q); reg [6:0] r; begin r = qpdm(q); qdiv = r[6:3]; end endfunction
+function automatic [2:0] qmod(input [5:0] q); reg [6:0] r; begin r = qpdm(q); qmod = r[2:0]; end endfunction
+
+// ---------------------------------------------------------------- neighbour record
+// what a macroblock leaves for the one below (row buffer, bottom row) or on its
+// right (left record, right column)
+typedef struct packed {
+	logic [15:0]  sn;
+	logic [7:0]   tag;
+	logic [13:0]  ty;
+	logic [5:0]   qp;
+	logic [8:0]   cbp;
+	logic         cpm;
+	logic [15:0]  i4;     // 4 intra 4x4 modes, raw
+	logic [7:0]   nz;     // luma 4, Cb 2, Cr 2
+	logic [1:0]   dt;     // direct flags of two 8x8 blocks
+	logic [23:0]  rf;     // [l * 12 + k * 6], k: 2 ref_index
+	logic [255:0] mv;     // [l * 128 + k * 32], k: 4 vectors
+	logic [111:0] mvd;    // [l * 56 + k * 14], k: 4 |mvd| x | y << 7
+} nrec_t;
+
+// ---------------------------------------------------------------- CABAC
+reg         cab_v;
+reg   [2:0] cab_op;
+reg  [11:0] cab_arg;
+wire        cab_ready;
+wire        cab_in_valid, cab_in_ready;
+wire        cab_ov;
+wire  [1:0] cab_kind;
+wire  [6:0] cab_pos;
+wire [31:0] cab_val;
+wire        cab_busy;
+
+cab_dec cab (
+	.clk(clk), .reset(reset),
+	.cmd_valid(cab_v), .cmd_ready(cab_ready), .cmd_op(cab_op), .cmd_arg(cab_arg),
+	.in_valid(cab_in_valid), .in_ready(cab_in_ready), .in_data(in_data),
+	.out_valid(cab_ov), .out_kind(cab_kind), .out_pos(cab_pos), .out_val(cab_val), .busy(cab_busy)
+);
+
+// ---------------------------------------------------------------- output FIFO
+reg  [31:0] of_mem[0:63];
+reg   [5:0] of_wp, of_rp;
+reg   [6:0] of_cnt;
+reg         of_we;
+reg  [31:0] of_wd;
+assign out_valid = of_cnt != 7'd0;
+assign out_data = of_mem[of_rp];
+wire of_room = of_cnt < 7'd56;
+always @(posedge clk) begin
+	if (reset) begin
+		of_wp <= 6'd0;
+		of_rp <= 6'd0;
+		of_cnt <= 7'd0;
+	end
+	else begin
+		if (of_we) begin
+			of_mem[of_wp] <= of_wd;
+			of_wp <= of_wp + 6'd1;
+		end
+		if (out_valid && out_ready) of_rp <= of_rp + 6'd1;
+		of_cnt <= of_cnt + {6'd0, of_we} - {6'd0, out_valid && out_ready};
+	end
+end
+
+// ---------------------------------------------------------------- slice
+reg   [7:0] st, rs0, rs1, rsd, rsf;
+localparam S_DESC = 8'd0;
+reg   [3:0] dpart;
+reg   [6:0] dcnt;
+reg   [4:0] iw0, iw1;
+reg         data_on;
+reg  [29:0] dleft;
+
+reg   [7:0] s_slot, s_col, s_tag, s_mbw, s_mbh, s_x0, s_y0;
+reg  [15:0] s_sn;
+reg   [5:0] s_qp0, s_rc0, s_rc1;
+reg   [1:0] s_type, s_idc, s_lc, s_dbk, s_uw;
+reg         s_sp, s_t8, s_cip, s_d8, s_x264, s_l1l;
+reg signed [4:0] s_cqo0, s_cqo1;
+reg signed [7:0] s_alpha, s_beta;
+wire        s_B = s_type == 2'd1, s_I = s_type == 2'd2;
+
+reg signed [15:0] dsf[0:31];
+reg   [7:0] mapc[0:63];
+reg   [8:0] iw_ram[0:1023];
+reg  [31:0] smw[0:55];
+reg   [7:0] sm0[0:5];             // scaling_matrix4 [l][0]
+
+assign cab_in_valid = data_on && in_valid && dleft != 30'd0 && st != S_DRAIN;
+assign in_ready = st == S_DESC ? 1'b1 : data_on ? ((st == S_DRAIN || cab_in_ready) && dleft != 30'd0) : 1'b0;
+assign busy = st != S_DESC || data_on;
+
+function automatic [5:0] cqp(input logic t, input [5:0] q);
+	reg signed [7:0] j;
+	begin
+		j = $signed({2'b00, q}) + (t ? s_cqo1 : s_cqo0);
+		cqp = f_cqtab(j < 0 ? 6'd0 : j > 51 ? 6'd51 : j[5:0]);
+	end
+endfunction
+
+// ---------------------------------------------------------------- macroblock state
+reg   [7:0] mbx, mby;
+reg   [5:0] qs, cqp0, cqp1;
+reg         lqd_nz;
+reg  [31:0] mbt;
+reg   [2:0] pc;
+reg   [5:0] cbp;
+reg   [8:0] cbprec;
+reg   [3:0] i16m, cpmc;
+reg   [1:0] cpm;
+reg  [15:0] sa_t, sa_l, sa_tl, sa_tr;
+reg   [8:0] tcbp, lcbp;
+reg   [1:0] nts;
+reg         d8ok;
+reg  [31:0] sub[0:3];
+reg   [2:0] spc[0:3];
+reg         bin;
+
+reg  [31:0] t_ty, l_ty, tl_ty, tr_ty;
+reg         t_sm, l_sm, dt_av, dl_av;
+nrec_t      trec, lrec, tlr, trr;
+reg  [15:0] i4snap_b, i4snap_r;   // modes before the check (written back)
+
+// caches, FFmpeg's scan8 layout (8 per row)
+reg  signed [5:0] refc[0:1][0:39];
+reg  [31:0] mvc[0:1][0:39];
+reg  [13:0] mvdc[0:1][0:39];
+reg [119:0] nzc;
+reg   [3:0] i4c[0:39];              // 15 = -1
+reg  [39:0] dirc;
+
+// row buffer
+nrec_t      rb[0:MAXW-1];
+nrec_t      rb_q;
+reg   [7:0] rb_ra, rb_wa;
+reg         rb_we;
+nrec_t      rb_wd;
+always @(posedge clk) begin
+	if (rb_we) rb[rb_wa] <= rb_wd;
+	rb_q <= rb[rb_ra];
+end
+
+// ---------------------------------------------------------------- coefficients
+reg  [15:0] cram[0:383];
+reg   [8:0] cr_wa;
+reg  [15:0] cr_wd, cr_q;
+reg         cr_we;
+always @(posedge clk) if (cr_we) cram[cr_wa] <= cr_wd;
+reg [383:0] bm;                     // non-zero coefficient at bit block * 16 + position
+reg   [8:0] ncoef;
+reg  [31:0] pcm[0:95];
+reg  signed [15:0] ldc[0:15];
+reg  signed [15:0] cdc[0:7];
+
+// residual block being read
+reg   [2:0] r_cat;
+reg   [5:0] r_blk;                // FFmpeg's block index (scan8)
+reg   [8:0] r_base;               // coefficient base (bit and RAM)
+reg   [2:0] r_list;               // dequant list (4x4: 0..5, 8x8: 0/1)
+reg   [5:0] r_qp;
+reg         r_on;
+reg   [6:0] r_cnt;
+
+// dequantisation pipeline
+reg         c0_v, c1_v, c2_v, c3_v;
+reg  [21:0] c0_s, c1_s, c2_s;
+reg   [5:0] c0_p, c1_p, c2_p;
+reg   [5:0] c0_j, c1_j, c2_j;
+reg   [8:0] c0_b, c1_b, c2_b;
+reg         c0_8;
+reg   [2:0] c0_m;
+reg   [3:0] c0_d;
+reg   [1:0] c0_by;
+reg  [21:0] c1_q;
+reg  [21:0] c2_pr;
+reg   [5:0] sm_ra;
+reg   [4:0] sc_blk_r;
+reg   [5:0] sc_p_r;
+
+// col picture (direct)
+reg  [31:0] colty;
+reg  signed [7:0] colr0[0:3], colr1[0:3];
+reg  [31:0] colm0[0:15], colm1[0:15];
+reg   [5:0] mc_i, mc_r;
+
+// ---------------------------------------------------------------- combinational helpers
+
+// pred_motion / 16x8 / 8x16 (FFmpeg h264_mvpred.h), for pm_n, pm_pw, pm_l, pm_ref, pm_mode
+reg   [3:0] pm_n;
+reg   [2:0] pm_pw;
+reg         pm_l;
+reg  signed [5:0] pm_ref;
+reg   [1:0] pm_mode;                // 0 pred_motion, 1 16x8, 2 8x16
+reg  signed [15:0] pm_mx, pm_my;
+always @(*) begin
+	reg [6:0] i8;
+	reg signed [5:0] tr, lr, dr, trr_;
+	reg [31:0] A, B, C, D;
+	reg [1:0] mc;
+	reg done;
+	reg signed [5:0] r2;
+	reg [31:0] C2;
+	i8 = f_scan8({2'd0, pm_n});
+	tr = refc[pm_l][i8 - 7'd8];
+	lr = refc[pm_l][i8 - 7'd1];
+	A = mvc[pm_l][i8 - 7'd1];
+	B = mvc[pm_l][i8 - 7'd8];
+	trr_ = refc[pm_l][i8 - 7'd8 + {4'd0, pm_pw}];
+	if (trr_ != -6'sd2) begin dr = trr_; C = mvc[pm_l][i8 - 7'd8 + {4'd0, pm_pw}]; end
+	else begin dr = refc[pm_l][i8 - 7'd9]; C = mvc[pm_l][i8 - 7'd9]; end
+	done = 1'b0;
+	r2 = 6'sd0;
+	C2 = 32'd0;
+	D = 32'd0;
+	mc = 2'd0;
+	pm_mx = 16'sd0;
+	pm_my = 16'sd0;
+	// 16x8 and 8x16 shortcuts
+	if (pm_mode == 2'd1) begin
+		if (pm_n == 4'd0) begin
+			if (refc[pm_l][4] == pm_ref) begin D = mvc[pm_l][4]; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
+		end
+		else if (refc[pm_l][27] == pm_ref) begin D = mvc[pm_l][27]; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
+	end
+	else if (pm_mode == 2'd2) begin
+		if (pm_n == 4'd0) begin
+			if (refc[pm_l][11] == pm_ref) begin D = mvc[pm_l][11]; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
+		end
+		else begin
+			// fetch_diagonal_mv for scan8[4], width 2
+			if (refc[pm_l][8] != -6'sd2) begin r2 = refc[pm_l][8]; C2 = mvc[pm_l][8]; end
+			else begin r2 = refc[pm_l][5]; C2 = mvc[pm_l][5]; end
+			if (r2 == pm_ref) begin pm_mx = C2[15:0]; pm_my = C2[31:16]; done = 1'b1; end
+		end
+	end
+	if (!done) begin
+		mc = {1'b0, dr == pm_ref} + {1'b0, tr == pm_ref} + {1'b0, lr == pm_ref};
+		if (mc > 2'd1) begin
+			pm_mx = mid_pred(A[15:0], B[15:0], C[15:0]);
+			pm_my = mid_pred(A[31:16], B[31:16], C[31:16]);
+		end
+		else if (mc == 2'd1) begin
+			if (lr == pm_ref) begin pm_mx = A[15:0]; pm_my = A[31:16]; end
+			else if (tr == pm_ref) begin pm_mx = B[15:0]; pm_my = B[31:16]; end
+			else begin pm_mx = C[15:0]; pm_my = C[31:16]; end
+		end
+		else if (tr == -6'sd2 && dr == -6'sd2 && lr != -6'sd2) begin
+			pm_mx = A[15:0]; pm_my = A[31:16];
+		end
+		else begin
+			pm_mx = mid_pred(A[15:0], B[15:0], C[15:0]);
+			pm_my = mid_pred(A[31:16], B[31:16], C[31:16]);
+		end
+	end
+end
+
+// pred_intra_mode for block im_k
+reg   [3:0] im_k;
+wire  [6:0] im_i8 = f_scan8({2'd0, im_k});
+wire  [3:0] im_l = i4c[im_i8 - 7'd1], im_t = i4c[im_i8 - 7'd8];
+wire  [3:0] im_pred = (im_l == 4'd15 || im_t == 4'd15) ? 4'd2 : (im_l < im_t ? im_l : im_t);
+
+// check_intra_pred_mode: -1 (5'h1F) when not allowed
+function automatic [4:0] chk_mode(input [3:0] mode, input logic chroma, input [15:0] st_, input [15:0] sl_);
+	reg [4:0] m;
+	begin
+		m = {1'b0, mode};
+		if (mode > 4'd3) m = 5'h1F;
+		else begin
+			if (!st_[15]) m = mode == 4'd0 ? 5'd4 : mode == 4'd1 ? 5'd1 : 5'h1F;
+			if (m != 5'h1F && (sl_ & 16'h8080) != 16'h8080) begin
+				case (m)
+				5'd0: m = 5'd5; 5'd2: m = 5'd2; 5'd4: m = 5'd6; default: m = 5'h1F;
+				endcase
+				if (m != 5'h1F && chroma && (sl_ & 16'h8080) != 16'd0)
+					m = 5'd7 + {4'd0, !sl_[15]} + (m == 5'd6 ? 5'd2 : 5'd0);
+			end
+		end
+		chk_mode = m;
+	end
+endfunction
+
+// mvd context: |mvd| of the left and top blocks of block mv_n, list mv_l
+reg         mv_l;
+reg   [3:0] mv_n;
+wire  [6:0] mv_i8 = f_scan8({2'd0, mv_n});
+wire [13:0] mv_a = mvdc[mv_l][mv_i8 - 7'd1], mv_b = mvdc[mv_l][mv_i8 - 7'd8];
+wire  [7:0] amvd0 = {1'b0, mv_a[6:0]} + {1'b0, mv_b[6:0]};
+wire  [7:0] amvd1 = {1'b0, mv_a[13:7]} + {1'b0, mv_b[13:7]};
+
+// ref context
+reg         rf_l;
+reg   [3:0] rf_n;
+wire  [6:0] rf_i8 = f_scan8({2'd0, rf_n});
+wire signed [5:0] rf_a = refc[rf_l][rf_i8 - 7'd1], rf_b = refc[rf_l][rf_i8 - 7'd8];
+wire  [1:0] rf_ctx0 = s_B ? {rf_b > 0 && !dirc[rf_i8 - 7'd8], rf_a > 0 && !dirc[rf_i8 - 7'd1]}
+                          : {rf_b > 0, rf_a > 0};
+
+// coded_block_flag context of the block being read
+wire  [6:0] r_i8 = f_scan8(r_blk);
+wire        r_nza = r_cat == 3'd0 ? lcbp[8] : r_cat == 3'd3 ? lcbp[6 + r_blk - 6'd49] : nzc[r_i8 - 7'd1];
+wire        r_nzb = r_cat == 3'd0 ? tcbp[8] : r_cat == 3'd3 ? tcbp[6 + r_blk - 6'd49] : nzc[r_i8 - 7'd8];
+wire  [9:0] r_cbfbase = r_cat == 3'd0 ? 10'd85 : r_cat == 3'd1 ? 10'd89 : r_cat == 3'd2 ? 10'd93 :
+                        r_cat == 3'd3 ? 10'd97 : 10'd101;
+
+// first non-zero coefficient (output scan)
+reg  [23:0] grp;
+always @(*) for (int g = 0; g < 24; g++) grp[g] = bm[16 * g +: 16] != 16'd0;
+reg   [4:0] sc_g;
+reg   [3:0] sc_b;
+always @(*) begin
+	reg [15:0] w;
+	sc_g = 5'd0;
+	for (int g = 23; g >= 0; g--) if (grp[g]) sc_g = 5'(g);
+	w = bm[16 * sc_g +: 16];
+	sc_b = 4'd0;
+	for (int b = 15; b >= 0; b--) if (w[b]) sc_b = 4'(b);
+end
+
+// ---------------------------------------------------------------- states
+localparam
+	S_INIT = 1, S_INITW = 2, S_SL0 = 3, S_MB0 = 4, S_MB1 = 5, S_MB2 = 6, S_MB3 = 7, S_MB4 = 8,
+	S_SKR = 9, S_BIN = 10, S_SK0 = 11, S_SKE = 12, S_PSK = 13,
+	S_BT0 = 14, S_BT1 = 15, S_BT2 = 16, S_BT3 = 17, S_BT4 = 18, S_BT5 = 19, S_BT6 = 20, S_BT7 = 21, S_BT8 = 22,
+	S_PT1 = 23, S_PT2 = 24, S_PT3 = 25, S_PT4 = 26,
+	S_IT0 = 27, S_IT1 = 28, S_IT2 = 29, S_IT3 = 30, S_IT4 = 31, S_IT5 = 32, S_IT6 = 33, S_IT7 = 34, S_ITE = 35,
+	S_MTD = 36, S_FC0 = 37, S_FCL = 38, S_DISP = 39,
+	S_IN0 = 40, S_IN1 = 41, S_IM0 = 42, S_IM1 = 43, S_IM2 = 44, S_IM3 = 45, S_IWB = 46, S_ICHK = 47,
+	S_CP0 = 48, S_CP1 = 49, S_CP2 = 50, S_CP3 = 51,
+	S_PCM0 = 52, S_PCM1 = 53,
+	S_SB0 = 54, S_SB1 = 55, S_SB2 = 56, S_SB3 = 57, S_SB4 = 58, S_SB5 = 59, S_SB6 = 60, S_SB7 = 61, S_SBE = 62,
+	S_P8D = 63, S_RF0 = 64, S_RF1 = 65, S_MV0 = 66, S_MV1 = 67, S_MV2 = 68, S_MV3 = 69,
+	S_RD0 = 70, S_RD1 = 71, S_RD2 = 72,
+	S_MD0 = 73, S_MD1 = 74, S_MD2 = 75, S_MD3 = 76, S_MD4 = 77, S_MD5 = 78, S_MD6 = 79,
+	S_DIRE = 80, S_PR0 = 81, S_PR1 = 82, S_PV0 = 83, S_PV1 = 84, S_PV2 = 85,
+	S_CB0 = 86, S_CB1 = 87, S_CB2 = 88, S_CB3 = 89, S_CB4 = 90, S_CB5 = 91, S_CB6 = 92,
+	S_T8 = 93, S_QD0 = 94, S_QD1 = 95, S_QD2 = 96, S_RS = 97, S_RC0 = 98, S_RC1 = 99, S_RW = 100,
+	S_DC0 = 101, S_DC1 = 102, S_DC2 = 103, S_DC3 = 104,
+	S_O0 = 105, S_O1 = 106, S_O2 = 107, S_O3 = 108, S_O4 = 109, S_O5 = 110, S_O6 = 111,
+	S_E0 = 112, S_E1 = 113, S_E2 = 114, S_E3 = 115, S_DRAIN = 116, S_ERR = 117,
+	S_SD0 = 118, S_SD1 = 119, S_SD2 = 120, S_TD1 = 121, S_TD2 = 122, S_TD3 = 123,
+	S_CF0 = 124, S_CF1 = 125, S_DR0 = 126, S_MV4 = 127, S_RF2 = 128, S_PSK1 = 129,
+	S_PTE = 130, S_IMA = 131, S_SB8 = 132, S_SB9 = 133, S_SP1 = 134, S_SP2 = 135, S_SP3 = 136,
+	S_P8E = 137, S_RF3 = 138, S_PV3 = 139, S_T8B = 140, S_ERW = 141, S_PRN = 142;
+
+// ---------------------------------------------------------------- tasks (cache writes)
+task automatic dec(input [9:0] c, input [7:0] nx);
+	cab_v <= 1'b1; cab_op <= 3'd1; cab_arg <= {2'd0, c}; rs0 <= nx; st <= S_BIN;
+endtask
+task automatic byp(input [7:0] nx);
+	cab_v <= 1'b1; cab_op <= 3'd2; rs0 <= nx; st <= S_BIN;
+endtask
+task automatic trm(input [7:0] nx);
+	cab_v <= 1'b1; cab_op <= 3'd3; rs0 <= nx; st <= S_BIN;
+endtask
+task automatic fref(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [5:0] v);
+	for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+		if (x < w && y < h) refc[l][s + 7'(x + 8 * y)] <= v;
+endtask
+task automatic fmv(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [31:0] v);
+	for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+		if (x < w && y < h) mvc[l][s + 7'(x + 8 * y)] <= v;
+endtask
+task automatic fmvd(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [13:0] v);
+	for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+		if (x < w && y < h) mvdc[l][s + 7'(x + 8 * y)] <= v;
+endtask
+
+// fill_decode_caches, motion part, one list
+task automatic fill_list(input logic l);
+	reg signed [5:0] r6, r8, nt, nl, ntr, ntl;
+	nt = t_ty != 0 ? -6'sd1 : -6'sd2;
+	nl = l_ty != 0 ? -6'sd1 : -6'sd2;
+	ntr = tr_ty != 0 ? -6'sd1 : -6'sd2;
+	ntl = tl_ty != 0 ? -6'sd1 : -6'sd2;
+	if (uses(t_ty, l)) begin
+		for (int k = 0; k < 4; k++) mvc[l][4 + k] <= trec.mv[l * 128 + k * 32 +: 32];
+		refc[l][4] <= trec.rf[l * 12 +: 6];
+		refc[l][5] <= trec.rf[l * 12 +: 6];
+		refc[l][6] <= trec.rf[l * 12 + 6 +: 6];
+		refc[l][7] <= trec.rf[l * 12 + 6 +: 6];
+		r6 = trec.rf[l * 12 + 6 +: 6];
+	end
+	else begin
+		for (int k = 0; k < 4; k++) begin mvc[l][4 + k] <= 32'd0; refc[l][4 + k] <= nt; end
+		r6 = nt;
+	end
+	if ((mbt & (MT_168 | MT_88)) != 0) begin
+		if (uses(l_ty, l)) begin
+			for (int k = 0; k < 4; k++) mvc[l][11 + 8 * k] <= lrec.mv[l * 128 + k * 32 +: 32];
+			refc[l][11] <= lrec.rf[l * 12 +: 6];
+			refc[l][19] <= lrec.rf[l * 12 +: 6];
+			refc[l][27] <= lrec.rf[l * 12 + 6 +: 6];
+			refc[l][35] <= lrec.rf[l * 12 + 6 +: 6];
+		end
+		else
+			for (int k = 0; k < 4; k++) begin mvc[l][11 + 8 * k] <= 32'd0; refc[l][11 + 8 * k] <= nl; end
+	end
+	else begin
+		if (uses(l_ty, l)) begin
+			mvc[l][11] <= lrec.mv[l * 128 +: 32];
+			refc[l][11] <= lrec.rf[l * 12 +: 6];
+		end
+		else begin
+			mvc[l][11] <= 32'd0;
+			refc[l][11] <= nl;
+		end
+	end
+	if (uses(tr_ty, l)) begin
+		mvc[l][8] <= trr.mv[l * 128 +: 32];
+		r8 = trr.rf[l * 12 +: 6];
+	end
+	else begin
+		mvc[l][8] <= 32'd0;
+		r8 = ntr;
+	end
+	refc[l][8] <= r8;
+	if (r6 < 0 || r8 < 0) begin
+		if (uses(tl_ty, l)) begin
+			mvc[l][3] <= tlr.mv[l * 128 + 96 +: 32];
+			refc[l][3] <= tlr.rf[l * 12 + 6 +: 6];
+		end
+		else begin
+			mvc[l][3] <= 32'd0;
+			refc[l][3] <= ntl;
+		end
+	end
+	if ((mbt & (MT_SKIP | MT_DIR)) == 0) begin
+		refc[l][14] <= -6'sd2;
+		refc[l][30] <= -6'sd2;
+		mvc[l][14] <= 32'd0;
+		mvc[l][30] <= 32'd0;
+		for (int k = 0; k < 4; k++) mvdc[l][4 + k] <= uses(t_ty, l) ? trec.mvd[l * 56 + k * 14 +: 14] : 14'd0;
+		mvdc[l][11] <= uses(l_ty, l) ? lrec.mvd[l * 56 +: 14] : 14'd0;
+		mvdc[l][19] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 14 +: 14] : 14'd0;
+		mvdc[l][27] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 28 +: 14] : 14'd0;
+		mvdc[l][35] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 42 +: 14] : 14'd0;
+		mvdc[l][14] <= 14'd0;
+		mvdc[l][30] <= 14'd0;
+		if (s_B) begin
+			for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) dirc[12 + x + 8 * y] <= 1'b0;
+			if ((t_ty & MT_DIR) != 0) dirc[7:4] <= 4'hF;
+			else if ((t_ty & MT_88) != 0) begin dirc[4] <= trec.dt[0]; dirc[6] <= trec.dt[1]; end
+			else dirc[7:4] <= 4'h0;
+			dirc[11] <= (l_ty & MT_DIR) != 0 ? 1'b1 : (l_ty & MT_88) != 0 ? lrec.dt[0] : 1'b0;
+			dirc[27] <= (l_ty & MT_DIR) != 0 ? 1'b1 : (l_ty & MT_88) != 0 ? lrec.dt[1] : 1'b0;
+		end
+	end
+endtask
+
+// ---------------------------------------------------------------- main FSM
+reg   [4:0] mtidx;
+reg   [3:0] bits_;
+reg   [9:0] it_base;
+reg         it_is;
+reg   [3:0] imk, imstep, imm, impred;
+reg   [1:0] cnt2;
+reg   [1:0] sbk;
+reg   [4:0] sbt;
+reg         ll;                     // list loop
+reg   [1:0] ii;                     // partition loop
+reg   [1:0] jj;
+reg  [31:0] refv;
+reg   [5:0] rfv;
+reg   [2:0] rfc;
+reg  [31:0] mdv;                    // |mvd|
+reg   [9:0] mdc;
+reg   [4:0] mdk;
+reg         mdy;                    // decoding y
+reg  signed [31:0] mdx_r, mdy_r;    // decoded mvd x, y
+reg   [6:0] mdax;                   // clipped |mvd| x
+reg  signed [31:0] mx_acc, my_acc;
+reg   [6:0] qdv;
+reg   [1:0] qdc;
+reg   [4:0] rq;
+reg   [4:0] dck;
+reg  signed [31:0] tmp[0:15];
+reg  [23:0] qmul_dc;
+reg   [5:0] ok;                     // output counter
+reg         sc_pend;
+reg   [3:0] sc_blk;
+reg   [5:0] sc_p;
+reg   [6:0] pcm_i;
+reg   [8:0] pcm_b;
+reg  [31:0] pcm_w;
+reg   [5:0] mr_k;
+reg   [1:0] mr_sub;
+reg  [31:0] mr_base;
+reg   [2:0] dr_i8;
+reg   [1:0] dr_i4;
+reg   [4:0] dr_n;
+reg   [2:0] dr_m;
+reg  [31:0] dr_sub;
+reg  signed [5:0] dr_ref[0:1];
+reg  [31:0] dr_mv[0:1];
+reg         dr_b8;
+reg  signed [15:0] dr_scale;
+reg  signed [7:0] dr_r0;
+reg         eos;
+
+wire [31:0] mb_lin = {16'd0, mby} * {24'd0, s_mbw} + {24'd0, mbx};
+wire        cur_pcm = (mbt & MT_PCM) != 0;
+wire  [5:0] qrec = cur_pcm ? 6'd0 : qs;
+
+always @(posedge clk) begin
+	of_we <= 1'b0;
+	cr_we <= 1'b0;
+	rb_we <= 1'b0;
+	sl_done <= 1'b0;
+	sl_err <= 1'b0;
+	if (data_on && in_valid && in_ready) dleft <= dleft - 30'd1;
+	if (reset) begin
+		st <= S_DESC;
+		dpart <= 4'd0;
+		data_on <= 1'b0;
+		cab_v <= 1'b0;
+		mem_req <= 1'b0;
+		bm <= 384'd0;
+		ncoef <= 9'd0;
+		r_on <= 1'b0;
+		mdy <= 1'b0;
+		c0_v <= 1'b0; c1_v <= 1'b0; c2_v <= 1'b0; c3_v <= 1'b0;
+		for (int k = 0; k < 16; k++) ldc[k] <= 16'sd0;
+		for (int k = 0; k < 8; k++) cdc[k] <= 16'sd0;
+	end
+	else begin
+		case (st)
+		// ------------------------------------------------ descriptor
+		S_DESC: if (in_valid) begin
+			case (dpart)
+			4'd0: begin
+				s_slot <= in_data[23:16];
+				s_col <= in_data[15:8];
+				s_tag <= in_data[7:0];
+				dpart <= in_data[31:24] == 8'h5C ? 4'd1 : 4'd0;
+			end
+			4'd1: begin
+				s_mbw <= in_data[7:0];
+				s_mbh <= in_data[15:8];
+				s_x0 <= in_data[23:16];
+				s_y0 <= in_data[31:24];
+				dpart <= 4'd2;
+			end
+			4'd2: begin
+				s_sn <= in_data[15:0];
+				s_qp0 <= in_data[21:16];
+				s_type <= in_data[23:22];
+				s_idc <= in_data[25:24];
+				s_lc <= in_data[27:26];
+				s_dbk <= in_data[29:28];
+				s_uw <= in_data[31:30];
+				dpart <= 4'd3;
+			end
+			4'd3: begin
+				s_rc0 <= in_data[5:0];
+				s_rc1 <= in_data[11:6];
+				s_sp <= in_data[12];
+				s_t8 <= in_data[13];
+				s_cip <= in_data[14];
+				s_d8 <= in_data[15];
+				s_x264 <= in_data[16];
+				s_l1l <= in_data[17];
+				s_cqo0 <= in_data[22:18];
+				s_cqo1 <= in_data[27:23];
+				dpart <= 4'd4;
+			end
+			4'd4: begin
+				s_alpha <= in_data[7:0];
+				s_beta <= in_data[15:8];
+				dcnt <= 7'd0;
+				iw0 <= 5'd0;
+				iw1 <= 5'd0;
+				dpart <= (s_B && !s_sp) ? 4'd5 : s_uw == 2'd2 ? 4'd7 : 4'd8;
+			end
+			4'd5: begin
+				dsf[dcnt[4:0]] <= in_data[15:0];
+				dcnt <= dcnt[4:0] == 5'd31 ? 7'd0 : dcnt + 7'd1;
+				if (dcnt[4:0] == 5'd31) dpart <= 4'd6;
+			end
+			4'd6: begin
+				mapc[dcnt[5:0]] <= in_data[7:0];
+				dcnt <= dcnt[5:0] == 6'd63 ? 7'd0 : dcnt + 7'd1;
+				if (dcnt[5:0] == 6'd63) dpart <= s_uw == 2'd2 ? 4'd7 : 4'd8;
+			end
+			4'd7: begin
+				iw_ram[{iw0, iw1}] <= in_data[8:0];
+				if ({1'b0, iw1} == s_rc1 - 6'd1) begin
+					iw1 <= 5'd0;
+					iw0 <= iw0 + 5'd1;
+					if ({1'b0, iw0} == s_rc0 - 6'd1) dpart <= 4'd8;
+				end
+				else iw1 <= iw1 + 5'd1;
+			end
+			4'd8: begin
+				smw[dcnt[5:0]] <= in_data;
+				if (dcnt[1:0] == 2'd0) sm0[dcnt[4:2]] <= in_data[7:0];
+				dcnt <= dcnt == 7'd23 ? 7'd0 : dcnt + 7'd1;
+				if (dcnt == 7'd23) dpart <= s_t8 ? 4'd9 : 4'd10;
+			end
+			4'd9: begin
+				smw[6'd24 + dcnt[5:0]] <= in_data;
+				dcnt <= dcnt + 7'd1;
+				if (dcnt == 7'd31) dpart <= 4'd10;
+			end
+			default: begin
+				dleft <= 30'((in_data + 32'd3) >> 2);
+				dpart <= 4'd0;
+				st <= S_INIT;
+			end
+			endcase
+		end
+
+		S_INIT: begin
+			cab_v <= 1'b1;
+			cab_op <= 3'd0;
+			cab_arg <= {2'd0, s_qp0, s_idc, s_type};
+			st <= S_INITW;
+		end
+		S_INITW: if (cab_ready) begin
+			cab_v <= 1'b0;
+			data_on <= 1'b1;
+			st <= S_SL0;
+		end
+		S_SL0: begin
+			mbx <= s_x0;
+			mby <= s_y0;
+			qs <= s_qp0;
+			cqp0 <= cqp(1'b0, s_qp0);
+			cqp1 <= cqp(1'b1, s_qp0);
+			lqd_nz <= 1'b0;
+			for (int l = 0; l < 2; l++) begin
+				refc[l][16] <= -6'sd2;
+				refc[l][24] <= -6'sd2;
+				refc[l][32] <= -6'sd2;
+			end
+			st <= S_MB0;
+		end
+
+		// ------------------------------------------------ macroblock start: neighbours
+		S_MB0: begin rb_ra <= mbx; st <= S_MB1; end
+		S_MB1: begin rb_ra <= mbx + 8'd1; st <= S_MB2; end
+		S_MB2: begin tlr <= trec; trec <= rb_q; st <= S_MB3; end
+		S_MB3: begin trr <= rb_q; st <= S_MB4; end
+		S_MB4: begin
+			reg ti, li, trv, tli, tsm, lsm, trsm, tlsm;
+			ti = mby != 8'd0;
+			li = mbx != 8'd0;
+			trv = ti && mbx + 8'd1 < s_mbw;
+			tli = ti && li;
+			tsm = ti && trec.sn == s_sn && trec.tag == s_tag;
+			lsm = li && lrec.sn == s_sn && lrec.tag == s_tag;
+			trsm = trv && trr.sn == s_sn && trr.tag == s_tag;
+			tlsm = tli && tlr.sn == s_sn && tlr.tag == s_tag;
+			t_sm <= tsm;
+			l_sm <= lsm;
+			t_ty <= tsm ? tunpack(trec.ty) : 32'd0;
+			l_ty <= lsm ? tunpack(lrec.ty) : 32'd0;
+			tr_ty <= trsm ? tunpack(trr.ty) : 32'd0;
+			tl_ty <= tlsm ? tunpack(tlr.ty) : 32'd0;
+			dt_av <= s_dbk == 2'd2 ? tsm : (ti && trec.tag == s_tag);
+			dl_av <= s_dbk == 2'd2 ? lsm : (li && lrec.tag == s_tag);
+			if (!s_I)
+				dec(10'd11 + {9'd0, lsm && !lrec.ty[8]} + {9'd0, tsm && !trec.ty[8]} + (s_B ? 10'd13 : 10'd0), S_SKR);
+			else begin
+				it_base <= 10'd3;
+				it_is <= 1'b1;
+				st <= S_IT0;
+			end
+		end
+
+		S_BIN: begin
+			if (cab_ready) cab_v <= 1'b0;
+			if (cab_ov) begin
+				bin <= cab_val[0];
+				st <= rs0;
+			end
+		end
+
+		S_SKR: if (bin) st <= S_SK0;
+		else if (s_B) begin
+			reg [31:0] lm, tm;
+			lm = l_ty - 32'd1;
+			tm = t_ty - 32'd1;
+			dec(10'd27 + {9'd0, !lm[8]} + {9'd0, !tm[8]}, S_BT1);
+		end
+		else dec(10'd14, S_PT1);
+
+		// ------------------------------------------------ skip
+		S_SK0: begin
+			if (s_B) begin
+				mbt <= MT_L0L1 | MT_DIR | MT_SKIP;
+				rsd <= S_SKE;
+				if (s_sp) begin
+					ll <= 1'b0;
+					rsf <= S_DR0;
+					st <= S_FCL;
+				end
+				else st <= S_DR0;
+			end
+			else begin
+				mbt <= MT_16 | MT_P0L0 | MT_P1L0 | MT_SKIP;
+				st <= S_PSK;
+			end
+		end
+		S_PSK: begin
+			// pred_pskip_motion (h264_mvpred.h)
+			reg signed [5:0] lr, tr, dr;
+			reg [31:0] A, B, C;
+			reg z;
+			reg [1:0] mc;
+			reg signed [15:0] mx, my;
+			z = 1'b0;
+			lr = 6'sd0; tr = 6'sd0; dr = 6'sd0;
+			A = 32'd0; B = 32'd0; C = 32'd0;
+			fref(1'b0, 7'd12, 3'd4, 3'd4, 6'd0);
+			if (uses(l_ty, 1'b0)) begin
+				lr = lrec.rf[5:0];
+				A = lrec.mv[31:0];
+				if (lr == 6'sd0 && A == 32'd0) z = 1'b1;
+			end
+			else if (l_ty != 0) begin lr = -6'sd1; A = 32'd0; end
+			else z = 1'b1;
+			if (uses(t_ty, 1'b0)) begin
+				tr = trec.rf[5:0];
+				B = trec.mv[31:0];
+				if (tr == 6'sd0 && B == 32'd0) z = 1'b1;
+			end
+			else if (t_ty != 0) begin tr = -6'sd1; B = 32'd0; end
+			else z = 1'b1;
+			if (uses(tr_ty, 1'b0)) begin dr = trr.rf[5:0]; C = trr.mv[31:0]; end
+			else if (tr_ty != 0) begin dr = -6'sd1; C = 32'd0; end
+			else if (uses(tl_ty, 1'b0)) begin dr = tlr.rf[11:6]; C = tlr.mv[127:96]; end
+			else if (tl_ty != 0) begin dr = -6'sd1; C = 32'd0; end
+			else begin dr = -6'sd2; C = 32'd0; end
+			mc = {1'b0, dr == 6'sd0} + {1'b0, tr == 6'sd0} + {1'b0, lr == 6'sd0};
+			if (mc == 2'd1) begin
+				if (lr == 6'sd0) begin mx = A[15:0]; my = A[31:16]; end
+				else if (tr == 6'sd0) begin mx = B[15:0]; my = B[31:16]; end
+				else begin mx = C[15:0]; my = C[31:16]; end
+			end
+			else begin
+				mx = mid_pred(A[15:0], B[15:0], C[15:0]);
+				my = mid_pred(A[31:16], B[31:16], C[31:16]);
+			end
+			fmv(1'b0, 7'd12, 3'd4, 3'd4, z ? 32'd0 : {my, mx});
+			st <= S_SKE;
+		end
+		S_SKE: begin
+			mbt <= mbt | MT_SKIP;
+			cbprec <= 9'd0;
+			cpm <= 2'd0;
+			lqd_nz <= 1'b0;
+			st <= S_O0;
+		end
+
+		// ------------------------------------------------ mb_type, B
+		S_BT1: if (!bin) begin mtidx <= 5'd0; st <= S_BT8; end
+		else dec(10'd30, S_BT2);
+		S_BT2: if (!bin) dec(10'd32, S_BT3); else dec(10'd31, S_BT4);
+		S_BT3: begin mtidx <= 5'd1 + {4'd0, bin}; st <= S_BT8; end
+		S_BT4: begin bits_ <= {bin, 3'd0}; dec(10'd32, S_BT5); end
+		S_BT5: begin bits_[2] <= bin; dec(10'd32, S_BT6); end
+		S_BT6: begin bits_[1] <= bin; dec(10'd32, S_BT7); end
+		S_BT7: begin
+			reg [3:0] b;
+			b = {bits_[3:1], bin};
+			if (b < 4'd8) begin mtidx <= {1'b0, b} + 5'd3; st <= S_BT8; end
+			else if (b == 4'd13) begin it_base <= 10'd32; it_is <= 1'b0; st <= S_IT0; end
+			else if (b == 4'd14) begin mtidx <= 5'd11; st <= S_BT8; end
+			else if (b == 4'd15) begin mtidx <= 5'd22; st <= S_BT8; end
+			else begin bits_ <= b; dec(10'd32, S_BT0); end
+		end
+		S_BT0: begin mtidx <= {bits_, bin} - 5'd4; st <= S_BT8; end
+		S_BT8: begin
+			reg [18:0] v;
+			v = f_bmb(mtidx);
+			mbt <= {16'd0, v[15:0]};
+			pc <= v[18:16];
+			st <= S_MTD;
+		end
+
+		// ------------------------------------------------ mb_type, P
+		S_PT1: if (bin) begin it_base <= 10'd17; it_is <= 1'b0; st <= S_IT0; end
+		else dec(10'd15, S_PT2);
+		S_PT2: if (bin) dec(10'd17, S_PT4); else dec(10'd16, S_PT3);
+		S_PT3: begin mtidx <= bin ? 5'd3 : 5'd0; st <= S_PTE; end
+		S_PT4: begin mtidx <= bin ? 5'd1 : 5'd2; st <= S_PTE; end
+		S_PTE: begin
+			reg [18:0] v;
+			v = f_pmb(mtidx[1:0]);
+			mbt <= {16'd0, v[15:0]};
+			pc <= v[18:16];
+			st <= S_MTD;
+		end
+
+		// ------------------------------------------------ mb_type, intra (decode_cabac_intra_mb_type)
+		S_IT0: if (it_is) dec(it_base + {9'd0, ((l_ty & (MT_I16 | MT_PCM)) != 0)} + {9'd0, ((t_ty & (MT_I16 | MT_PCM)) != 0)}, S_IT1);
+		else dec(it_base, S_IT1);
+		S_IT1: if (!bin) begin mtidx <= 5'd0; st <= S_ITE; end
+		else begin
+			if (it_is) it_base <= it_base + 10'd2;
+			trm(S_IT2);
+		end
+		S_IT2: if (bin) begin mtidx <= 5'd25; st <= S_ITE; end
+		else dec(it_base + 10'd1, S_IT3);
+		S_IT3: begin mtidx <= bin ? 5'd13 : 5'd1; dec(it_base + 10'd2, S_IT4); end
+		S_IT4: if (bin) dec(it_base + 10'd2 + {9'd0, it_is}, S_IT5);
+		else dec(it_base + 10'd3 + {9'd0, it_is}, S_IT6);
+		S_IT5: begin mtidx <= mtidx + 5'd4 + (bin ? 5'd4 : 5'd0); dec(it_base + 10'd3 + {9'd0, it_is}, S_IT6); end
+		S_IT6: begin mtidx <= mtidx + (bin ? 5'd2 : 5'd0); dec(it_base + 10'd3 + {8'd0, it_is, 1'b0}, S_IT7); end
+		S_IT7: begin mtidx <= mtidx + {4'd0, bin}; st <= S_ITE; end
+		S_ITE: begin
+			reg [21:0] v;
+			v = f_imb(mtidx);
+			mbt <= {29'd0, v[2:0]};
+			i16m <= v[6:3];
+			cbp <= v[12:7];
+			pc <= 3'd0;
+			st <= S_MTD;
+		end
+
+		S_MTD: if ((mbt & MT_PCM) != 0) begin
+			cab_v <= 1'b1;
+			cab_op <= 3'd5;
+			pcm_b <= 9'd0;
+			st <= S_PCM0;
+		end
+		else st <= S_FC0;
+
+		// ------------------------------------------------ I_PCM
+		S_PCM0: begin
+			if (cab_ready) cab_v <= 1'b0;
+			if (cab_ov && cab_pos[0]) begin
+				pcm_w <= {cab_val[7:0], pcm_w[31:8]};
+				pcm_b <= pcm_b + 9'd1;
+				if (pcm_b[1:0] == 2'd3) pcm[pcm_b[8:2]] <= {cab_val[7:0], pcm_w[31:8]};
+				if (pcm_b == 9'd383) st <= S_PCM1;
+			end
+		end
+		S_PCM1: begin
+			cbprec <= 9'h1EF;
+			cpm <= 2'd0;
+			lqd_nz <= 1'b0;
+			st <= S_O0;
+		end
+
+		// ------------------------------------------------ fill_decode_caches (not skip)
+		S_FC0: begin
+			reg [31:0] tm;
+			reg [15:0] a_t, a_l, a_tl, a_tr;
+			reg in_;
+			tm = s_cip ? 32'd7 : 32'hFFFFFFFF;
+			in_ = intra(mbt);
+			if (in_) begin
+				a_tl = 16'hFFFF; a_t = 16'hFFFF; a_l = 16'hFFFF; a_tr = 16'hEEEA;
+				if ((t_ty & tm) == 0) begin a_tl = 16'hB3FF; a_t = 16'h33FF; a_tr = 16'h26EA; end
+				if ((l_ty & tm) == 0) begin a_tl = a_tl & 16'hDF5F; a_l = a_l & 16'h5F5F; end
+				if ((tl_ty & tm) == 0) a_tl = a_tl & 16'h7FFF;
+				if ((tr_ty & tm) == 0) a_tr = a_tr & 16'hFBFF;
+				sa_t <= a_t; sa_l <= a_l; sa_tl <= a_tl; sa_tr <= a_tr;
+				if ((mbt & MT_I4) != 0) begin
+					for (int k = 0; k < 4; k++)
+						i4c[4 + k] <= (t_ty & MT_I4) != 0 ? trec.i4[4 * k +: 4] : (t_ty & tm) != 0 ? 4'd2 : 4'd15;
+					for (int k = 0; k < 4; k++)
+						i4c[11 + 8 * k] <= (l_ty & MT_I4) != 0 ? lrec.i4[4 * k +: 4] : (l_ty & tm) != 0 ? 4'd2 : 4'd15;
+				end
+			end
+			if (t_ty != 0) begin
+				for (int k = 0; k < 4; k++) nzc[4 + k] <= trec.nz[k];
+				nzc[44] <= trec.nz[4]; nzc[45] <= trec.nz[5];
+				nzc[84] <= trec.nz[6]; nzc[85] <= trec.nz[7];
+			end
+			else begin
+				for (int k = 0; k < 4; k++) nzc[4 + k] <= in_;
+				nzc[44] <= in_; nzc[45] <= in_; nzc[84] <= in_; nzc[85] <= in_;
+			end
+			if (l_ty != 0) begin
+				for (int k = 0; k < 4; k++) nzc[11 + 8 * k] <= lrec.nz[k];
+				nzc[51] <= lrec.nz[4]; nzc[59] <= lrec.nz[5];
+				nzc[91] <= lrec.nz[6]; nzc[99] <= lrec.nz[7];
+			end
+			else begin
+				for (int k = 0; k < 4; k++) nzc[11 + 8 * k] <= in_;
+				nzc[51] <= in_; nzc[59] <= in_; nzc[91] <= in_; nzc[99] <= in_;
+			end
+			tcbp <= t_ty != 0 ? trec.cbp : in_ ? 9'h1CF : 9'h00F;
+			lcbp <= l_ty != 0 ? ((lrec.cbp & 9'h1F0) | (lrec.cbp & 9'h00A)) : in_ ? 9'h1CF : 9'h00F;
+			nts <= {1'b0, t_ty[24]} + {1'b0, l_ty[24]};
+			d8ok <= s_t8;
+			ll <= 1'b0;
+			rsf <= S_DISP;
+			st <= S_FCL;
+		end
+		S_FCL: begin
+			if ({1'b0, ll} < s_lc && (inter(mbt) || ((mbt & MT_DIR) != 0 && s_sp)) && uses(mbt, ll))
+				fill_list(ll);
+			if (ll) st <= rsf;
+			ll <= 1'b1;
+		end
+		S_DISP: begin
+			if (intra(mbt)) st <= S_IN0;
+			else if (pc == 3'd4) begin
+				sbk <= 2'd0;
+				st <= s_B ? S_SB0 : S_SB4;
+			end
+			else if ((mbt & MT_DIR) != 0) begin
+				rsd <= S_DIRE;
+				st <= S_DR0;
+			end
+			else begin
+				ll <= 1'b0;
+				ii <= 2'd0;
+				st <= S_PR0;
+			end
+		end
+
+		// ------------------------------------------------ intra modes
+		S_IN0: if ((mbt & MT_I4) != 0) begin
+			if (s_t8) dec(10'd399 + {8'd0, nts}, S_IN1);
+			else begin imk <= 4'd0; imstep <= 4'd1; st <= S_IM0; end
+		end
+		else begin
+			reg [4:0] m;
+			m = chk_mode(i16m, 1'b0, sa_t, sa_l);
+			if (m == 5'h1F) st <= S_ERR;
+			else begin i16m <= m[3:0]; st <= S_CP0; end
+		end
+		S_IN1: begin
+			if (bin) begin mbt <= mbt | MT_DCT; imstep <= 4'd4; end
+			else imstep <= 4'd1;
+			imk <= 4'd0;
+			st <= S_IM0;
+		end
+		S_IM0: begin
+			im_k <= imk;
+			st <= S_IMA;
+		end
+		S_IMA: begin
+			impred <= im_pred;
+			dec(10'd68, S_IM1);
+		end
+		S_IM1: if (bin) begin imm <= impred; st <= S_IM3; end
+		else begin imm <= 4'd0; cnt2 <= 2'd0; dec(10'd69, S_IM2); end
+		S_IM2: begin
+			reg [3:0] m;
+			m = imm | ({3'd0, bin} << cnt2);
+			if (cnt2 == 2'd2) begin
+				imm <= m + (m >= impred ? 4'd1 : 4'd0);
+				st <= S_IM3;
+			end
+			else begin
+				imm <= m;
+				cnt2 <= cnt2 + 2'd1;
+				dec(10'd69, S_IM2);
+			end
+		end
+		S_IM3: begin
+			reg [6:0] s8;
+			s8 = f_scan8({2'd0, imk});
+			i4c[s8] <= imm;
+			if (imstep == 4'd4) begin i4c[s8 + 7'd1] <= imm; i4c[s8 + 7'd8] <= imm; i4c[s8 + 7'd9] <= imm; end
+			if (imk + imstep == 5'd16 || imk + imstep < imk) st <= S_IWB;
+			else begin imk <= imk + imstep; st <= S_IM0; end
+		end
+		S_IWB: begin
+			i4snap_b <= {i4c[39], i4c[38], i4c[37], i4c[36]};
+			i4snap_r <= {i4c[39], i4c[31], i4c[23], i4c[15]};
+			st <= S_ICHK;
+		end
+		S_ICHK: begin
+			// check_intra4x4_pred_mode
+			reg [3:0] m[0:7];
+			reg bad;
+			reg [3:0] s;
+			bad = 1'b0;
+			for (int i = 0; i < 4; i++) m[i] = i4c[12 + i];
+			for (int i = 0; i < 4; i++) m[4 + i] = i4c[12 + 8 * i];
+			if (!sa_t[15])
+				for (int i = 0; i < 4; i++) begin
+					case (m[i])
+					4'd0, 4'd3, 4'd4, 4'd5, 4'd6, 4'd7: bad = 1'b1;
+					4'd2: m[i] = 4'd9;
+					default: ;
+					endcase
+				end
+			m[4] = m[0];                  // the same cell (scan8[0])
+			if ((sa_l & 16'h8888) != 16'h8888)
+				for (int i = 0; i < 4; i++) begin
+					reg [15:0] mk;
+					mk = i == 0 ? 16'h8000 : i == 1 ? 16'h2000 : i == 2 ? 16'h0080 : 16'h0020;
+					if ((sa_l & mk) == 0)
+						case (m[4 + i])
+						4'd1, 4'd4, 4'd5, 4'd6, 4'd8: bad = 1'b1;
+						4'd2: m[4 + i] = 4'd10;
+						4'd9: m[4 + i] = 4'd11;
+						default: ;
+						endcase
+				end
+			for (int i = 1; i < 4; i++) i4c[12 + i] <= m[i];
+			i4c[12] <= m[4];
+			for (int i = 1; i < 4; i++) i4c[12 + 8 * i] <= m[4 + i];
+			st <= bad ? S_ERR : S_CP0;
+		end
+		// chroma prediction mode
+		S_CP0: dec(10'd64 + {9'd0, l_ty != 0 && lrec.cpm} + {9'd0, t_ty != 0 && trec.cpm}, S_CP1);
+		S_CP1: if (!bin) begin cpm <= 2'd0; st <= S_CP3; end
+		else begin cpm <= 2'd1; dec(10'd67, S_CP2); end
+		S_CP2: if (!bin) st <= S_CP3;
+		else if (cpm == 2'd1) begin cpm <= 2'd2; dec(10'd67, S_CP2); end
+		else begin cpm <= 2'd3; st <= S_CP3; end
+		S_CP3: begin
+			reg [4:0] m;
+			m = chk_mode({2'd0, cpm}, 1'b1, sa_t, sa_l);
+			if (m == 5'h1F) st <= S_ERR;
+			else begin cpmc <= m[3:0]; st <= (mbt & MT_I16) != 0 ? S_T8 : S_CB0; end
+		end
+
+		// ------------------------------------------------ 8x8 partitions
+		// sub_mb_type, B
+		S_SB0: dec(10'd36, S_SB1);
+		S_SB1: if (!bin) begin sbt <= 5'd0; st <= S_SBE; end
+		else dec(10'd37, S_SB2);
+		S_SB2: if (!bin) dec(10'd39, S_SB3);
+		else begin sbt <= 5'd3; dec(10'd38, S_SB5); end
+		S_SB3: begin sbt <= 5'd1 + {4'd0, bin}; st <= S_SBE; end
+		S_SB5: if (bin) dec(10'd39, S_SB6);
+		else dec(10'd39, S_SB7);
+		S_SB6: if (bin) dec(10'd39, S_SB8);
+		else begin sbt <= 5'd7; dec(10'd39, S_SB7); end
+		S_SB8: begin sbt <= 5'd11 + {4'd0, bin}; st <= S_SBE; end
+		S_SB7: begin sbt <= sbt + (bin ? 5'd2 : 5'd0); dec(10'd39, S_SB9); end
+		S_SB9: begin sbt <= sbt + {4'd0, bin}; st <= S_SBE; end
+		// sub_mb_type, P
+		S_SB4: dec(10'd21, S_SP1);
+		S_SP1: if (bin) begin sbt <= 5'd0; st <= S_SBE; end
+		else dec(10'd22, S_SP2);
+		S_SP2: if (!bin) begin sbt <= 5'd1; st <= S_SBE; end
+		else dec(10'd23, S_SP3);
+		S_SP3: begin sbt <= bin ? 5'd2 : 5'd3; st <= S_SBE; end
+		S_SBE: begin
+			reg [18:0] v;
+			v = s_B ? f_bsub(sbt[3:0]) : f_psub(sbt[1:0]);
+			sub[sbk] <= {16'd0, v[15:0]};
+			spc[sbk] <= v[18:16];
+			if (sbk == 2'd3) st <= S_P8D;
+			else begin
+				sbk <= sbk + 2'd1;
+				st <= s_B ? S_SB0 : S_SB4;
+			end
+		end
+		S_P8D: begin
+			ll <= 1'b0;
+			ii <= 2'd0;
+			if (s_B && ((sub[0] | sub[1] | sub[2] | sub[3]) & MT_DIR) != 0) begin
+				rsd <= S_P8E;
+				st <= S_DR0;
+			end
+			else st <= S_RF0;
+		end
+		S_P8E: begin
+			for (int l = 0; l < 2; l++) begin
+				refc[l][14] <= -6'sd2;
+				refc[l][30] <= -6'sd2;
+			end
+			for (int i = 0; i < 4; i++) begin
+				reg [6:0] s8;
+				s8 = f_scan8(6'(4 * i));
+				dirc[s8] <= sub[i][8]; dirc[s8 + 1] <= sub[i][8];
+				dirc[s8 + 8] <= sub[i][8]; dirc[s8 + 9] <= sub[i][8];
+			end
+			st <= S_RF0;
+		end
+		// references of the 8x8 partitions
+		S_RF0: begin
+			if ((sub[ii] & MT_DIR) != 0) st <= S_RF2;
+			else if (isdir(sub[ii], 1'b0, ll)) begin
+				if ((ll ? s_rc1 : s_rc0) > 6'd1) begin
+					rf_l <= ll;
+					rf_n <= {ii, 2'b00};
+					rs1 <= S_RF1;
+					st <= S_RD0;
+				end
+				else begin rfv <= 6'd0; st <= S_RF1; end
+			end
+			else begin rfv <= 6'h3F; st <= S_RF1; end
+		end
+		S_RF1: begin
+			reg [6:0] s8;
+			s8 = f_scan8({2'd0, ii, 2'b00});
+			refc[ll][s8 + 1] <= rfv;
+			refc[ll][s8 + 8] <= rfv;
+			refc[ll][s8 + 9] <= rfv;
+			st <= S_RF2;
+		end
+		S_RF2: begin
+			ii <= ii + 2'd1;
+			if (ii != 2'd3) st <= S_RF0;
+			else if (ll || s_lc == 2'd1) st <= S_RF3;
+			else begin ll <= 1'b1; st <= S_RF0; end
+		end
+		S_RF3: begin
+			// get_dct8x8_allowed
+			reg [31:0] m;
+			m = MT_168 | MT_816 | MT_88 | (s_d8 ? 32'd0 : MT_DIR);
+			if (((sub[0] | sub[1] | sub[2] | sub[3]) & m) != 0) d8ok <= 1'b0;
+			ll <= 1'b0;
+			ii <= 2'd0;
+			st <= S_MV0;
+		end
+		// vectors of the 8x8 partitions
+		S_MV0: begin
+			reg [6:0] s8;
+			s8 = f_scan8({2'd0, ii, 2'b00});
+			refc[ll][s8] <= refc[ll][s8 + 1];
+			if ((sub[ii] & MT_DIR) != 0) begin
+				fmvd(ll, s8, 3'd2, 3'd2, 14'd0);
+				st <= S_MV4;
+			end
+			else if (isdir(sub[ii], 1'b0, ll)) begin
+				jj <= 2'd0;
+				st <= S_MV1;
+			end
+			else begin
+				fmv(ll, s8, 3'd2, 3'd2, 32'd0);
+				fmvd(ll, s8, 3'd2, 3'd2, 14'd0);
+				st <= S_MV4;
+			end
+		end
+		S_MV1: begin
+			// index = 4 i + block_width j
+			reg [3:0] idx;
+			reg [2:0] bw;
+			bw = (sub[ii] & (MT_16 | MT_168)) != 0 ? 3'd2 : 3'd1;
+			idx = {ii, 2'b00} + (bw == 3'd2 ? {1'b0, jj, 1'b0} : {2'b00, jj});
+			pm_n <= idx;
+			pm_pw <= bw;
+			pm_l <= ll;
+			pm_mode <= 2'd0;
+			pm_ref <= refc[ll][f_scan8({2'd0, idx})];
+			mv_l <= ll;
+			mv_n <= idx;
+			st <= S_MV2;
+		end
+		S_MV2: begin
+			mx_acc <= pm_mx;
+			my_acc <= pm_my;
+			rs1 <= S_MV3;
+			st <= S_MD0;
+		end
+		S_MV3: begin
+			reg [6:0] s8;
+			reg [31:0] v;
+			reg [13:0] d;
+			s8 = f_scan8({2'd0, mv_n});
+			v = {16'(my_acc), 16'(mx_acc)};
+			d = {mdy_r[6:0], mdax};
+			if ((sub[ii] & MT_16) != 0) begin
+				mvc[ll][s8 + 1] <= v; mvc[ll][s8 + 8] <= v; mvc[ll][s8 + 9] <= v;
+				mvdc[ll][s8 + 1] <= d; mvdc[ll][s8 + 8] <= d; mvdc[ll][s8 + 9] <= d;
+			end
+			else if ((sub[ii] & MT_168) != 0) begin
+				mvc[ll][s8 + 1] <= v;
+				mvdc[ll][s8 + 1] <= d;
+			end
+			else if ((sub[ii] & MT_816) != 0) begin
+				mvc[ll][s8 + 8] <= v;
+				mvdc[ll][s8 + 8] <= d;
+			end
+			mvc[ll][s8] <= v;
+			mvdc[ll][s8] <= d;
+			if ({1'b0, jj} + 3'd1 >= spc[ii]) st <= S_MV4;
+			else begin jj <= jj + 2'd1; st <= S_MV1; end
+		end
+		S_MV4: begin
+			if (ii == 2'd3) begin
+				ii <= 2'd0;
+				if (ll || s_lc == 2'd1) st <= S_CB0;
+				else begin ll <= 1'b1; st <= S_MV0; end
+			end
+			else begin ii <= ii + 2'd1; st <= S_MV0; end
+		end
+
+		// ------------------------------------------------ B_Direct_16x16
+		S_DIRE: begin
+			fmvd(1'b0, 7'd12, 3'd4, 3'd4, 14'd0);
+			fmvd(1'b1, 7'd12, 3'd4, 3'd4, 14'd0);
+			d8ok <= d8ok & s_d8;
+			st <= S_CB0;
+		end
+
+		// ------------------------------------------------ 16x16, 16x8, 8x16: references
+		S_PR0: begin
+			if (isdir(mbt, ii[0], ll)) begin
+				if ((ll ? s_rc1 : s_rc0) > 6'd1) begin
+					rf_l <= ll;
+					rf_n <= (mbt & MT_168) != 0 ? {ii[0], 3'b000} : {1'b0, ii[0], 2'b00};
+					rs1 <= S_PR1;
+					st <= S_RD0;
+				end
+				else begin rfv <= 6'd0; st <= S_PR1; end
+			end
+			else if ((mbt & MT_16) != 0) st <= S_PRN;
+			else begin rfv <= 6'h3F; st <= S_PR1; end
+		end
+		S_PR1: begin
+			if ((mbt & MT_16) != 0) fref(ll, 7'd12, 3'd4, 3'd4, rfv);
+			else if ((mbt & MT_168) != 0) fref(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2, rfv);
+			else fref(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4, rfv);
+			st <= S_PRN;
+		end
+		S_PRN: begin
+			if ((mbt & MT_16) != 0 || ii[0]) begin
+				ii <= 2'd0;
+				if (ll || s_lc == 2'd1) begin ll <= 1'b0; st <= S_PV0; end
+				else begin ll <= 1'b1; st <= S_PR0; end
+			end
+			else begin ii <= 2'd1; st <= S_PR0; end
+		end
+		// vectors
+		S_PV0: begin
+			if (isdir(mbt, ii[0], ll)) begin
+				reg [3:0] n;
+				n = (mbt & MT_16) != 0 ? 4'd0 : (mbt & MT_168) != 0 ? {ii[0], 3'b000} : {1'b0, ii[0], 2'b00};
+				pm_n <= n;
+				pm_pw <= (mbt & MT_816) != 0 ? 3'd2 : 3'd4;
+				pm_l <= ll;
+				pm_mode <= (mbt & MT_16) != 0 ? 2'd0 : (mbt & MT_168) != 0 ? 2'd1 : 2'd2;
+				pm_ref <= (mbt & MT_816) != 0 ? refc[ll][12 + (ii[0] ? 2 : 0)] : refc[ll][12 + (ii[0] ? 16 : 0)];
+				mv_l <= ll;
+				mv_n <= n;
+				st <= S_PV1;
+			end
+			else begin
+				if ((mbt & MT_168) != 0) begin
+					fmvd(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2, 14'd0);
+					fmv(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2, 32'd0);
+				end
+				else if ((mbt & MT_816) != 0) begin
+					fmvd(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4, 14'd0);
+					fmv(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4, 32'd0);
+				end
+				st <= S_PV2;
+			end
+		end
+		S_PV1: begin
+			mx_acc <= pm_mx;
+			my_acc <= pm_my;
+			rs1 <= S_PV3;
+			st <= S_MD0;
+		end
+		S_PV3: begin
+			reg [31:0] v;
+			reg [13:0] d;
+			v = {16'(my_acc), 16'(mx_acc)};
+			d = {mdy_r[6:0], mdax};
+			if ((mbt & MT_16) != 0) begin
+				fmvd(ll, 7'd12, 3'd4, 3'd4, d);
+				fmv(ll, 7'd12, 3'd4, 3'd4, v);
+			end
+			else if ((mbt & MT_168) != 0) begin
+				fmvd(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2, d);
+				fmv(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2, v);
+			end
+			else begin
+				fmvd(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4, d);
+				fmv(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4, v);
+			end
+			st <= S_PV2;
+		end
+		S_PV2: begin
+			if ((mbt & MT_16) != 0 || ii[0]) begin
+				ii <= 2'd0;
+				if (ll || s_lc == 2'd1) st <= S_CB0;
+				else begin ll <= 1'b1; st <= S_PV0; end
+			end
+			else begin ii <= 2'd1; st <= S_PV0; end
+		end
+
+		// ------------------------------------------------ decode_cabac_mb_ref (rf_l, rf_n) -> rfv
+		S_RD0: begin
+			rfv <= 6'd0;
+			rfc <= {1'b0, rf_ctx0};
+			dec(10'd54 + {8'd0, rf_ctx0}, S_RD1);
+		end
+		S_RD1: if (bin) begin
+			if (rfv == 6'd31) st <= S_ERR;
+			else begin
+				rfv <= rfv + 6'd1;
+				rfc <= (rfc >> 2) + 3'd4;
+				dec(10'd54 + {7'd0, (rfc >> 2) + 3'd4}, S_RD1);
+			end
+		end
+		else if (rfv >= (rf_l ? s_rc1 : s_rc0)) st <= S_ERR;
+		else st <= rs1;
+
+		// ------------------------------------------------ mvd (mv_l, mv_n): mx_acc, my_acc += mvd
+		S_MD0: begin
+			reg [7:0] a;
+			a = mdy ? amvd1 : amvd0;
+			mdc <= mdy ? 10'd47 : 10'd40;
+			dec((mdy ? 10'd47 : 10'd40) + {9'd0, a > 8'd2} + {9'd0, a > 8'd32}, S_MD1);
+		end
+		S_MD1: if (!bin) begin
+			if (!mdy) begin mdx_r <= 32'sd0; mdax <= 7'd0; mdy <= 1'b1; st <= S_MD0; end
+			else begin mdy_r <= 32'sd0; mdy <= 1'b0; st <= S_MD6; end
+		end
+		else begin
+			mdv <= 32'd1;
+			mdc <= mdc + 10'd3;
+			dec(mdc + 10'd3, S_MD2);
+		end
+		S_MD2: if (bin && mdv < 32'd8) begin
+			// still unary (mvd < 9 after this one)
+			mdv <= mdv + 32'd1;
+			if (mdv < 32'd4) begin mdc <= mdc + 10'd1; dec(mdc + 10'd1, S_MD2); end
+			else dec(mdc, S_MD2);
+		end
+		else if (bin) begin
+			mdv <= 32'd9;
+			mdk <= 5'd3;
+			byp(S_MD3);
+		end
+		else byp(S_MD5);
+		S_MD3: if (bin) begin
+			mdv <= mdv + (32'd1 << mdk);
+			if (mdk == 5'd24) st <= S_ERR;
+			else begin mdk <= mdk + 5'd1; byp(S_MD3); end
+		end
+		else begin
+			mdk <= mdk - 5'd1;
+			byp(S_MD4);
+		end
+		S_MD4: begin
+			reg [31:0] v;
+			v = mdv + ({31'd0, bin} << mdk);
+			mdv <= v;
+			if (mdk == 5'd0) byp(S_MD5);
+			else begin mdk <= mdk - 5'd1; byp(S_MD4); end
+		end
+		S_MD5: begin
+			// sign; |mvd| for the context, clipped at 70
+			reg signed [31:0] s;
+			reg [6:0] a;
+			s = bin ? -$signed(mdv) : $signed(mdv);
+			a = mdv < 32'd70 ? mdv[6:0] : 7'd70;
+			if (!mdy) begin mdx_r <= s; mdax <= a; mdy <= 1'b1; st <= S_MD0; end
+			else begin mdy_r <= {25'd0, a}; my_acc <= my_acc + s; mdy <= 1'b0; st <= S_MD6; end
+		end
+		S_MD6: begin
+			mx_acc <= mx_acc + mdx_r;
+			st <= rs1;
+		end
+
+		// ------------------------------------------------ cbp
+		S_CB0: begin
+			if (inter(mbt)) cpm <= 2'd0;
+			if ((mbt & MT_I16) != 0) st <= S_T8;
+			else dec(10'd73 + {9'd0, !lcbp[1]} + {8'd0, !tcbp[2], 1'b0}, S_CB1);
+		end
+		S_CB1: begin cbp <= {5'd0, bin}; dec(10'd73 + {9'd0, !bin} + {8'd0, !tcbp[3], 1'b0}, S_CB2); end
+		S_CB2: begin cbp[1] <= bin; dec(10'd73 + {9'd0, !lcbp[3]} + {8'd0, !cbp[0], 1'b0}, S_CB3); end
+		S_CB3: begin cbp[2] <= bin; dec(10'd73 + {9'd0, !bin} + {8'd0, !cbp[1], 1'b0}, S_CB4); end
+		S_CB4: begin
+			cbp[3] <= bin;
+			dec(10'd77 + {9'd0, lcbp[5:4] != 2'd0} + {8'd0, tcbp[5:4] != 2'd0, 1'b0}, S_CB5);
+		end
+		S_CB5: if (!bin) begin cbp[5:4] <= 2'd0; st <= S_T8; end
+		else dec(10'd81 + {9'd0, lcbp[5:4] == 2'd2} + {8'd0, tcbp[5:4] == 2'd2, 1'b0}, S_CB6);
+		S_CB6: begin cbp[5:4] <= bin ? 2'd2 : 2'd1; st <= S_T8; end
+
+		S_T8: begin
+			cbprec <= {3'd0, cbp};
+			if (d8ok && cbp[3:0] != 4'd0 && !intra(mbt)) dec(10'd399 + {8'd0, nts}, S_T8B);
+			else st <= S_QD0;
+		end
+		S_T8B: begin
+			if (bin) mbt <= mbt | MT_DCT;
+			st <= S_QD0;
+		end
+		S_QD0: if (cbp != 6'd0 || (mbt & MT_I16) != 0) dec(10'd60 + {9'd0, lqd_nz}, S_QD1);
+		else begin
+			for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) begin
+				nzc[12 + x + 8 * y] <= 1'b0;
+				nzc[52 + x + 8 * y] <= 1'b0;
+				nzc[92 + x + 8 * y] <= 1'b0;
+			end
+			lqd_nz <= 1'b0;
+			st <= S_O0;
+		end
+		S_QD1: if (!bin) begin lqd_nz <= 1'b0; rq <= 5'd0; st <= S_RS; end
+		else begin qdv <= 7'd1; dec(10'd62, S_QD2); end
+		S_QD2: if (bin) begin
+			if (qdv == 7'd102) st <= S_ERR;
+			else begin qdv <= qdv + 7'd1; dec(10'd63, S_QD2); end
+		end
+		else begin
+			reg signed [7:0] v, q;
+			v = qdv[0] ? $signed({1'b0, qdv} + 8'd1) >>> 1 : -($signed({1'b0, qdv} + 8'd1) >>> 1);
+			q = $signed({2'b00, qs}) + v;
+			if (q < 0) q = q + 8'sd52;
+			else if (q > 51) q = q - 8'sd52;
+			qs <= q[5:0];
+			cqp0 <= cqp(1'b0, q[5:0]);
+			cqp1 <= cqp(1'b1, q[5:0]);
+			lqd_nz <= 1'b1;
+			rq <= 5'd0;
+			st <= S_RS;
+		end
+
+		// ------------------------------------------------ residual sequence
+		S_RS: begin
+			reg go;
+			go = 1'b0;
+			if (rq == 5'd0) begin
+				if ((mbt & MT_I16) != 0) begin
+					for (int k = 0; k < 16; k++) ldc[k] <= 16'sd0;
+					r_cat <= 3'd0; r_blk <= 6'd48; go = 1'b1;
+				end
+			end
+			else if (rq <= 5'd16) begin
+				reg [3:0] b;
+				b = 4'(rq - 5'd1);
+				if ((mbt & MT_I16) != 0) begin
+					if (cbp[3:0] != 4'd0) begin
+						r_cat <= 3'd1; r_blk <= {2'd0, b}; r_base <= {1'b0, b, 4'd0};
+						r_list <= 3'd0; r_qp <= qs; go = 1'b1;
+					end
+					else if (b == 4'd0)
+						for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) nzc[12 + x + 8 * y] <= 1'b0;
+				end
+				else if (cbp[b[3:2]]) begin
+					if ((mbt & MT_DCT) != 0) begin
+						if (b[1:0] == 2'd0) begin
+							r_cat <= 3'd5; r_blk <= {2'd0, b}; r_base <= {1'b0, b[3:2], 6'd0};
+							r_list <= intra(mbt) ? 3'd0 : 3'd1; r_qp <= qs; go = 1'b1;
+						end
+					end
+					else begin
+						r_cat <= 3'd2; r_blk <= {2'd0, b}; r_base <= {1'b0, b, 4'd0};
+						r_list <= intra(mbt) ? 3'd0 : 3'd3; r_qp <= qs; go = 1'b1;
+					end
+				end
+				else if (b[1:0] == 2'd0) begin
+					reg [6:0] s8;
+					s8 = f_scan8({2'd0, b});
+					nzc[s8] <= 1'b0; nzc[s8 + 1] <= 1'b0; nzc[s8 + 8] <= 1'b0; nzc[s8 + 9] <= 1'b0;
+				end
+			end
+			else if (rq <= 5'd18) begin
+				if (cbp[5:4] != 2'd0) begin
+					r_cat <= 3'd3; r_blk <= rq == 5'd17 ? 6'd49 : 6'd50; go = 1'b1;
+				end
+			end
+			else if (rq <= 5'd26) begin
+				reg [2:0] k;
+				k = 3'(rq - 5'd19);
+				if (cbp[5]) begin
+					r_cat <= 3'd4;
+					r_blk <= 6'd16 + {1'b0, k[2], 4'd0} + {4'd0, k[1:0]};
+					r_base <= 9'd256 + {4'd0, k, 4'd0};
+					r_list <= 3'd1 + {2'd0, k[2]} + (intra(mbt) ? 3'd0 : 3'd3);
+					r_qp <= k[2] ? cqp1 : cqp0;
+					go = 1'b1;
+				end
+				else if (rq == 5'd19)
+					for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) begin
+						nzc[52 + x + 8 * y] <= 1'b0;
+						nzc[92 + x + 8 * y] <= 1'b0;
+					end
+			end
+			else st <= S_O0;
+			if (rq <= 5'd26) begin
+				rq <= rq + 5'd1;
+				if (go) st <= S_RC0;
+			end
+		end
+		// one residual block: coded_block_flag, then the block in cab_dec
+		S_RC0: if (r_cat == 3'd5) begin
+			cab_v <= 1'b1; cab_op <= 3'd4; cab_arg <= {9'd0, r_cat};
+			r_on <= 1'b1;
+			st <= S_RW;
+		end
+		else dec(r_cbfbase + {9'd0, r_nza} + {8'd0, r_nzb, 1'b0}, S_RC1);
+		S_RC1: if (!bin) begin
+			nzc[r_i8] <= 1'b0;
+			st <= S_RS;
+		end
+		else begin
+			cab_v <= 1'b1; cab_op <= 3'd4; cab_arg <= {9'd0, r_cat};
+			r_on <= 1'b1;
+			st <= S_RW;
+		end
+		S_RW: begin
+			if (cab_ready) cab_v <= 1'b0;
+			if (cab_ov && cab_kind == 2'd2) begin
+				reg nz;
+				nz = cab_pos != 7'd0;
+				r_on <= 1'b0;
+				if (r_cat == 3'd5) begin
+					nzc[r_i8] <= nz; nzc[r_i8 + 1] <= nz; nzc[r_i8 + 8] <= nz; nzc[r_i8 + 9] <= nz;
+				end
+				else nzc[r_i8] <= nz;
+				if (r_cat == 3'd0) cbprec[8] <= 1'b1;
+				if (r_cat == 3'd3) cbprec[6 + r_blk - 6'd49] <= 1'b1;
+				st <= S_RS;
+			end
+		end
+
+		// ------------------------------------------------ mcacc: DC transforms
+		S_O0: if (!(c0_v || c1_v || c2_v || c3_v)) begin
+			dck <= 5'd0;
+			ok <= 6'd0;
+			if ((mbt & MT_I16) != 0 && nzc[0]) begin
+				// luma DC, first pass (rows)
+				for (int i = 0; i < 4; i++) begin
+					reg signed [31:0] z0, z1, z2, z3;
+					z0 = ldc[4 * i] + ldc[4 * i + 1];
+					z1 = ldc[4 * i] - ldc[4 * i + 1];
+					z2 = ldc[4 * i + 2] - ldc[4 * i + 3];
+					z3 = ldc[4 * i + 2] + ldc[4 * i + 3];
+					tmp[4 * i] <= z0 + z3;
+					tmp[4 * i + 1] <= z0 - z3;
+					tmp[4 * i + 2] <= z1 - z2;
+					tmp[4 * i + 3] <= z1 + z2;
+				end
+				qmul_dc <= 24'({19'd0, d4init(qmod(qs), 2'd0)} * {16'd0, sm0[0]} << (qdiv(qs) + 4'd2));
+				st <= S_DC0;
+			end
+			else st <= S_DC2;
+		end
+		S_DC0: begin
+			// output dck: column i = dck >> 2, row r = dck & 3 of {0, 1, 4, 5}
+			reg [1:0] i, r;
+			reg [31:0] z0, z1, z2, z3, z, pr;
+			reg [3:0] blk;
+			reg [15:0] v;
+			i = dck[3:2];
+			r = dck[1:0];
+			z0 = tmp[i] + tmp[8 + i];
+			z1 = tmp[i] - tmp[8 + i];
+			z2 = tmp[4 + i] - tmp[12 + i];
+			z3 = tmp[4 + i] + tmp[12 + i];
+			z = r == 2'd0 ? z0 + z3 : r == 2'd1 ? z1 + z2 : r == 2'd2 ? z1 - z2 : z0 - z3;
+			pr = z * {8'd0, qmul_dc} + 32'd128;
+			v = pr[23:8];
+			blk = (i == 2'd0 ? 4'd0 : i == 2'd1 ? 4'd2 : i == 2'd2 ? 4'd8 : 4'd10) +
+			      (r == 2'd0 ? 4'd0 : r == 2'd1 ? 4'd1 : r == 2'd2 ? 4'd4 : 4'd5);
+			cr_we <= 1'b1;
+			cr_wa <= {1'b0, blk, 4'd0};
+			cr_wd <= v;
+			if (v != 16'd0) begin
+				bm[{1'b0, blk, 4'd0}] <= 1'b1;
+				ncoef <= ncoef + 9'd1;
+			end
+			dck <= dck == 5'd15 ? 5'd0 : dck + 5'd1;
+			if (dck == 5'd15) st <= S_DC2;
+		end
+		// chroma DC, dck >> 2 = component
+		S_DC2: begin
+			if (cbp[5:4] != 2'd0 && (mbt & (MT_SKIP | MT_PCM)) == 0 && nzc[dck[2] ? 80 : 40]) begin
+				reg [5:0] q;
+				reg [2:0] l;
+				q = dck[2] ? cqp1 : cqp0;
+				l = (intra(mbt) ? 3'd1 : 3'd4) + {2'd0, dck[2]};
+				qmul_dc <= 24'({19'd0, d4init(qmod(q), 2'd0)} * {16'd0, sm0[l]} << (qdiv(q) + 4'd2));
+				st <= S_DC3;
+			end
+			else if (dck[2]) st <= S_O1;
+			else dck <= 5'd4;
+		end
+		S_DC3: begin
+			reg [31:0] a, b, c, d, e, z, pr;
+			reg [15:0] v;
+			reg [2:0] cb;
+			a = 32'(cdc[{dck[2], 2'd0}]);
+			b = 32'(cdc[{dck[2], 2'd1}]);
+			c = 32'(cdc[{dck[2], 2'd2}]);
+			d = 32'(cdc[{dck[2], 2'd3}]);
+			e = a - b; a = a + b; b = c - d; c = c + d;
+			z = dck[1:0] == 2'd0 ? a + c : dck[1:0] == 2'd1 ? e + b : dck[1:0] == 2'd2 ? a - c : e - b;
+			pr = z * {8'd0, qmul_dc};
+			v = pr[22:7];
+			cb = {dck[2], dck[1:0]};
+			cr_we <= 1'b1;
+			cr_wa <= 9'd256 + {2'd0, cb, 4'd0};
+			cr_wd <= v;
+			if (v != 16'd0) begin
+				bm[9'd256 + {2'd0, cb, 4'd0}] <= 1'b1;
+				ncoef <= ncoef + 9'd1;
+			end
+			if (dck[1:0] == 2'd3) begin
+				if (dck[2]) st <= S_O1;
+				else begin dck <= 5'd4; st <= S_DC2; end
+			end
+			else dck <= dck + 5'd1;
+		end
+
+		// ------------------------------------------------ mcacc: output
+		S_O1: if (of_room) begin
+			// A5 (or A0 A0 A0), word ok
+			if (s_dbk == 2'd0) begin ok <= 6'd0; st <= S_O2; end
+			else begin
+				reg [5:0] q, nl, nt;
+				reg [6:0] qy0, qy1, qb0, qb1, qr0, qr1;
+				reg bad;
+				bad = s_alpha < -8'sd16 || s_alpha > 8'sd15 || s_beta < -8'sd16 || s_beta > 8'sd15;
+				q = qrec;
+				nl = dl_av ? lrec.qp : q;
+				nt = dt_av ? trec.qp : q;
+				qy0 = ({1'b0, q} + {1'b0, nl} + 7'd1) >> 1;
+				qy1 = ({1'b0, q} + {1'b0, nt} + 7'd1) >> 1;
+				qb0 = ({1'b0, cqp(1'b0, q)} + {1'b0, cqp(1'b0, nl)} + 7'd1) >> 1;
+				qb1 = ({1'b0, cqp(1'b0, q)} + {1'b0, cqp(1'b0, nt)} + 7'd1) >> 1;
+				qr0 = ({1'b0, cqp(1'b1, q)} + {1'b0, cqp(1'b1, nl)} + 7'd1) >> 1;
+				qr1 = ({1'b0, cqp(1'b1, q)} + {1'b0, cqp(1'b1, nt)} + 7'd1) >> 1;
+				of_we <= 1'b1;
+				if (bad) of_wd <= 32'hA0000000;
+				else case (ok)
+				6'd0: of_wd <= {8'hA5, 12'd0, s_beta[4:0], s_alpha[4:0], dt_av, dl_av};
+				6'd1: of_wd <= {2'd0, qb1[5:0], qb0[5:0], q, qy1[5:0], qy0[5:0]};
+				default: of_wd <= {8'd0, cqp(1'b1, q), qr1[5:0], qr0[5:0], cqp(1'b0, q)};
+				endcase
+				ok <= ok == 6'd2 ? 6'd0 : ok + 6'd1;
+				if (ok == 6'd2) st <= S_O2;
+			end
+		end
+		S_O2: if (of_room) begin
+			reg [2:0] ty;
+			ty = cur_pcm ? 3'd4 : (mbt & MT_I16) != 0 ? 3'd3 : (mbt & MT_I4) != 0 ? ((mbt & MT_DCT) != 0 ? 3'd2 : 3'd1) : 3'd0;
+			of_we <= 1'b1;
+			of_wd <= {8'hA3, 5'd0, ty, mby, mbx};
+			ok <= 6'd0;
+			pcm_i <= 7'd0;
+			st <= cur_pcm ? S_O6 : S_O3;
+		end
+		S_O3: if (of_room) begin
+			// head: mask, then 4 intra words or 36 inter words
+			reg [23:0] mask;
+			reg [31:0] w;
+			mask = {grp[23:16], (mbt & MT_DCT) != 0 ? {3'd0, |grp[15:12], 3'd0, |grp[11:8], 3'd0, |grp[7:4], 3'd0, |grp[3:0]} : grp[15:0]};
+			if (ok == 6'd0) w = {7'd0, (mbt & MT_DCT) != 0, mask};
+			else if (intra(mbt)) begin
+				case (ok)
+				6'd1: w = (mbt & MT_I16) != 0 ? 32'd0 : {i4c[23], i4c[22], i4c[15], i4c[14], i4c[21], i4c[20], i4c[13], i4c[12]};
+				6'd2: w = (mbt & MT_I16) != 0 ? 32'd0 : {i4c[39], i4c[38], i4c[31], i4c[30], i4c[37], i4c[36], i4c[29], i4c[28]};
+				6'd3: w = {sa_tl, sa_tr};
+				default: w = {24'd0, (mbt & MT_I16) != 0 ? i16m : 4'd0, cpmc};
+				endcase
+			end
+			else if (ok <= 6'd4) begin
+				reg [6:0] s8;
+				reg signed [5:0] r0, r1;
+				reg [8:0] wt;
+				s8 = f_scan8({2'd0, ok[1:0] - 2'd1, 2'b00});
+				r0 = uses(mbt, 1'b0) ? refc[0][s8] : -6'sd1;
+				r1 = s_lc > 2'd1 && uses(mbt, 1'b1) ? refc[1][s8] : -6'sd1;
+				wt = iw_ram[{r0[4:0], r1[4:0]}];
+				w = {7'd0, (r0 >= 0 && r1 >= 0 && s_uw == 2'd2) ? wt : 9'd32, 2'd0, r1 < 0, r1[5:0], r0 < 0, r0[5:0]};
+			end
+			else begin
+				reg [4:0] k;
+				reg l;
+				k = 5'(ok - 6'd5);
+				l = k[4];
+				w = ({1'b0, l} < s_lc && uses(mbt, l)) ? mvc[l][f_scan8({2'd0, k[3:0]})] : 32'd0;
+			end
+			of_we <= 1'b1;
+			of_wd <= w;
+			if (ok == (intra(mbt) ? 6'd4 : 6'd36)) st <= S_O4;
+			ok <= ok + 6'd1;
+		end
+		S_O4: if (of_room) begin
+			of_we <= 1'b1;
+			of_wd <= {23'd0, ncoef};
+			sc_pend <= 1'b0;
+			st <= S_O5;
+		end
+		// coefficients: the first set bit, its RAM word a clock later
+		S_O5: if (of_room) begin
+			if (sc_pend) begin
+				of_we <= 1'b1;
+				of_wd <= {5'd0, sc_blk_r, sc_p_r, cr_q};
+			end
+			if (grp != 24'd0) begin
+				reg [8:0] bit_;
+				reg [4:0] blk;
+				reg [5:0] p;
+				bit_ = {sc_g, sc_b};
+				bm[bit_] <= 1'b0;
+				if (sc_g < 5'd16 && (mbt & MT_DCT) != 0) begin
+					blk = {1'b0, sc_g[3:2], 2'b00};
+					p = {sc_g[1:0], sc_b};
+					cr_q <= cram[{1'b0, sc_g[3:2], t8(p)}];
+				end
+				else begin
+					blk = sc_g;
+					p = {2'd0, sc_b};
+					cr_q <= cram[{sc_g, t4(sc_b)}];
+				end
+				sc_blk_r <= blk;
+				sc_p_r <= p;
+				sc_pend <= 1'b1;
+			end
+			else begin
+				sc_pend <= 1'b0;
+				ncoef <= 9'd0;
+				st <= S_E0;
+			end
+		end
+		S_O6: if (of_room) begin
+			// I_PCM samples
+			of_we <= 1'b1;
+			of_wd <= pcm[pcm_i];
+			pcm_i <= pcm_i + 7'd1;
+			if (pcm_i == 7'd95) st <= S_E0;
+		end
+
+		// ------------------------------------------------ end of the macroblock
+		S_E0: begin
+			nrec_t t, l;
+			reg sk;
+			sk = (mbt & MT_SKIP) != 0;
+			t.sn = s_sn; t.tag = s_tag; t.ty = tpack(mbt); t.qp = qrec; t.cbp = cbprec;
+			t.cpm = cpm != 2'd0 && intra(mbt) && !cur_pcm;
+			t.i4 = i4snap_b;
+			t.nz = sk ? 8'd0 : cur_pcm ? 8'hFF : {nzc[101], nzc[100], nzc[61], nzc[60], nzc[39], nzc[38], nzc[37], nzc[36]};
+			t.dt = {sub[3][8], sub[2][8]};
+			for (int ls = 0; ls < 2; ls++) begin
+				t.rf[ls * 12 +: 6] = refc[ls][28];
+				t.rf[ls * 12 + 6 +: 6] = refc[ls][30];
+				for (int k = 0; k < 4; k++) begin
+					t.mv[ls * 128 + k * 32 +: 32] = mvc[ls][36 + k];
+					t.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mvdc[ls][36 + k];
+				end
+			end
+			l = t;
+			l.i4 = i4snap_r;
+			l.nz = sk ? 8'd0 : cur_pcm ? 8'hFF : {nzc[101], nzc[93], nzc[61], nzc[53], nzc[39], nzc[31], nzc[23], nzc[15]};
+			l.dt = {sub[3][8], sub[1][8]};
+			for (int ls = 0; ls < 2; ls++) begin
+				l.rf[ls * 12 +: 6] = refc[ls][14];
+				l.rf[ls * 12 + 6 +: 6] = refc[ls][30];
+				for (int k = 0; k < 4; k++) begin
+					l.mv[ls * 128 + k * 32 +: 32] = mvc[ls][15 + 8 * k];
+					l.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mvdc[ls][15 + 8 * k];
+				end
+			end
+			rb_we <= 1'b1;
+			rb_wa <= mbx;
+			rb_wd <= t;
+			lrec <= l;
+			mr_k <= 6'd0;
+			mr_base <= {24'd0, s_slot} * SLOT_WORDS + mb_lin * 32'd36;
+			st <= S_E1;
+		end
+		// motion record of the macroblock (co-located data for later B pictures)
+		S_E1: begin
+			if (mem_req && mem_ack) mem_req <= 1'b0;
+			if (!mem_req || mem_ack) begin
+				if (mr_k == 6'd35) begin
+					mem_req <= 1'b0;
+					st <= S_E2;
+				end
+				else begin
+					reg [31:0] w;
+					reg l;
+					if (mr_k == 6'd0) w = {18'd0, tpack(mbt)};
+					else if (mr_k <= 6'd2) begin
+						l = mr_k == 6'd2;
+						if (uses(mbt, l))
+							w = {{2{refc[l][30][5]}}, refc[l][30], {2{refc[l][28][5]}}, refc[l][28],
+							     {2{refc[l][14][5]}}, refc[l][14], {2{refc[l][12][5]}}, refc[l][12]};
+						else w = 32'hFFFFFFFF;
+					end
+					else begin
+						reg [4:0] k;
+						k = 5'(mr_k - 6'd3);
+						w = mvc[k[4]][7'd12 + {5'd0, k[1:0]} + {2'd0, k[3:2], 3'd0}];
+					end
+					mem_req <= 1'b1;
+					mem_we <= 1'b1;
+					mem_addr <= mr_base + {26'd0, mr_k};
+					mem_wdata <= w;
+					mr_k <= mr_k + 6'd1;
+				end
+			end
+		end
+		S_E2: begin
+			for (int k = 0; k < 8; k++) cdc[k] <= 16'sd0;
+			trm(S_E3);
+		end
+		S_E3: begin
+			if (mbx + 8'd1 >= s_mbw) begin
+				mbx <= 8'd0;
+				mby <= mby + 8'd1;
+			end
+			else mbx <= mbx + 8'd1;
+			if (bin || (mbx + 8'd1 >= s_mbw && mby + 8'd1 >= s_mbh)) st <= S_DRAIN;
+			else st <= S_MB0;
+		end
+		S_DRAIN: begin
+			// the rest of the slice data is not needed
+			if (dleft == 30'd0 || (dleft == 30'd1 && in_valid)) begin
+				data_on <= 1'b0;
+				sl_done <= 1'b1;
+				st <= S_DESC;
+			end
+		end
+		S_ERR: begin
+			sl_err <= 1'b1;
+			cab_v <= 1'b0;
+			st <= S_ERW;
+		end
+		S_ERW: if (!cab_busy) st <= S_DRAIN;
+
+		// ------------------------------------------------ direct prediction (rsd returns)
+		S_DR0: begin
+			dr_b8 <= (mbt & MT_88) != 0;
+			if (s_sp) st <= S_SD0;
+			else begin rs1 <= S_TD1; st <= S_CF0; end
+		end
+		// spatial: references and vectors from the neighbours
+		S_SD0: begin
+			reg signed [5:0] rr[0:1];
+			reg [31:0] mm[0:1];
+			reg [31:0] t, sb;
+			t = mbt;
+			sb = MT_L0L1;
+			for (int l = 0; l < 2; l++) begin
+				reg signed [5:0] lr, tr, rc;
+				reg [31:0] A, B, C;
+				reg [5:0] m;
+				lr = refc[l][11]; tr = refc[l][4]; rc = refc[l][8]; C = mvc[l][8];
+				if (rc == -6'sd2) begin rc = refc[l][3]; C = mvc[l][3]; end
+				A = mvc[l][11]; B = mvc[l][4];
+				m = $unsigned(lr) < $unsigned(tr) ? lr : tr;
+				m = $unsigned(m) < $unsigned(rc) ? m : rc;
+				rr[l] = m;
+				if (rr[l] >= 0) begin
+					reg [1:0] mc;
+					mc = {1'b0, lr == rr[l]} + {1'b0, tr == rr[l]} + {1'b0, rc == rr[l]};
+					if (mc > 2'd1) mm[l] = {mid_pred(A[31:16], B[31:16], C[31:16]), mid_pred(A[15:0], B[15:0], C[15:0])};
+					else if (lr == rr[l]) mm[l] = A;
+					else if (tr == rr[l]) mm[l] = B;
+					else mm[l] = C;
+				end
+				else begin
+					mm[l] = 32'd0;
+					rr[l] = -6'sd1;
+					if (!dr_b8) t = t & ~(l ? MT_L1 : MT_L0);
+					sb = sb & ~(l ? MT_L1 : MT_L0);
+				end
+			end
+			if (rr[0] < 0 && rr[1] < 0) begin
+				rr[0] = 6'sd0; rr[1] = 6'sd0;
+				if (!dr_b8) t = t | MT_L0L1;
+				sb = sb | MT_L0L1;
+			end
+			dr_ref[0] <= rr[0]; dr_ref[1] <= rr[1];
+			dr_mv[0] <= mm[0]; dr_mv[1] <= mm[1];
+			if (!(dr_b8 || mm[0] != 32'd0 || mm[1] != 32'd0)) begin
+				fref(1'b0, 7'd12, 3'd4, 3'd4, rr[0]);
+				fref(1'b1, 7'd12, 3'd4, 3'd4, rr[1]);
+				fmv(1'b0, 7'd12, 3'd4, 3'd4, 32'd0);
+				fmv(1'b1, 7'd12, 3'd4, 3'd4, 32'd0);
+				mbt <= (t & ~(MT_88 | MT_168 | MT_816 | MT_P1L0 | MT_P1L1)) | MT_16 | MT_DIR;
+				st <= rsd;
+			end
+			else begin
+				mbt <= t;
+				dr_sub <= sb;
+				rs1 <= S_SD1;
+				st <= S_CF0;
+			end
+		end
+		S_SD1: begin
+			reg [31:0] t, sb;
+			t = mbt;
+			sb = dr_sub | MT_16 | MT_DIR;
+			if (!dr_b8 && (colty & MT_16I) != 0) t = t | MT_16 | MT_DIR;
+			else if (!dr_b8 && (colty & (MT_168 | MT_816)) != 0) t = t | MT_DIR | (colty & (MT_168 | MT_816));
+			else begin
+				if (!s_d8) sb = sb + (MT_88 - MT_16);
+				t = t | MT_88;
+			end
+			dr_sub <= sb;
+			if ((t & MT_16) != 0) begin
+				reg [31:0] a, b;
+				reg signed [15:0] x0, y0, x1, y1;
+				x0 = colm0[0][15:0]; y0 = colm0[0][31:16];
+				x1 = colm1[0][15:0]; y1 = colm1[0][31:16];
+				fref(1'b0, 7'd12, 3'd4, 3'd4, dr_ref[0]);
+				fref(1'b1, 7'd12, 3'd4, 3'd4, dr_ref[1]);
+				if (!intra(colty) && !s_l1l &&
+				    ((colr0[0] == 8'sd0 && x0 >= -1 && x0 <= 1 && y0 >= -1 && y0 <= 1) ||
+				     (colr0[0] < 0 && colr1[0] == 8'sd0 && x1 >= -1 && x1 <= 1 && y1 >= -1 && y1 <= 1 && s_x264))) begin
+					a = dr_ref[0] > 0 ? dr_mv[0] : 32'd0;
+					b = dr_ref[1] > 0 ? dr_mv[1] : 32'd0;
+				end
+				else begin
+					a = dr_mv[0];
+					b = dr_mv[1];
+				end
+				fmv(1'b0, 7'd12, 3'd4, 3'd4, a);
+				fmv(1'b1, 7'd12, 3'd4, 3'd4, b);
+				mbt <= t;
+				st <= rsd;
+			end
+			else begin
+				mbt <= t;
+				dr_i8 <= 3'd0;
+				dr_n <= 5'd0;
+				st <= S_SD2;
+			end
+		end
+		S_SD2: begin
+			if (dr_i8 == 3'd4) begin
+				if (!dr_b8 && dr_n[3:0] == 4'd0)
+					mbt <= (mbt & ~(MT_88 | MT_168 | MT_816 | MT_P1L0 | MT_P1L1)) | MT_16 | MT_DIR;
+				st <= rsd;
+			end
+			else begin
+				reg [1:0] i8;
+				reg [6:0] s8;
+				reg [31:0] v0, v1;
+				reg [4:0] n;
+				i8 = dr_i8[1:0];
+				s8 = f_scan8({2'd0, i8, 2'b00});
+				n = dr_n;
+				if (!(dr_b8 && (sub[i8] & MT_DIR) == 0)) begin
+					reg [31:0] sb;
+					sb = dr_sub;
+					fref(1'b0, s8, 3'd2, 3'd2, dr_ref[0]);
+					fref(1'b1, s8, 3'd2, 3'd2, dr_ref[1]);
+					for (int k = 0; k < 4; k++) begin
+						reg [6:0] e;
+						reg ze;
+						reg signed [15:0] cx, cy;
+						reg [31:0] cm;
+						e = s8 + (k[0] ? 7'd1 : 7'd0) + (k[1] ? 7'd8 : 7'd0);
+						ze = 1'b0;
+						if (!intra(colty) && !s_l1l && (colr0[i8] == 8'sd0 || (colr0[i8] < 0 && colr1[i8] == 8'sd0 && s_x264))) begin
+							reg [3:0] ci;
+							if ((sb & MT_16) != 0) ci = {i8[1], i8[1], i8[0], i8[0]};          // x8 * 3 + y8 * 12
+							else ci = {i8[1], k[1], i8[0], k[0]};
+							cm = colr0[i8] == 8'sd0 ? colm0[ci] : colm1[ci];
+							cx = cm[15:0]; cy = cm[31:16];
+							ze = cx >= -1 && cx <= 1 && cy >= -1 && cy <= 1;
+						end
+						mvc[0][e] <= (ze && dr_ref[0] == 6'sd0) ? 32'd0 : dr_mv[0];
+						mvc[1][e] <= (ze && dr_ref[1] == 6'sd0) ? 32'd0 : dr_mv[1];
+						if (ze) n = n + 5'd1;
+						if (k == 3 && (sb & MT_16) == 0) begin
+							// !(m & 3): sub-block count of this 8x8
+							reg [2:0] m;
+							m = 3'(n - dr_n);
+							if (m[1:0] == 2'd0) sb = sb + (MT_16 - MT_88);
+						end
+					end
+					sub[i8] <= sb;
+				end
+				dr_n <= n;
+				dr_i8 <= dr_i8 + 3'd1;
+			end
+		end
+		// temporal
+		S_TD1: begin
+			reg [31:0] t, sb;
+			t = mbt;
+			sb = MT_16 | MT_P0L0 | MT_P0L1 | MT_DIR;
+			if (!dr_b8 && (colty & MT_16I) != 0) t = t | MT_16 | MT_P0L0 | MT_P0L1 | MT_DIR;
+			else if (!dr_b8 && (colty & (MT_168 | MT_816)) != 0) t = t | MT_L0L1 | MT_DIR | (colty & (MT_168 | MT_816));
+			else begin
+				if (!s_d8) sb = MT_88 | MT_P0L0 | MT_P0L1 | MT_DIR;
+				t = t | MT_88 | MT_L0L1;
+			end
+			mbt <= t;
+			dr_sub <= sb;
+			dr_i8 <= (t & MT_16) != 0 ? 3'd7 : 3'd0;
+			dr_i4 <= 2'd0;
+			st <= S_TD2;
+		end
+		S_TD2: begin
+			// one 4x4 block a clock: 16x16 (dr_i8 7) or 8x8 dr_i8, block dr_i4
+			if (dr_i8 == 3'd4) st <= rsd;
+			else begin
+				reg [1:0] i8;
+				reg is16, sub8;
+				reg signed [7:0] r0, rr;
+				reg [31:0] cm;
+				reg [3:0] ci;
+				reg [6:0] s8;
+				i8 = dr_i8[1:0];
+				is16 = dr_i8 == 3'd7;
+				sub8 = is16 || (dr_sub & MT_16) != 0;
+				if (is16) i8 = 2'd0;
+				s8 = is16 ? 7'd12 : f_scan8({2'd0, i8, 2'b00});
+				if (!is16 && dr_b8 && (sub[i8] & MT_DIR) == 0) begin
+					dr_i8 <= dr_i8 + 3'd1;
+				end
+				else begin
+					if (dr_i4 == 2'd0) begin
+						if (!is16) sub[i8] <= dr_sub;
+						if (is16) fref(1'b1, 7'd12, 3'd4, 3'd4, 6'd0);
+						else fref(1'b1, s8, 3'd2, 3'd2, 6'd0);
+					end
+					if (intra(colty)) begin
+						if (is16) begin
+							fref(1'b0, 7'd12, 3'd4, 3'd4, 6'd0);
+							fmv(1'b0, 7'd12, 3'd4, 3'd4, 32'd0);
+							fmv(1'b1, 7'd12, 3'd4, 3'd4, 32'd0);
+							st <= rsd;
+						end
+						else begin
+							fref(1'b0, s8, 3'd2, 3'd2, 6'd0);
+							fmv(1'b0, s8, 3'd2, 3'd2, 32'd0);
+							fmv(1'b1, s8, 3'd2, 3'd2, 32'd0);
+							dr_i8 <= dr_i8 + 3'd1;
+						end
+					end
+					else begin
+						reg signed [31:0] px, py, mx, my;
+						reg signed [15:0] cx, cy;
+						r0 = colr0[i8];
+						if (r0 >= 0) begin rr = $signed(mapc[{1'b0, r0[4:0]}]); end
+						else begin rr = $signed(mapc[{1'b1, colr1[i8][4:0]}]); end
+						if (sub8) ci = {i8[1], i8[1], i8[0], i8[0]};
+						else ci = {i8[1], dr_i4[1], i8[0], dr_i4[0]};
+						cm = r0 >= 0 ? colm0[ci] : colm1[ci];
+						cx = cm[15:0]; cy = cm[31:16];
+						px = dsf[rr[4:0]] * cx + 32'sd128;
+						py = dsf[rr[4:0]] * cy + 32'sd128;
+						mx = px >>> 8;
+						my = py >>> 8;
+						if (sub8) begin
+							if (is16) begin
+								fref(1'b0, 7'd12, 3'd4, 3'd4, rr[5:0]);
+								fmv(1'b0, 7'd12, 3'd4, 3'd4, {my[15:0], mx[15:0]});
+								fmv(1'b1, 7'd12, 3'd4, 3'd4, {16'(my - cy), 16'(mx - cx)});
+								st <= rsd;
+							end
+							else begin
+								fref(1'b0, s8, 3'd2, 3'd2, rr[5:0]);
+								fmv(1'b0, s8, 3'd2, 3'd2, {my[15:0], mx[15:0]});
+								fmv(1'b1, s8, 3'd2, 3'd2, {16'(my - cy), 16'(mx - cx)});
+								dr_i8 <= dr_i8 + 3'd1;
+							end
+						end
+						else begin
+							reg [6:0] e;
+							reg signed [15:0] lx, ly;
+							e = s8 + (dr_i4[0] ? 7'd1 : 7'd0) + (dr_i4[1] ? 7'd8 : 7'd0);
+							if (dr_i4 == 2'd0) fref(1'b0, s8, 3'd2, 3'd2, rr[5:0]);
+							lx = mx[15:0];
+							ly = my[15:0];
+							mvc[0][e] <= {ly, lx};
+							mvc[1][e] <= {16'(ly - cy), 16'(lx - cx)};
+							dr_i4 <= dr_i4 + 2'd1;
+							if (dr_i4 == 2'd3) dr_i8 <= dr_i8 + 3'd1;
+						end
+					end
+				end
+			end
+		end
+		// co-located macroblock from the motion memory (35 words)
+		S_CF0: begin
+			mc_i <= 6'd0;
+			mc_r <= 6'd0;
+			mr_base <= {24'd0, s_col} * SLOT_WORDS + mb_lin * 32'd36;
+			mem_we <= 1'b0;
+			st <= S_CF1;
+		end
+		S_CF1: begin
+			if (mem_req && mem_ack) mem_req <= 1'b0;
+			if ((!mem_req || mem_ack) && mc_i != 6'd35) begin
+				mem_req <= 1'b1;
+				mem_addr <= mr_base + {26'd0, mc_i};
+				mc_i <= mc_i + 6'd1;
+			end
+			if (mem_rvalid) begin
+				if (mc_r == 6'd0) colty <= tunpack(mem_rdata[13:0]);
+				else if (mc_r == 6'd1) for (int k = 0; k < 4; k++) colr0[k] <= mem_rdata[8 * k +: 8];
+				else if (mc_r == 6'd2) for (int k = 0; k < 4; k++) colr1[k] <= mem_rdata[8 * k +: 8];
+				else if (mc_r < 6'd19) colm0[4'(mc_r - 6'd3)] <= mem_rdata;
+				else colm1[4'(mc_r - 6'd19)] <= mem_rdata;
+				mc_r <= mc_r + 6'd1;
+				if (mc_r == 6'd34) st <= rs1;
+			end
+		end
+
+		default: st <= S_ERR;
+		endcase
+
+		// ------------------------------------------------ dequantisation pipeline (coefficients from cab_dec)
+		c0_v <= 1'b0;
+		c1_v <= c0_v;
+		c2_v <= c1_v;
+		c3_v <= c2_v;
+		if (r_on && cab_ov && cab_kind == 2'd1) begin
+			reg [5:0] j, p;
+			reg [6:0] pos;
+			reg [7:0] smi;
+			pos = cab_pos;
+			if (r_cat == 3'd0) ldc[f_zz4(pos[3:0])] <= cab_val[15:0];
+			else if (r_cat == 3'd3) cdc[{r_blk == 6'd50, pos[1:0]}] <= cab_val[15:0];
+			else begin
+				if (r_cat == 3'd5) begin j = f_zz8(pos[5:0]); p = t8(j); end
+				else begin
+					j = {2'd0, f_zz4(r_cat == 3'd2 ? pos[3:0] : pos[3:0] + 4'd1)};
+					p = {2'd0, t4(j[3:0])};
+				end
+				if (r_cat == 3'd5) smi = 8'd96 + {1'b0, r_list[0], p};
+				else smi = {1'b0, r_list, 4'd0} + {2'd0, p};
+				c0_v <= 1'b1;
+				c0_s <= cab_val[21:0];
+				c0_j <= j;
+				c0_p <= p;
+				c0_b <= r_base;
+				c0_8 <= r_cat == 3'd5;
+				c0_m <= qmod(r_qp);
+				c0_d <= qdiv(r_qp);
+				sm_ra <= smi[7:2];
+				c0_by <= smi[1:0];
+			end
+		end
+		// stage 1: dequant factor (class, scaling matrix byte, QP / 6)
+		if (c0_v) begin
+			reg [10:0] f;
+			reg [7:0] sm;
+			sm = 8'(smw[sm_ra] >> {c0_by, 3'd0});
+			f = c0_8 ? 11'(d8init(c0_m, d8scan({c0_p[4:3], c0_p[1:0]}))) : 11'(d4init(c0_m, {1'b0, c0_p[0]} + {1'b0, c0_p[2]}));
+			c1_s <= c0_s; c1_j <= c0_j; c1_p <= c0_p; c1_b <= c0_b;
+			c1_q <= 22'({11'd0, f} * {14'd0, sm} << (c0_8 ? {1'b0, c0_d} : {1'b0, c0_d} + 5'd2));
+		end
+		// stage 2: product (the low 22 bits are enough for (product + 32) >> 6 in 16 bits)
+		if (c1_v) begin
+			c2_s <= c1_s; c2_j <= c1_j; c2_p <= c1_p; c2_b <= c1_b;
+			c2_pr <= 22'(c1_s * c1_q);
+		end
+		// stage 3: (product + 32) >> 6 into the coefficient RAM
+		if (c2_v) begin
+			reg [21:0] r;
+			r = c2_pr + 22'd32;
+			cr_we <= 1'b1;
+			cr_wa <= c2_b + {3'd0, c2_j};
+			cr_wd <= r[21:6];
+			if (r[21:6] != 16'd0) begin
+				bm[c2_b + {3'd0, c2_p}] <= 1'b1;
+				ncoef <= ncoef + 9'd1;
+			end
+		end
+	end
+end
+
+
+endmodule
+`default_nettype wire

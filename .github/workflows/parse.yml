@@ -1,6 +1,7 @@
 name: Parser (4.0) synthesis (size and timing)
 
-# Step 1 of 4.0: the CABAC block alone, to measure it. Not part of any core.
+# 4.0, measure only, not part of any core: step 1 the CABAC block alone,
+# step 2 acc_parse (CABAC + macroblock reading + vector prediction).
 on:
   workflow_dispatch:
   push:
@@ -37,6 +38,38 @@ jobs:
             cat accel/parse/syn/fmax.txt || true
             echo "--- worst paths"
             python3 accel/syn/paths.py accel/parse/syn/paths.txt || true
+          else
+            grep -E "Error" fit.log | head -20
+            exit 1
+          fi
+
+  acc_parse:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synthesis, fit and timing with Quartus
+        run: |
+          cp accel/parse/rtl/*.hex accel/parse/syn/
+          Q="docker run --rm -v $PWD/accel:/build -w /build/parse/syn theypsilon/quartus-lite-c5:17.0.2"
+          $Q quartus_map apar > map.log 2>&1 || (grep -E "Error" map.log | head -40; exit 1)
+          R=$(dirname $(find accel/parse/syn -name apar.map.rpt | head -1))
+          echo "--- synthesis: resources by entity"
+          grep -A60 "; Analysis & Synthesis Resource Utilization by Entity" $R/apar.map.rpt | head -70 || true
+          echo "--- synthesis: RAM inferred"
+          grep -A30 "; Analysis & Synthesis RAM Summary" $R/apar.map.rpt | head -40 || true
+          grep -E "Implemented|Info \(276|Warning \(276|readmem|Warning \(10" map.log | head -40 || true
+          echo "--- fit"
+          if $Q quartus_fit apar > fit.log 2>&1; then
+            cat $R/apar.fit.summary || true
+            grep -A20 "; Compilation Hierarchy Node" $R/apar.fit.rpt | head -30 || true
+            $Q quartus_sta apar > sta.log 2>&1 || true
+            echo "--- timing"
+            grep -B2 -A12 "Slow 1100mV 100C Model Setup Summary" $R/apar.sta.rpt | head -30 || true
+            grep -B2 -A12 "Slow 1100mV -40C Model Setup Summary" $R/apar.sta.rpt | head -30 || true
+            $Q quartus_sta -t apar_paths.tcl > paths.log 2>&1 || true
+            cat accel/parse/syn/apar_fmax.txt || true
+            echo "--- worst paths"
+            python3 accel/syn/paths.py accel/parse/syn/apar_paths.txt || true
           else
             grep -E "Error" fit.log | head -20
             exit 1

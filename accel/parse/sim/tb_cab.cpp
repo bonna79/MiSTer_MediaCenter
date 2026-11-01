@@ -1,6 +1,6 @@
 // Verilator test bench of cab_dec.sv: reads a cabtrace trace on stdin and
 // drives the block with the same commands; every bin, every coefficient and
-// every I_PCM start must match FFmpeg's. Also counts the clocks, per packet
+// every I_PCM start and its 384 sample bytes must match FFmpeg's. Also counts the clocks, per packet
 // (picture) too, to see the time at 108 MHz.
 // Usage: cabtrace file | tb_cab [name]
 #include <cstdio>
@@ -154,7 +154,15 @@ int main(int argc, char **argv)
 			if (!active) continue;
 			command(5, 0);
 			long p, v;
-			if (result(3, &p, &v) && v != (long)(lo | hi << 16)) fail("I_PCM inizio", v, lo | hi << 16);
+			unsigned at = lo | hi << 16;
+			if (result(3, &p, &v) && (p != 0 || v != (long)at)) fail("I_PCM inizio", v, at);
+			// then the 384 sample bytes
+			for (unsigned i = 0; i < 384; i++)
+			{
+				if (!result(3, &p, &v)) break;
+				long want = at + i < data.size() ? data[at + i] : -1;
+				if (p != 1 || v != want) { fail("I_PCM campione", v, want); break; }
+			}
 			npcm++;
 		}
 		else if ((w & 0xF000) == 0x2000)

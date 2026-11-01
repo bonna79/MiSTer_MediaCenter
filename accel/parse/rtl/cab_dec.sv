@@ -18,12 +18,13 @@
 //   3 TERM  one terminate bin
 //   4 RES   cmd_arg[2:0] ctxBlockCat: a residual block whose
 //           coded_block_flag was 1
-//   5 PCM   after the I_PCM mb_type: skips to the byte boundary and the 384
+//   5 PCM   after the I_PCM mb_type: goes to the byte boundary, gives the 384
 //           sample bytes, then the engine reads 9 bits again
 // Results (out_*):
 //   out_kind 0 bin (out_val[0]); 1 coefficient (out_pos, out_val signed,
 //   last coefficient first); 2 end of block (out_pos = count);
-//   3 I_PCM start (out_val = byte offset in the slice data)
+//   3 I_PCM: first out_pos 0, out_val = byte offset of the samples in the
+//   slice data; then 384 times out_pos 1, out_val[7:0] = a sample byte
 // Timing: a decision bin takes 3 clocks (context read, rangeTabLPS, the
 // decision), a bypass bin 1, the INIT 1024 + a few. The bits come to the
 // engine through a 16-bit look-ahead filled one byte a clock when the engine
@@ -82,7 +83,7 @@ function [3:0] last8(input [5:0] i);
 endfunction
 
 localparam S_IDLE = 0, S_INIT = 1, S_INIT2 = 2, S_LOAD = 3, S_DREAD = 4, S_DLUT = 5, S_DEXE = 6, S_BYP = 7,
-           S_TERM = 8, S_PCM = 9, S_SKIP = 10, S_RSIG = 11, S_RPOP = 12, S_PCM2 = 13;
+           S_TERM = 8, S_PCM = 9, S_SKIP = 10, S_RSIG = 11, S_RPOP = 12, S_PCM2 = 13, S_PCMH = 14;
 reg  [3:0] st;
 reg  [9:0] dctx;                  // context of the decision being decoded
 assign busy = st != S_IDLE;
@@ -95,7 +96,9 @@ reg  [3:0] bcnt;                  // bytes in bb
 reg [15:0] look;
 reg  [4:0] vbits;                 // bits in look
 reg [31:0] bytes_in;              // bytes moved into look since the slice start
-reg [31:0] skipn;                 // bytes to drop (I_PCM)
+reg [31:0] skipn;                 // sample bytes still to take from bb (I_PCM)
+reg [15:0] pcm_hold;              // sample bytes already in look (I_PCM)
+reg  [1:0] pcm_hn;
 assign in_ready = !reset && bcnt <= 4'd4 && st != S_INIT;
 
 // ---------------------------------------------------------------- contexts
@@ -446,10 +449,12 @@ always @(posedge clk) begin
 		end
 
 		// I_PCM: the samples start at the byte boundary after the bits taken
-		// (bytes_in * 8 - vbits); the look-ahead is dropped, then the stream
-		// up to the end of the 384 bytes
+		// (bytes_in * 8 - vbits); the whole bytes still in look are the first
+		// samples, the others come from bb
 		S_PCM: begin
 			out_val <= (({bytes_in[28:0], 3'd0} - {27'd0, vbits}) + 32'd7) >> 3;
+			pcm_hold <= look << vbits[2:0];
+			pcm_hn <= vbits[4:3];
 			look <= 16'd0;
 			vbits <= 5'd0;
 			took = 1'b1;
@@ -458,9 +463,23 @@ always @(posedge clk) begin
 		S_PCM2: begin
 			out_valid <= 1'b1;
 			out_kind <= 2'd3;
-			skipn <= out_val + 32'd384 - bytes_in;
+			out_pos <= 7'd0;
+			skipn <= 32'd384 - {30'd0, pcm_hn};
 			took = 1'b1;
-			st <= S_SKIP;
+			st <= S_PCMH;
+		end
+		S_PCMH: begin
+			took = 1'b1;
+			if (pcm_hn != 2'd0) begin
+				out_valid <= 1'b1;
+				out_kind <= 2'd3;
+				out_pos <= 7'd1;
+				out_val <= {24'd0, pcm_hold[15:8]};
+				pcm_hold <= pcm_hold << 8;
+				pcm_hn <= pcm_hn - 2'd1;
+			end
+			else
+				st <= S_SKIP;
 		end
 		S_SKIP: begin
 			took = 1'b1;
@@ -469,6 +488,10 @@ always @(posedge clk) begin
 				st <= S_LOAD;
 			end
 			else if (bcnt != 4'd0) begin
+				out_valid <= 1'b1;
+				out_kind <= 2'd3;
+				out_pos <= 7'd1;
+				out_val <= {24'd0, bb[63:56]};
 				bb <= bb << 8;
 				bcnt <= bcnt - 4'd1;
 				bytes_in <= bytes_in + 32'd1;
