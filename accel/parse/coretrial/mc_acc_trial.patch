@@ -1,0 +1,31 @@
+--- a/fpga/menu/rtl/mc_acc.sv
++++ b/fpga/menu/rtl/mc_acc.sv
+@@ -84,6 +84,28 @@
+ 	.pic_done(e_done), .pic_slot(e_slot), .error(e_err), .mb_count(e_mbs)
+ );
+ 
++// ================================================================ MEASURE ONLY: acc_parse (4.0)
++// Not connected to anything real: fed from the ring reads, memory answered at
++// once, outputs folded into a kept register, so the fitter keeps all of it.
++wire        ap_in_ready, ap_out_valid, ap_mem_req, ap_mem_we, ap_done, ap_err, ap_busy;
++wire [31:0] ap_out, ap_mem_addr, ap_mem_wdata;
++reg         ap_rv = 0;
++acc_parse ap
++(
++	.clk(clk), .reset(e_reset),
++	.in_valid(f_rx && f_rx_kind == K_RING), .in_ready(ap_in_ready), .in_data(f_dout[31:0]),
++	.out_valid(ap_out_valid), .out_ready(1'b1), .out_data(ap_out),
++	.mem_req(ap_mem_req), .mem_we(ap_mem_we), .mem_addr(ap_mem_addr), .mem_wdata(ap_mem_wdata),
++	.mem_ack(ap_mem_req), .mem_rvalid(ap_rv), .mem_rdata(f_dout[63:32]),
++	.sl_done(ap_done), .sl_err(ap_err), .busy(ap_busy)
++);
++(* noprune *) reg [31:0] ap_keep;
++always @(posedge clk) begin
++	ap_rv <= ap_mem_req && !ap_mem_we;
++	ap_keep <= ap_keep ^ (ap_out_valid ? ap_out : 32'd0) ^ (ap_mem_req ? ap_mem_addr ^ ap_mem_wdata : 32'd0)
++	           ^ {27'd0, ap_in_ready, ap_done, ap_err, ap_busy, ap_mem_we};
++end
++
+ // ================================================================ request queue
+ // Every transfer (the engine's, the ring, page table and mailbox reads, the
+ // answer) goes through this queue, in order. Reads also leave a tag saying
