@@ -621,7 +621,8 @@ localparam
 	S_PTE = 130, S_IMA = 131, S_SB8 = 132, S_SB9 = 133, S_SP1 = 134, S_SP2 = 135, S_SP3 = 136,
 	S_P8E = 137, S_RF3 = 138, S_PV3 = 139, S_T8B = 140, S_ERW = 141, S_PRN = 142,
 	S_TP0 = 143, S_TP1 = 144, S_TP2 = 145, S_TP3 = 146, S_TP4 = 147,
-	S_PMA = 148, S_PMB = 149, S_PMC = 150, S_PMD = 151;
+	S_PMA = 148, S_PMB = 149, S_PMC = 150, S_PMD = 151,
+	S_SDA = 152, S_SDB = 153, S_SDC = 154;
 
 // ---------------------------------------------------------------- tasks (cache writes)
 task automatic dec(input [9:0] c, input [7:0] nx);
@@ -2064,34 +2065,49 @@ always @(posedge clk) begin
 			if (s_sp) st <= S_SD0;
 			else begin rs1 <= S_TP0; st <= S_CF0; end
 		end
-		// spatial: references and vectors from the neighbours
+		// spatial: references and vectors from the neighbours, one list at a time
+		// through the shared predictor (block 0, width 4: A=11, B=4, C=8 or D=3).
+		// ref = min of the neighbour refs, so at least one matches and
+		// pred_motion gives the same vector as the direct rule.
 		S_SD0: begin
+			pm_n <= 4'd0;
+			pm_pw <= 3'd4;
+			pm_l <= 1'b0;
+			pm_mode <= 2'd0;
+			pm_ret <= S_SDA;
+			st <= S_PMA;
+		end
+		S_SDA: begin
+			reg signed [5:0] rc;
+			reg [5:0] m;
+			rc = pr_c != -6'sd2 ? pr_c : pr_d;
+			m = $unsigned(pr_a) < $unsigned(pr_b) ? pr_a : pr_b;
+			m = $unsigned(m) < $unsigned(rc) ? m : rc;
+			pm_ref <= m;
+			st <= S_SDB;
+		end
+		S_SDB: begin
+			if (pm_ref >= 0) begin
+				dr_ref[pm_l] <= pm_ref;
+				dr_mv[pm_l] <= {pm_my, pm_mx};
+			end
+			else begin
+				dr_ref[pm_l] <= -6'sd1;
+				dr_mv[pm_l] <= 32'd0;
+			end
+			if (!pm_l) begin pm_l <= 1'b1; st <= S_PMA; end
+			else st <= S_SDC;
+		end
+		S_SDC: begin
 			reg signed [5:0] rr[0:1];
 			reg [31:0] mm[0:1];
 			reg [31:0] t, sb;
 			t = mbt;
 			sb = MT_L0L1;
 			for (int l = 0; l < 2; l++) begin
-				reg signed [5:0] lr, tr, rc;
-				reg [31:0] A, B, C;
-				reg [5:0] m;
-				lr = rfr(l, 7'(11)); tr = rfr(l, 7'(4)); rc = rfr(l, 7'(8)); C = mvr(l, 7'(8));
-				if (rc == -6'sd2) begin rc = rfr(l, 7'(3)); C = mvr(l, 7'(3)); end
-				A = mvr(l, 7'(11)); B = mvr(l, 7'(4));
-				m = $unsigned(lr) < $unsigned(tr) ? lr : tr;
-				m = $unsigned(m) < $unsigned(rc) ? m : rc;
-				rr[l] = m;
-				if (rr[l] >= 0) begin
-					reg [1:0] mc;
-					mc = {1'b0, lr == rr[l]} + {1'b0, tr == rr[l]} + {1'b0, rc == rr[l]};
-					if (mc > 2'd1) mm[l] = {mid_pred(A[31:16], B[31:16], C[31:16]), mid_pred(A[15:0], B[15:0], C[15:0])};
-					else if (lr == rr[l]) mm[l] = A;
-					else if (tr == rr[l]) mm[l] = B;
-					else mm[l] = C;
-				end
-				else begin
-					mm[l] = 32'd0;
-					rr[l] = -6'sd1;
+				rr[l] = dr_ref[l];
+				mm[l] = dr_mv[l];
+				if (rr[l] < 0) begin
 					if (!dr_b8) t = t & ~(l ? MT_L1 : MT_L0);
 					sb = sb & ~(l ? MT_L1 : MT_L0);
 				end
