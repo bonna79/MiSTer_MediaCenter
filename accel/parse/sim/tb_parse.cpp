@@ -81,7 +81,7 @@ int main(int argc, char **argv)
 	FILE *f = stdin;
 	static char buf[1 << 20];
 	setvbuf(f, buf, _IOFBF, sizeof(buf));
-	long npics = 0, nslices = 0, nerr = 0, nskip = 0, nslerr = 0;
+	long npics = 0, nslices = 0, nerr = 0, nskip = 0, nslerr = 0, nspat = 0, ntemp = 0, nimpl = 0;
 	uint64_t nwords = 0, pic_clk0 = 0, worst = 0, worst_busy = 0, pic_busy0 = 0;
 	bool have_pic = false;
 	int last_pic = -1;
@@ -199,6 +199,8 @@ int main(int argc, char **argv)
 		for (int i = 0; i < (nb + 3) / 4; i++)
 			w.push_back((uint32_t)data[4 * i] << 24 | data[4 * i + 1] << 16 | data[4 * i + 2] << 8 | data[4 * i + 3]);
 		nslices++;
+		if (type == 1) { if (sp) nspat++; else ntemp++; }
+		if (uw == 2) nimpl++;
 		// feed it, then run until the slice is done
 		size_t k = 0;
 		bool done = false;
@@ -225,6 +227,7 @@ int main(int argc, char **argv)
 	       "%llu colpi (%.1f s a 108 MHz), immagine peggiore %.1f ms, al lavoro %.1f ms\n",
 	       name, npics, nslices, (unsigned long long)nwords, nerr, nslerr, (unsigned long long)clk_count,
 	       clk_count / 108e6, worst / 108e3, worst_busy / 108e3);
+	fprintf(stderr, "%s: slice B diretto spaziale %ld, temporale %ld, pesi impliciti %ld\n", name, nspat, ntemp, nimpl);
 	if (nskip) printf("%s: %ld immagini senza slice CABAC\n", name, nskip);
 	delete top;
 	return nerr != 0 || nslerr != 0;

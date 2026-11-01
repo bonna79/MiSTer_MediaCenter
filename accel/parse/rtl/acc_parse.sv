@@ -223,10 +223,39 @@ reg signed [4:0] s_cqo0, s_cqo1;
 reg signed [7:0] s_alpha, s_beta;
 wire        s_B = s_type == 2'd1, s_I = s_type == 2'd2;
 
-reg signed [15:0] dsf[0:31];
+// descriptor tables, in block RAM (one write port fed by the descriptor, one read port)
+reg  [15:0] dsf[0:31];
 reg   [7:0] mapc[0:63];
 reg   [8:0] iw_ram[0:1023];
-reg  [31:0] smw[0:55];
+reg  [31:0] smw[0:63];
+reg         t_we;                   // table write: t_sel 0 dsf, 1 mapc, 2 iw, 3 smw
+reg   [1:0] t_sel;
+reg   [9:0] t_wa;
+reg  [31:0] t_wd;
+reg   [4:0] ds_ra;
+reg   [5:0] mp_ra;
+wire  [9:0] iw_ra;
+wire  [5:0] sm_rw;
+reg  [15:0] ds_q;
+reg   [7:0] mp_q;
+reg   [8:0] iw_q;
+reg  [31:0] sm_q;
+always @(posedge clk) begin
+	if (t_we && t_sel == 2'd0) dsf[t_wa[4:0]] <= t_wd[15:0];
+	ds_q <= dsf[ds_ra];
+end
+always @(posedge clk) begin
+	if (t_we && t_sel == 2'd1) mapc[t_wa[5:0]] <= t_wd[7:0];
+	mp_q <= mapc[mp_ra];
+end
+always @(posedge clk) begin
+	if (t_we && t_sel == 2'd2) iw_ram[t_wa] <= t_wd[8:0];
+	iw_q <= iw_ram[iw_ra];
+end
+always @(posedge clk) begin
+	if (t_we && t_sel == 2'd3) smw[t_wa[5:0]] <= t_wd;
+	sm_q <= smw[sm_rw];
+end
 reg   [7:0] sm0[0:5];             // scaling_matrix4 [l][0]
 
 assign cab_in_valid = data_on && in_valid && dleft != 30'd0 && st != S_DRAIN;
@@ -288,7 +317,12 @@ reg  [15:0] cram[0:383];
 reg   [8:0] cr_wa;
 reg  [15:0] cr_wd, cr_q;
 reg         cr_we;
-always @(posedge clk) if (cr_we) cram[cr_wa] <= cr_wd;
+wire  [8:0] cr_ra;
+wire        cr_re;
+always @(posedge clk) begin
+	if (cr_we) cram[cr_wa] <= cr_wd;
+	if (cr_re) cr_q <= cram[cr_ra];
+end
 reg [383:0] bm;                     // non-zero coefficient at bit block * 16 + position
 reg   [8:0] ncoef;
 reg  [31:0] pcm[0:95];
@@ -316,12 +350,14 @@ reg   [3:0] c0_d;
 reg   [1:0] c0_by;
 reg  [21:0] c1_q;
 reg  [21:0] c2_pr;
-reg   [5:0] sm_ra;
 reg   [4:0] sc_blk_r;
 reg   [5:0] sc_p_r;
 
 // col picture (direct)
 reg  [31:0] colty;
+reg   [7:0] rrk[0:3];
+reg  [15:0] sck[0:3];
+reg   [1:0] tk;
 reg  signed [7:0] colr0[0:3], colr1[0:3];
 reg  [31:0] colm0[0:15], colm1[0:15];
 reg   [5:0] mc_i, mc_r;
@@ -484,7 +520,8 @@ localparam
 	S_SD0 = 118, S_SD1 = 119, S_SD2 = 120, S_TD1 = 121, S_TD2 = 122, S_TD3 = 123,
 	S_CF0 = 124, S_CF1 = 125, S_DR0 = 126, S_MV4 = 127, S_RF2 = 128, S_PSK1 = 129,
 	S_PTE = 130, S_IMA = 131, S_SB8 = 132, S_SB9 = 133, S_SP1 = 134, S_SP2 = 135, S_SP3 = 136,
-	S_P8E = 137, S_RF3 = 138, S_PV3 = 139, S_T8B = 140, S_ERW = 141, S_PRN = 142;
+	S_P8E = 137, S_RF3 = 138, S_PV3 = 139, S_T8B = 140, S_ERW = 141, S_PRN = 142,
+	S_TP0 = 143, S_TP1 = 144, S_TP2 = 145, S_TP3 = 146, S_TP4 = 147;
 
 // ---------------------------------------------------------------- tasks (cache writes)
 task automatic dec(input [9:0] c, input [7:0] nx);
@@ -647,6 +684,7 @@ wire  [5:0] qrec = cur_pcm ? 6'd0 : qs;
 
 always @(posedge clk) begin
 	of_we <= 1'b0;
+	t_we <= 1'b0;
 	cr_we <= 1'b0;
 	rb_we <= 1'b0;
 	sl_done <= 1'b0;
@@ -716,17 +754,17 @@ always @(posedge clk) begin
 				dpart <= (s_B && !s_sp) ? 4'd5 : s_uw == 2'd2 ? 4'd7 : 4'd8;
 			end
 			4'd5: begin
-				dsf[dcnt[4:0]] <= in_data[15:0];
+				t_we <= 1'b1; t_sel <= 2'd0; t_wa <= {5'd0, dcnt[4:0]}; t_wd <= in_data;
 				dcnt <= dcnt[4:0] == 5'd31 ? 7'd0 : dcnt + 7'd1;
 				if (dcnt[4:0] == 5'd31) dpart <= 4'd6;
 			end
 			4'd6: begin
-				mapc[dcnt[5:0]] <= in_data[7:0];
+				t_we <= 1'b1; t_sel <= 2'd1; t_wa <= {4'd0, dcnt[5:0]}; t_wd <= in_data;
 				dcnt <= dcnt[5:0] == 6'd63 ? 7'd0 : dcnt + 7'd1;
 				if (dcnt[5:0] == 6'd63) dpart <= s_uw == 2'd2 ? 4'd7 : 4'd8;
 			end
 			4'd7: begin
-				iw_ram[{iw0, iw1}] <= in_data[8:0];
+				t_we <= 1'b1; t_sel <= 2'd2; t_wa <= {iw0, iw1}; t_wd <= in_data;
 				if ({1'b0, iw1} == s_rc1 - 6'd1) begin
 					iw1 <= 5'd0;
 					iw0 <= iw0 + 5'd1;
@@ -735,13 +773,13 @@ always @(posedge clk) begin
 				else iw1 <= iw1 + 5'd1;
 			end
 			4'd8: begin
-				smw[dcnt[5:0]] <= in_data;
+				t_we <= 1'b1; t_sel <= 2'd3; t_wa <= {4'd0, dcnt[5:0]}; t_wd <= in_data;
 				if (dcnt[1:0] == 2'd0) sm0[dcnt[4:2]] <= in_data[7:0];
 				dcnt <= dcnt == 7'd23 ? 7'd0 : dcnt + 7'd1;
 				if (dcnt == 7'd23) dpart <= s_t8 ? 4'd9 : 4'd10;
 			end
 			4'd9: begin
-				smw[6'd24 + dcnt[5:0]] <= in_data;
+				t_we <= 1'b1; t_sel <= 2'd3; t_wa <= {4'd0, 6'd24 + dcnt[5:0]}; t_wd <= in_data;
 				dcnt <= dcnt + 7'd1;
 				if (dcnt == 7'd31) dpart <= 4'd10;
 			end
@@ -1797,7 +1835,7 @@ always @(posedge clk) begin
 				s8 = f_scan8({2'd0, ok[1:0] - 2'd1, 2'b00});
 				r0 = uses(mbt, 1'b0) ? refc[0][s8] : -6'sd1;
 				r1 = s_lc > 2'd1 && uses(mbt, 1'b1) ? refc[1][s8] : -6'sd1;
-				wt = iw_ram[{r0[4:0], r1[4:0]}];
+				wt = iw_q;
 				w = {7'd0, (r0 >= 0 && r1 >= 0 && s_uw == 2'd2) ? wt : 9'd32, 2'd0, r1 < 0, r1[5:0], r0 < 0, r0[5:0]};
 			end
 			else begin
@@ -1833,12 +1871,10 @@ always @(posedge clk) begin
 				if (sc_g < 5'd16 && (mbt & MT_DCT) != 0) begin
 					blk = {1'b0, sc_g[3:2], 2'b00};
 					p = {sc_g[1:0], sc_b};
-					cr_q <= cram[{1'b0, sc_g[3:2], t8(p)}];
 				end
 				else begin
 					blk = sc_g;
 					p = {2'd0, sc_b};
-					cr_q <= cram[{sc_g, t4(sc_b)}];
 				end
 				sc_blk_r <= blk;
 				sc_p_r <= p;
@@ -1960,7 +1996,7 @@ always @(posedge clk) begin
 		S_DR0: begin
 			dr_b8 <= (mbt & MT_88) != 0;
 			if (s_sp) st <= S_SD0;
-			else begin rs1 <= S_TD1; st <= S_CF0; end
+			else begin rs1 <= S_TP0; st <= S_CF0; end
 		end
 		// spatial: references and vectors from the neighbours
 		S_SD0: begin
@@ -2106,6 +2142,23 @@ always @(posedge clk) begin
 				dr_i8 <= dr_i8 + 3'd1;
 			end
 		end
+		// temporal: map_col_to_list0 and dist_scale_factor of the 4 co-located 8x8 blocks
+		S_TP0: begin
+			mp_ra <= colr0[tk] >= 0 ? {1'b0, colr0[tk][4:0]} : {1'b1, colr1[tk][4:0]};
+			st <= S_TP1;
+		end
+		S_TP1: st <= S_TP2;
+		S_TP2: begin
+			rrk[tk] <= mp_q;
+			ds_ra <= mp_q[4:0];
+			st <= S_TP3;
+		end
+		S_TP3: st <= S_TP4;
+		S_TP4: begin
+			sck[tk] <= ds_q;
+			tk <= tk + 2'd1;
+			st <= tk == 2'd3 ? S_TD1 : S_TP0;
+		end
 		// temporal
 		S_TD1: begin
 			reg [31:0] t, sb;
@@ -2165,14 +2218,13 @@ always @(posedge clk) begin
 						reg signed [31:0] px, py, mx, my;
 						reg signed [15:0] cx, cy;
 						r0 = colr0[i8];
-						if (r0 >= 0) begin rr = $signed(mapc[{1'b0, r0[4:0]}]); end
-						else begin rr = $signed(mapc[{1'b1, colr1[i8][4:0]}]); end
+						rr = $signed(rrk[i8]);
 						if (sub8) ci = {i8[1], i8[1], i8[0], i8[0]};
 						else ci = {i8[1], dr_i4[1], i8[0], dr_i4[0]};
 						cm = r0 >= 0 ? colm0[ci] : colm1[ci];
 						cx = cm[15:0]; cy = cm[31:16];
-						px = dsf[rr[4:0]] * cx + 32'sd128;
-						py = dsf[rr[4:0]] * cy + 32'sd128;
+						px = $signed(sck[i8]) * cx + 32'sd128;
+						py = $signed(sck[i8]) * cy + 32'sd128;
 						mx = px >>> 8;
 						my = py >>> 8;
 						if (sub8) begin
@@ -2207,6 +2259,7 @@ always @(posedge clk) begin
 		end
 		// co-located macroblock from the motion memory (35 words)
 		S_CF0: begin
+			tk <= 2'd0;
 			mc_i <= 6'd0;
 			mc_r <= 6'd0;
 			mr_base <= {24'd0, s_col} * SLOT_WORDS + mb_lin * 32'd36;
@@ -2262,7 +2315,6 @@ always @(posedge clk) begin
 				c0_8 <= r_cat == 3'd5;
 				c0_m <= qmod(r_qp);
 				c0_d <= qdiv(r_qp);
-				sm_ra <= smi[7:2];
 				c0_by <= smi[1:0];
 			end
 		end
@@ -2270,7 +2322,7 @@ always @(posedge clk) begin
 		if (c0_v) begin
 			reg [10:0] f;
 			reg [7:0] sm;
-			sm = 8'(smw[sm_ra] >> {c0_by, 3'd0});
+			sm = 8'(sm_q >> {c0_by, 3'd0});
 			f = c0_8 ? 11'(d8init(c0_m, d8scan({c0_p[4:3], c0_p[1:0]}))) : 11'(d4init(c0_m, {1'b0, c0_p[0]} + {1'b0, c0_p[2]}));
 			c1_s <= c0_s; c1_j <= c0_j; c1_p <= c0_p; c1_b <= c0_b;
 			c1_q <= 22'({11'd0, f} * {14'd0, sm} << (c0_8 ? {1'b0, c0_d} : {1'b0, c0_d} + 5'd2));
@@ -2295,6 +2347,33 @@ always @(posedge clk) begin
 	end
 end
 
+
+// ---------------------------------------------------------------- RAM read addresses
+// scaling matrix word of the coefficient cab_dec gives now (stage 0)
+reg  [7:0] smi_c;
+always @(*) begin
+	reg [5:0] j, p;
+	if (r_cat == 3'd5) begin j = f_zz8(cab_pos[5:0]); p = t8(j); end
+	else begin
+		j = {2'd0, f_zz4(r_cat == 3'd2 ? cab_pos[3:0] : cab_pos[3:0] + 4'd1)};
+		p = {2'd0, t4(j[3:0])};
+	end
+	smi_c = r_cat == 3'd5 ? 8'd96 + {1'b0, r_list[0], p} : {1'b0, r_list, 4'd0} + {2'd0, p};
+end
+assign sm_rw = smi_c[7:2];
+// implicit weight of the partition whose refs word goes out next (S_O3)
+reg  [9:0] iw_c;
+always @(*) begin
+	reg [1:0] pt;
+	reg [6:0] s8;
+	pt = of_room ? ok[1:0] : ok[1:0] - 2'd1;
+	s8 = f_scan8({2'd0, pt, 2'b00});
+	iw_c = {refc[0][s8][4:0], refc[1][s8][4:0]};
+end
+assign iw_ra = iw_c;
+// coefficient word of the output scan
+assign cr_re = st == S_O5 && of_room && grp != 24'd0;
+assign cr_ra = (sc_g < 5'd16 && (mbt & MT_DCT) != 0) ? {1'b0, sc_g[3:2], t8({sc_g[1:0], sc_b})} : {sc_g, t4(sc_b)};
 
 endmodule
 `default_nettype wire
