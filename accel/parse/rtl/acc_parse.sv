@@ -702,6 +702,8 @@ reg   [4:0] rq;
 reg   [4:0] dck;
 reg  signed [17:0] tmp[0:15];
 reg  [23:0] qmul_dc;
+reg         td_ph;                  // temporal direct: 0 scale, 1 write
+reg  [15:0] td_mx, td_my, td_cx, td_cy;
 reg   [5:0] ok;                     // output counter
 reg         sc_pend;
 reg   [3:0] sc_blk;
@@ -2239,6 +2241,7 @@ always @(posedge clk) begin
 			dr_sub <= sb;
 			dr_i8 <= (t & MT_16) != 0 ? 3'd7 : 3'd0;
 			dr_i4 <= 2'd0;
+			td_ph <= 1'b0;
 			st <= S_TD2;
 		end
 		S_TD2: begin
@@ -2292,29 +2295,34 @@ always @(posedge clk) begin
 						py = $signed(sck[i8]) * cy + 32'sd128;
 						mx = px >>> 8;
 						my = py >>> 8;
-						if (sub8) begin
+						// two clocks a block: scale into td_*, then write the caches
+						if (!td_ph) begin
+							td_mx <= mx[15:0]; td_my <= my[15:0];
+							td_cx <= cx; td_cy <= cy;
+							td_ph <= 1'b1;
+						end
+						else if (sub8) begin
+							td_ph <= 1'b0;
 							if (is16) begin
 								fref(1'b0, 7'd12, 3'd4, 3'd4, rr[5:0]);
-								fmv(1'b0, 7'd12, 3'd4, 3'd4, {my[15:0], mx[15:0]});
-								fmv(1'b1, 7'd12, 3'd4, 3'd4, {16'(my - cy), 16'(mx - cx)});
+								fmv(1'b0, 7'd12, 3'd4, 3'd4, {td_my, td_mx});
+								fmv(1'b1, 7'd12, 3'd4, 3'd4, {td_my - td_cy, td_mx - td_cx});
 								st <= rsd;
 							end
 							else begin
 								fref(1'b0, s8, 3'd2, 3'd2, rr[5:0]);
-								fmv(1'b0, s8, 3'd2, 3'd2, {my[15:0], mx[15:0]});
-								fmv(1'b1, s8, 3'd2, 3'd2, {16'(my - cy), 16'(mx - cx)});
+								fmv(1'b0, s8, 3'd2, 3'd2, {td_my, td_mx});
+								fmv(1'b1, s8, 3'd2, 3'd2, {td_my - td_cy, td_mx - td_cx});
 								dr_i8 <= dr_i8 + 3'd1;
 							end
 						end
 						else begin
 							reg [6:0] e;
-							reg signed [15:0] lx, ly;
+							td_ph <= 1'b0;
 							e = s8 + (dr_i4[0] ? 7'd1 : 7'd0) + (dr_i4[1] ? 7'd8 : 7'd0);
 							if (dr_i4 == 2'd0) fref(1'b0, s8, 3'd2, 3'd2, rr[5:0]);
-							lx = mx[15:0];
-							ly = my[15:0];
-							fmv(1'b0, e, 3'd1, 3'd1, {ly, lx});
-							fmv(1'b1, e, 3'd1, 3'd1, {16'(ly - cy), 16'(lx - cx)});
+							fmv(1'b0, e, 3'd1, 3'd1, {td_my, td_mx});
+							fmv(1'b1, e, 3'd1, 3'd1, {td_my - td_cy, td_mx - td_cx});
 							dr_i4 <= dr_i4 + 2'd1;
 							if (dr_i4 == 2'd3) dr_i8 <= dr_i8 + 3'd1;
 						end
