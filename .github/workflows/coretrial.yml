@@ -46,6 +46,11 @@ jobs:
           		}
           	}
           }
+          set_operating_conditions -model slow -temperature 100 -voltage 1100
+          update_timing_netlist
+          foreach_in_collection p [get_timing_paths -setup -npaths 40 -nworst 1] {
+          	puts [format "PATH %8.3f %s <- %s" [get_path_info $p -slack] [get_node_info -name [get_path_info $p -to]] [get_node_info -name [get_path_info $p -from]]]
+          }
           delete_timing_netlist
           project_close
           TCL
@@ -54,4 +59,6 @@ jobs:
           cat fpga/menu/output_files/menu.fit.summary
           grep -A12 "; Fitter Resource Usage Summary" fpga/menu/output_files/menu.fit.rpt | head -20 || true
           docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
-            quartus_sta -t slack.tcl 2>&1 | grep "^SLACK" | sort -k3 -n
+            quartus_sta -t slack.tcl > slack.log 2>&1 || true
+          grep "^SLACK" slack.log | sort -k3 -n
+          grep "^PATH" slack.log | cut -c1-220
