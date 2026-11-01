@@ -306,8 +306,40 @@ function automatic [3:0] ix(input [6:0] p);
 endfunction
 // interior (rows 1..4, columns 4..7): 16 places per list, index (row - 1) * 4 + column - 4
 reg  signed [5:0] refc[0:1][0:15];
-reg  [31:0] mvc[0:1][0:15];
-reg  [13:0] mvdc[0:1][0:15];
+// vector (kind 0) and mvd (kind 1) interior, per list: a quadrant written whole
+// is kept in cq_v (cq_full), a place written 0 alone in cq_ovr, the rest in
+// small RAMs, one per place of the quadrant (j), address = quadrant; a RAM
+// write lands a clock later (cw_*) and is forwarded meanwhile
+reg  [1:0][1:0][3:0]  cq_full;
+reg  [31:0] cq_v[0:1][0:1][0:3];
+reg  [1:0][1:0][15:0] cq_ovr;
+reg  [1:0][1:0][3:0]  cw_we;
+reg  [1:0][1:0][1:0]  cw_a;
+reg  [31:0] cw_d[0:1][0:1][0:3];
+wire [31:0] cm_q[0:1][0:1][0:3];
+wire  [1:0] cm_ra;
+genvar gk, gl, gj;
+generate for (gk = 0; gk < 2; gk++) begin : g_ck
+	for (gl = 0; gl < 2; gl++) begin : g_cl
+		for (gj = 0; gj < 4; gj++) begin : g_cj
+			localparam W = gk ? 14 : 32;
+			wire [W-1:0] q;
+			acc_mlab #(.W(W)) u_m(.clk(clk), .we(cw_we[gk][gl][gj]), .wa(cw_a[gk][gl]),
+				.wd(cw_d[gk][gl][gj][W-1:0]), .ra(cm_ra), .q(q));
+			assign cm_q[gk][gl][gj] = 32'(q);
+		end
+	end
+end endgenerate
+// interior value at p (cm_ra must be p's quadrant)
+function automatic [31:0] cint(input logic k, input logic l, input [6:0] p);
+	reg [1:0] x, y, q, j;
+	reg [3:0] e;
+	reg [31:0] r;
+	x = p[1:0]; y = 2'(p[5:3] - 3'd1);
+	e = {y, x}; q = {y[1], x[1]}; j = {y[0], x[0]};
+	r = cw_we[k][l][j] && cw_a[k][l] == q ? cw_d[k][l][j] : cm_q[k][l][j];
+	cint = cq_ovr[k][l][e] ? 32'd0 : cq_full[k][l][q] ? cq_v[k][l][q] : r;
+endfunction
 // neighbours of the macroblock (row 0, column 3; column 8 of rows 1..4 is
 // never available): what fill_decode_caches would copy, read from the records
 function automatic signed [5:0] rfr(input logic l, input [6:0] p);
@@ -336,7 +368,7 @@ function automatic [31:0] mvr(input logic l, input [6:0] p);
 	else if (p == 7'd3) v = uses(tl_ty, l) ? (l ? tlr.mv[255:224] : tlr.mv[127:96]) : 32'd0;
 	else if (p[5:3] == 3'd0) v = uses(t_ty, l) ? 32'(tm >> {l, p[1:0], 5'd0}) : 32'd0;
 	else if (p[2:0] == 3'd3) v = uses(l_ty, l) ? 32'(lm >> {l, y[1:0], 5'd0}) : 32'd0;
-	else v = mvc[l][ix(p)];
+	else v = cint(1'b0, l, p);
 	mvr = v;
 endfunction
 function automatic [13:0] mdr(input logic l, input [6:0] p);
@@ -348,7 +380,7 @@ function automatic [13:0] mdr(input logic l, input [6:0] p);
 	if (p[2:0] == 3'd0 || p == 7'd3) v = 14'd0;
 	else if (p[5:3] == 3'd0) v = uses(t_ty, l) ? 14'(tm >> ({l, p[1:0]} * 14)) : 14'd0;
 	else if (p[2:0] == 3'd3) v = uses(l_ty, l) ? 14'(lm >> ({l, y[1:0]} * 14)) : 14'd0;
-	else v = mvdc[l][ix(p)];
+	else v = 14'(cint(1'b1, l, p));
 	mdr = v;
 endfunction
 reg [119:0] nzc;
@@ -362,6 +394,8 @@ reg   [6:0] cr_a;                   // {list, scan8 index}
 wire [31:0] cv_q = mvr(cr_a[6], 7'(cr_a[5:0]));
 wire [13:0] cd_q = mdr(cr_a[6], 7'(cr_a[5:0]));
 wire signed [5:0] cf_q = rfr(cr_a[6], 7'(cr_a[5:0]));
+wire  [2:0] cr_y = cr_a[5:3] - 3'd1;
+assign cm_ra = {cr_y[1], cr_a[1]};
 // neighbours of the block being predicted, read one a clock (S_PMA..S_PMD)
 reg  [31:0] pv_a, pv_b, pv_c, pv_d;
 reg  signed [5:0] pr_a, pr_b, pr_c, pr_d;
@@ -1972,10 +2006,6 @@ always @(posedge clk) begin
 			for (int ls = 0; ls < 2; ls++) begin
 				t.rf[ls * 12 +: 6] = rfr(ls, 7'(28));
 				t.rf[ls * 12 + 6 +: 6] = rfr(ls, 7'(30));
-				for (int k = 0; k < 4; k++) begin
-					t.mv[ls * 128 + k * 32 +: 32] = mvr(ls, 7'(36 + k));
-					t.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mdr(ls, 7'(36 + k));
-				end
 			end
 			l = t;
 			l.i4 = i4snap_r;
@@ -1984,12 +2014,10 @@ always @(posedge clk) begin
 			for (int ls = 0; ls < 2; ls++) begin
 				l.rf[ls * 12 +: 6] = rfr(ls, 7'(14));
 				l.rf[ls * 12 + 6 +: 6] = rfr(ls, 7'(30));
-				for (int k = 0; k < 4; k++) begin
-					l.mv[ls * 128 + k * 32 +: 32] = mvr(ls, 7'(15 + 8 * k));
-					l.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mdr(ls, 7'(15 + 8 * k));
-				end
 			end
-			rb_we <= 1'b1;
+			// vector fields: shifted in by S_E1 (bottom row -> top record, right column -> left record)
+			t.mv = rb_wd.mv; t.mvd = rb_wd.mvd;
+			l.mv = lrec.mv; l.mvd = lrec.mvd;
 			rb_wa <= mbx;
 			rb_wd <= t;
 			lrec <= l;
@@ -2003,6 +2031,7 @@ always @(posedge clk) begin
 			if (!mem_req || mem_ack) begin
 				if (mr_k == 6'd35) begin
 					mem_req <= 1'b0;
+					rb_we <= 1'b1;
 					st <= S_E2;
 				end
 				else begin
@@ -2019,6 +2048,15 @@ always @(posedge clk) begin
 						reg [4:0] k;
 						k = 5'(mr_k - 6'd3);
 						w = cv_q;
+						// k runs in order: the vectors are shifted in, lowest index first
+						if (k[3:2] == 2'd3) begin
+							rb_wd.mv <= {cv_q, rb_wd.mv[255:32]};
+							rb_wd.mvd <= {(mbt & MT_SKIP) != 0 ? 14'd0 : cd_q, rb_wd.mvd[111:14]};
+						end
+						if (k[1:0] == 2'd3) begin
+							lrec.mv <= {cv_q, lrec.mv[255:32]};
+							lrec.mvd <= {(mbt & MT_SKIP) != 0 ? 14'd0 : cd_q, lrec.mvd[111:14]};
+						end
 					end
 					mem_req <= 1'b1;
 					mem_we <= 1'b1;
@@ -2391,9 +2429,54 @@ always @(posedge clk) begin
 		// cache write buses
 		// (interior places only; the -2 of column 8 is constant in rfr)
 		for (int l = 0; l < 2; l++) for (int i = 12; i < 40; i++) if (i % 8 >= 4) begin
-			if (mvw_m[l][i] || mvw_z[l][i]) mvc[l][ix(7'(i))] <= mvw_z[l][i] ? 32'd0 : mvw_v[l];
-			if (mdw_m[l][i] || mdw_z[l][i]) mvdc[l][ix(7'(i))] <= mdw_z[l][i] ? 14'd0 : mdw_v[l];
 			if (rfw_m[l][i] || rfw_n[l][i]) refc[l][ix(7'(i))] <= rfw_n[l][i] ? -6'sd2 : rfw_v[l];
+		end
+		// vector / mvd interior: whole quadrants, lone zeros, the rest (one quadrant) to the RAMs
+		for (int k = 0; k < 2; k++) for (int l = 0; l < 2; l++) begin
+			reg [39:0] bm_, bz_;
+			reg [31:0] v;
+			reg [15:0] m, z, vm, no, qm;
+			reg [3:0] we;
+			int np;
+			bm_ = k ? mdw_m[l] : mvw_m[l];
+			bz_ = k ? mdw_z[l] : mvw_z[l];
+			v = k ? 32'(mdw_v[l]) : mvw_v[l];
+			for (int e = 0; e < 16; e++) begin
+				m[e] = bm_[12 + (e % 4) + 8 * (e / 4)];
+				z[e] = bz_[12 + (e % 4) + 8 * (e / 4)];
+			end
+			vm = m & ~z;
+			no = cq_ovr[k][l];
+			we = 4'd0;
+			np = 0;
+			for (int q = 0; q < 4; q++) begin
+				qm = 16'h0033 << (8 * (q / 2) + 2 * (q % 2));
+				if ((vm & qm) == qm) begin
+					cq_full[k][l][q] <= 1'b1; cq_v[k][l][q] <= v; no = no & ~qm;
+				end
+				else if ((z & qm) == qm) begin
+					cq_full[k][l][q] <= 1'b1; cq_v[k][l][q] <= 32'd0; no = no & ~qm;
+				end
+				else begin
+					no = (no | (z & qm)) & ~(vm & qm);
+					if ((vm & qm) != 16'd0) begin
+						np = np + 1;
+						cw_a[k][l] <= 2'(q);
+						for (int j = 0; j < 4; j++) begin
+							reg [3:0] e;
+							e = 4'(8 * (q / 2) + 2 * (q % 2) + (j % 2) + 4 * (j / 2));
+							if (vm[e]) begin we[j] = 1'b1; cw_d[k][l][j] <= v; end
+							else if (cq_full[k][l][q]) begin we[j] = 1'b1; cw_d[k][l][j] <= cq_v[k][l][q]; end
+						end
+						cq_full[k][l][q] <= 1'b0;
+					end
+				end
+			end
+			cq_ovr[k][l] <= no;
+			cw_we[k][l] <= we;
+			// synthesis translate_off
+			if (np > 1) $display("acc_parse: two partial quadrants written in a clock (kind %0d list %0d)", k, l);
+			// synthesis translate_on
 		end
 		// stage 1: dequant factor (class, scaling matrix byte, QP / 6)
 		if (c0_v) begin
@@ -2488,5 +2571,19 @@ assign br_a = st == S_O5 ? sc_g : bm_ix[8:4];
 assign cr_re = st == S_O5 && of_room && grp != 24'd0;
 assign cr_ra = (sc_g < 5'd16 && (mbt & MT_DCT) != 0) ? {1'b0, sc_g[3:2], t8({sc_g[1:0], sc_b})} : {sc_g, t4(sc_b)};
 
+endmodule
+
+// small RAM with asynchronous read (MLAB), 4 words used of 32
+module acc_mlab #(parameter W = 32) (
+	input  wire         clk,
+	input  wire         we,
+	input  wire   [1:0] wa,
+	input  wire [W-1:0] wd,
+	input  wire   [1:0] ra,
+	output wire [W-1:0] q
+);
+(* ramstyle = "MLAB, no_rw_check" *) reg [W-1:0] m[0:31];
+always @(posedge clk) if (we) m[{3'd0, wa}] <= wd;
+assign q = m[{3'd0, ra}];
 endmodule
 `default_nettype wire
