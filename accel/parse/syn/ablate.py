@@ -22,9 +22,30 @@ GROUPS = {
     'out':     ['S_O\\d'],
     'mbend':   ['S_E\\d'],
     'direct':  ['S_DIRE', 'S_DR0', 'S_SD\\d', 'S_TD\\d', 'S_TP\\d', 'S_CF\\d'],
+    'spdir':   ['S_SD\\d'],
+    'tpdir':   ['S_TD\\d', 'S_TP\\d'],
+    'mvddec':  ['S_MD\\d'],
+    'refdec':  ['S_RD\\d'],
+}
+
+# text edits instead of removed states: (old, new) pairs, each must occur
+EDITS = {
+    'mvcint':  [('else v = mvc[l][ix(p)];', 'else v = 32\'d0;')],
+    'mvdcint': [('else v = mvdc[l][ix(p)];', 'else v = 14\'d0;')],
+    'refcint': [('else r = refc[l][ix(p)];', 'else r = 6\'sd0;')],
+    'cvq':     [('wire [31:0] cv_q = mvr(cr_a[6], 7\'(cr_a[5:0]));', 'wire [31:0] cv_q = 32\'d0;')],
+    'cdq':     [('wire [13:0] cd_q = mdr(cr_a[6], 7\'(cr_a[5:0]));', 'wire [13:0] cd_q = 14\'d0;')],
 }
 
 src, grp = sys.argv[1], sys.argv[2]
+if grp in EDITS:
+    t = open(src).read()
+    for a, b in EDITS[grp]:
+        assert t.count(a) == 1, a
+        t = t.replace(a, b)
+    open(src, 'w').write(t)
+    print('%s: %d edits' % (grp, len(EDITS[grp])))
+    sys.exit(0)
 pat = re.compile(r'^\t\t(' + '|'.join(GROUPS[grp]) + r')\s*:') if GROUPS[grp] else None
 lines = open(src).read().split('\n')
 # main FSM: from "case (st)" after "// ---- main FSM" to its endcase

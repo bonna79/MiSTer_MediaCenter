@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        group: [none, slice, skip, mbtype, fill, intra, pcm, sub8, mvpred, refmvd, cbpqp, resid, dc, out, mbend, direct]
+        group: [none, mvcint, mvdcint, refcint, cvq, cdq, spdir, tpdir, mvddec, refdec, dc, out, resid]
     steps:
       - uses: actions/checkout@v4
       - name: Synthesis without ${{ matrix.group }}
