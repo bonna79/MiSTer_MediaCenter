@@ -58,6 +58,9 @@ jobs:
           echo "--- synthesis: RAM inferred"
           grep -A30 "; Analysis & Synthesis RAM Summary" $R/apar.map.rpt | head -40 || true
           grep -E "Implemented|Info \(276|Warning \(276|readmem|Warning \(10" map.log | head -40 || true
+          echo "--- synthesis: logic and biggest multiplexers (LEs after restructuring)"
+          grep -E "Combinational ALUT usage for logic|; Dedicated logic registers " $R/apar.map.rpt | head -2 || true
+          awk '/; Multiplexer Restructuring Statistics/{f=1} f' $R/apar.map.rpt | grep -E "^; [0-9]+:1" | awk -F';' '{a=$5; gsub(/[^0-9]/,"",a); print a, $2, $3, $8}' | sort -rn | head -30 || true
           echo "--- fit"
           if $Q quartus_fit apar > fit.log 2>&1; then
             cat $R/apar.fit.summary || true
