@@ -392,7 +392,19 @@ always @(posedge clk) begin
 	if (cr_we) cram[cr_wa] <= cr_wd;
 	if (cr_re) cr_q <= cram[cr_ra];
 end
-reg [383:0] bm;                     // non-zero coefficient at bit block * 16 + position
+// non-zero coefficients, bit block * 16 + position: 16 bits a block in a small
+// RAM (valid when rv), DC bits (position 0 of I16 luma and chroma DC) in dcm
+(* ramstyle = "MLAB, no_rw_check" *) reg [15:0] bmr[0:23];
+reg  [23:0] rv, dcm;
+reg         bw_we;
+reg   [4:0] bw_a;
+reg  [15:0] bw_d;
+wire  [4:0] br_a;
+wire [15:0] br_q;
+wire [15:0] br_m;
+always @(posedge clk) if (bw_we) bmr[bw_a] <= bw_d;
+assign br_q = bw_we && bw_a == br_a ? bw_d : bmr[br_a];
+assign br_m = rv[br_a] ? br_q : 16'd0;
 reg   [8:0] ncoef;
 reg  [31:0] pcm[0:95];
 reg  signed [15:0] ldc[0:15];
@@ -421,6 +433,7 @@ reg  [21:0] c1_q;
 reg  [21:0] c2_pr;
 reg   [4:0] sc_blk_r;
 reg   [5:0] sc_p_r;
+wire  [8:0] bm_ix = c2_b + {3'd0, c2_p};
 
 // col picture (direct)
 reg  [31:0] colty;
@@ -568,15 +581,16 @@ wire  [9:0] r_cbfbase = r_cat == 3'd0 ? 10'd85 : r_cat == 3'd1 ? 10'd89 : r_cat 
                         r_cat == 3'd3 ? 10'd97 : 10'd101;
 
 // first non-zero coefficient (output scan)
-reg  [23:0] grp;
-always @(*) for (int g = 0; g < 24; g++) grp[g] = bm[16 * g +: 16] != 16'd0;
+wire [23:0] grp = rv | dcm;
 reg   [4:0] sc_g;
 reg   [3:0] sc_b;
 always @(*) begin
-	reg [15:0] w;
 	sc_g = 5'd0;
 	for (int g = 23; g >= 0; g--) if (grp[g]) sc_g = 5'(g);
-	w = bm[16 * sc_g +: 16];
+end
+always @(*) begin
+	reg [15:0] w;
+	w = br_m | {15'd0, dcm[sc_g]};
 	sc_b = 4'd0;
 	for (int b = 15; b >= 0; b--) if (w[b]) sc_b = 4'(b);
 end
@@ -686,7 +700,7 @@ reg   [6:0] qdv;
 reg   [1:0] qdc;
 reg   [4:0] rq;
 reg   [4:0] dck;
-reg  signed [31:0] tmp[0:15];
+reg  signed [17:0] tmp[0:15];
 reg  [23:0] qmul_dc;
 reg   [5:0] ok;                     // output counter
 reg         sc_pend;
@@ -719,6 +733,7 @@ always @(posedge clk) begin
 	mdw_m = '0; mdw_z = '0; mdw_v = '0;
 	rfw_m = '0; rfw_n = '0; rfw_v = '0;
 	of_we <= 1'b0;
+	bw_we <= 1'b0;
 	t_we <= 1'b0;
 	cr_we <= 1'b0;
 	colm_we <= 1'b0;
@@ -732,7 +747,8 @@ always @(posedge clk) begin
 		data_on <= 1'b0;
 		cab_v <= 1'b0;
 		mem_req <= 1'b0;
-		bm <= 384'd0;
+		rv <= 24'd0;
+		dcm <= 24'd0;
 		ncoef <= 9'd0;
 		r_on <= 1'b0;
 		mdy <= 1'b0;
@@ -1733,22 +1749,26 @@ always @(posedge clk) begin
 			dck <= 5'd0;
 			ok <= 6'd0;
 			if ((mbt & MT_I16) != 0 && nzc[0]) begin
-				// luma DC, first pass (rows)
-				for (int i = 0; i < 4; i++) begin
-					reg signed [31:0] z0, z1, z2, z3;
-					z0 = ldc[4 * i] + ldc[4 * i + 1];
-					z1 = ldc[4 * i] - ldc[4 * i + 1];
-					z2 = ldc[4 * i + 2] - ldc[4 * i + 3];
-					z3 = ldc[4 * i + 2] + ldc[4 * i + 3];
-					tmp[4 * i] <= z0 + z3;
-					tmp[4 * i + 1] <= z0 - z3;
-					tmp[4 * i + 2] <= z1 - z2;
-					tmp[4 * i + 3] <= z1 + z2;
-				end
 				qmul_dc <= 24'({19'd0, d4init(qmod(qs), 2'd0)} * {16'd0, sm0[0]} << (qdiv(qs) + 4'd2));
-				st <= S_DC0;
+				st <= S_DC1;
 			end
 			else st <= S_DC2;
+		end
+		S_DC1: begin
+			// luma DC, first pass: row dck a clock
+			reg signed [17:0] z0, z1, z2, z3;
+			reg [1:0] i;
+			i = dck[1:0];
+			z0 = 18'(ldc[{i, 2'd0}]) + 18'(ldc[{i, 2'd1}]);
+			z1 = 18'(ldc[{i, 2'd0}]) - 18'(ldc[{i, 2'd1}]);
+			z2 = 18'(ldc[{i, 2'd2}]) - 18'(ldc[{i, 2'd3}]);
+			z3 = 18'(ldc[{i, 2'd2}]) + 18'(ldc[{i, 2'd3}]);
+			tmp[{i, 2'd0}] <= z0 + z3;
+			tmp[{i, 2'd1}] <= z0 - z3;
+			tmp[{i, 2'd2}] <= z1 - z2;
+			tmp[{i, 2'd3}] <= z1 + z2;
+			dck <= i == 2'd3 ? 5'd0 : dck + 5'd1;
+			if (i == 2'd3) st <= S_DC0;
 		end
 		S_DC0: begin
 			// output dck: column i = dck >> 2, row r = dck & 3 of {0, 1, 4, 5}
@@ -1771,7 +1791,7 @@ always @(posedge clk) begin
 			cr_wa <= {1'b0, blk, 4'd0};
 			cr_wd <= v;
 			if (v != 16'd0) begin
-				bm[{1'b0, blk, 4'd0}] <= 1'b1;
+				dcm[{1'b0, blk}] <= 1'b1;
 				ncoef <= ncoef + 9'd1;
 			end
 			dck <= dck == 5'd15 ? 5'd0 : dck + 5'd1;
@@ -1807,7 +1827,7 @@ always @(posedge clk) begin
 			cr_wa <= 9'd256 + {2'd0, cb, 4'd0};
 			cr_wd <= v;
 			if (v != 16'd0) begin
-				bm[9'd256 + {2'd0, cb, 4'd0}] <= 1'b1;
+				dcm[5'd16 + {2'd0, cb}] <= 1'b1;
 				ncoef <= ncoef + 9'd1;
 			end
 			if (dck[1:0] == 2'd3) begin
@@ -1904,11 +1924,15 @@ always @(posedge clk) begin
 				of_wd <= {5'd0, sc_blk_r, sc_p_r, cr_q};
 			end
 			if (grp != 24'd0) begin
-				reg [8:0] bit_;
 				reg [4:0] blk;
 				reg [5:0] p;
-				bit_ = {sc_g, sc_b};
-				bm[bit_] <= 1'b0;
+				reg [15:0] nw;
+				nw = br_m & ~(16'd1 << sc_b);
+				bw_we <= 1'b1;
+				bw_a <= sc_g;
+				bw_d <= nw;
+				rv[sc_g] <= nw != 16'd0;
+				if (sc_b == 4'd0) dcm[sc_g] <= 1'b0;
 				if (sc_g < 5'd16 && (mbt & MT_DCT) != 0) begin
 					blk = {1'b0, sc_g[3:2], 2'b00};
 					p = {sc_g[1:0], sc_b};
@@ -2393,7 +2417,10 @@ always @(posedge clk) begin
 			cr_wa <= c2_b + {3'd0, c2_j};
 			cr_wd <= r[21:6];
 			if (r[21:6] != 16'd0) begin
-				bm[c2_b + {3'd0, c2_p}] <= 1'b1;
+				bw_we <= 1'b1;
+				bw_a <= br_a;
+				bw_d <= br_m | (16'd1 << bm_ix[3:0]);
+				rv[br_a] <= 1'b1;
 				ncoef <= ncoef + 9'd1;
 			end
 		end
@@ -2456,6 +2483,8 @@ always @(*) begin
 	end
 end
 // coefficient word of the output scan
+// bitmap RAM read: the output scan in S_O5, else the coefficient of stage 3
+assign br_a = st == S_O5 ? sc_g : bm_ix[8:4];
 assign cr_re = st == S_O5 && of_room && grp != 24'd0;
 assign cr_ra = (sc_g < 5'd16 && (mbt & MT_DCT) != 0) ? {1'b0, sc_g[3:2], t8({sc_g[1:0], sc_b})} : {sc_g, t4(sc_b)};
 
