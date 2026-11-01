@@ -206,7 +206,7 @@ always @(posedge clk) begin
 end
 
 // ---------------------------------------------------------------- slice
-reg   [7:0] st, rs0, rs1, rsd, rsf;
+reg   [7:0] st, rs0, rs1, rsd, rsf, pm_ret;
 localparam S_DESC = 8'd0;
 reg   [3:0] dpart;
 reg   [6:0] dcnt;
@@ -293,13 +293,35 @@ reg         t_sm, l_sm, dt_av, dl_av;
 nrec_t      trec, lrec, tlr, trr;
 reg  [15:0] i4snap_b, i4snap_r;   // modes before the check (written back)
 
-// caches, FFmpeg's scan8 layout (8 per row)
-reg  signed [5:0] refc[0:1][0:39];
-reg  [31:0] mvc[0:1][0:39];
-reg  [13:0] mvdc[0:1][0:39];
+// caches, FFmpeg's scan8 layout (8 per row) stored densely: rows 0..4,
+// columns 3..8 (column 8 of row y is scan8 position 8 * (y + 1))
+function automatic [4:0] sx(input [6:0] p);
+	reg [2:0] x, y;
+	x = p[2:0]; y = p[5:3];
+	if (x == 3'd0) sx = 5'(6 * (y - 3'd1) + 5);
+	else sx = 5'(6 * y + x - 3);
+endfunction
+reg  signed [5:0] refc[0:1][0:29];
+reg  [31:0] mvc[0:1][0:29];
+reg  [13:0] mvdc[0:1][0:29];
 reg [119:0] nzc;
 reg   [3:0] i4c[0:39];              // 15 = -1
 reg  [39:0] dirc;
+// cache write buses: every write of a clock to one list's cache carries the
+// same value (or 0 / -2), so each cache entry only needs an enable
+reg  [1:0][39:0] mvw_m, mvw_z, mdw_m, mdw_z, rfw_m, rfw_n;
+// one shared read port of the vector, mvd and ref caches
+reg   [6:0] cr_a;                   // {list, scan8 index}
+wire [31:0] cv_q = mvc[cr_a[6]][sx(7'(cr_a[5:0]))];
+wire [13:0] cd_q = mvdc[cr_a[6]][sx(7'(cr_a[5:0]))];
+wire signed [5:0] cf_q = refc[cr_a[6]][sx(7'(cr_a[5:0]))];
+// neighbours of the block being predicted, read one a clock (S_PMA..S_PMD)
+reg  [31:0] pv_a, pv_b, pv_c, pv_d;
+reg  signed [5:0] pr_a, pr_b, pr_c, pr_d;
+reg  [13:0] pd_a, pd_b;
+reg  [1:0][31:0] mvw_v;
+reg  [1:0][13:0] mdw_v;
+reg  [1:0][5:0]  rfw_v;
 
 // row buffer
 nrec_t      rb[0:MAXW-1];
@@ -359,7 +381,25 @@ reg   [7:0] rrk[0:3];
 reg  [15:0] sck[0:3];
 reg   [1:0] tk;
 reg  signed [7:0] colr0[0:3], colr1[0:3];
-reg  [31:0] colm0[0:15], colm1[0:15];
+reg  [31:0] colm00, colm10;          // vectors 0 of the co-located lists
+// co-located vectors {list, block}: 4 copies, one per read of a clock (S_SD2 reads 4)
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] colmA[0:31];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] colmB[0:31];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] colmC[0:31];
+(* ramstyle = "MLAB, no_rw_check" *) reg [31:0] colmD[0:31];
+reg         colm_we;
+reg   [4:0] colm_wa;
+reg  [31:0] colm_wd;
+reg   [4:0] col_a[0:3];
+wire [31:0] col_q[0:3];
+always @(posedge clk) if (colm_we) begin
+	colmA[colm_wa] <= colm_wd; colmB[colm_wa] <= colm_wd;
+	colmC[colm_wa] <= colm_wd; colmD[colm_wa] <= colm_wd;
+end
+assign col_q[0] = colmA[col_a[0]];
+assign col_q[1] = colmB[col_a[1]];
+assign col_q[2] = colmC[col_a[2]];
+assign col_q[3] = colmD[col_a[3]];
 reg   [5:0] mc_i, mc_r;
 
 // ---------------------------------------------------------------- combinational helpers
@@ -372,21 +412,20 @@ reg  signed [5:0] pm_ref;
 reg   [1:0] pm_mode;                // 0 pred_motion, 1 16x8, 2 8x16
 reg  signed [15:0] pm_mx, pm_my;
 always @(*) begin
-	reg [6:0] i8;
 	reg signed [5:0] tr, lr, dr, trr_;
 	reg [31:0] A, B, C, D;
 	reg [1:0] mc;
 	reg done;
 	reg signed [5:0] r2;
 	reg [31:0] C2;
-	i8 = f_scan8({2'd0, pm_n});
-	tr = refc[pm_l][i8 - 7'd8];
-	lr = refc[pm_l][i8 - 7'd1];
-	A = mvc[pm_l][i8 - 7'd1];
-	B = mvc[pm_l][i8 - 7'd8];
-	trr_ = refc[pm_l][i8 - 7'd8 + {4'd0, pm_pw}];
-	if (trr_ != -6'sd2) begin dr = trr_; C = mvc[pm_l][i8 - 7'd8 + {4'd0, pm_pw}]; end
-	else begin dr = refc[pm_l][i8 - 7'd9]; C = mvc[pm_l][i8 - 7'd9]; end
+	// A left (i8 - 1), B top (i8 - 8), C top right (i8 - 8 + width) or top left (i8 - 9)
+	tr = pr_b;
+	lr = pr_a;
+	A = pv_a;
+	B = pv_b;
+	trr_ = pr_c;
+	if (trr_ != -6'sd2) begin dr = trr_; C = pv_c; end
+	else begin dr = pr_d; C = pv_d; end
 	done = 1'b0;
 	r2 = 6'sd0;
 	C2 = 32'd0;
@@ -397,18 +436,17 @@ always @(*) begin
 	// 16x8 and 8x16 shortcuts
 	if (pm_mode == 2'd1) begin
 		if (pm_n == 4'd0) begin
-			if (refc[pm_l][4] == pm_ref) begin D = mvc[pm_l][4]; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
+			if (tr == pm_ref) begin D = B; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
 		end
-		else if (refc[pm_l][27] == pm_ref) begin D = mvc[pm_l][27]; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
+		else if (lr == pm_ref) begin D = A; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
 	end
 	else if (pm_mode == 2'd2) begin
 		if (pm_n == 4'd0) begin
-			if (refc[pm_l][11] == pm_ref) begin D = mvc[pm_l][11]; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
+			if (lr == pm_ref) begin D = A; pm_mx = D[15:0]; pm_my = D[31:16]; done = 1'b1; end
 		end
 		else begin
 			// fetch_diagonal_mv for scan8[4], width 2
-			if (refc[pm_l][8] != -6'sd2) begin r2 = refc[pm_l][8]; C2 = mvc[pm_l][8]; end
-			else begin r2 = refc[pm_l][5]; C2 = mvc[pm_l][5]; end
+			r2 = dr; C2 = C;
 			if (r2 == pm_ref) begin pm_mx = C2[15:0]; pm_my = C2[31:16]; done = 1'b1; end
 		end
 	end
@@ -463,7 +501,7 @@ endfunction
 reg         mv_l;
 reg   [3:0] mv_n;
 wire  [6:0] mv_i8 = f_scan8({2'd0, mv_n});
-wire [13:0] mv_a = mvdc[mv_l][mv_i8 - 7'd1], mv_b = mvdc[mv_l][mv_i8 - 7'd8];
+wire [13:0] mv_a = pd_a, mv_b = pd_b;          // fetched with the vector neighbours (mv_n = pm_n)
 wire  [7:0] amvd0 = {1'b0, mv_a[6:0]} + {1'b0, mv_b[6:0]};
 wire  [7:0] amvd1 = {1'b0, mv_a[13:7]} + {1'b0, mv_b[13:7]};
 
@@ -471,7 +509,7 @@ wire  [7:0] amvd1 = {1'b0, mv_a[13:7]} + {1'b0, mv_b[13:7]};
 reg         rf_l;
 reg   [3:0] rf_n;
 wire  [6:0] rf_i8 = f_scan8({2'd0, rf_n});
-wire signed [5:0] rf_a = refc[rf_l][rf_i8 - 7'd1], rf_b = refc[rf_l][rf_i8 - 7'd8];
+wire signed [5:0] rf_a = refc[rf_l][sx(7'(rf_i8 - 7'd1))], rf_b = refc[rf_l][sx(7'(rf_i8 - 7'd8))];
 wire  [1:0] rf_ctx0 = s_B ? {rf_b > 0 && !dirc[rf_i8 - 7'd8], rf_a > 0 && !dirc[rf_i8 - 7'd1]}
                           : {rf_b > 0, rf_a > 0};
 
@@ -521,7 +559,8 @@ localparam
 	S_CF0 = 124, S_CF1 = 125, S_DR0 = 126, S_MV4 = 127, S_RF2 = 128, S_PSK1 = 129,
 	S_PTE = 130, S_IMA = 131, S_SB8 = 132, S_SB9 = 133, S_SP1 = 134, S_SP2 = 135, S_SP3 = 136,
 	S_P8E = 137, S_RF3 = 138, S_PV3 = 139, S_T8B = 140, S_ERW = 141, S_PRN = 142,
-	S_TP0 = 143, S_TP1 = 144, S_TP2 = 145, S_TP3 = 146, S_TP4 = 147;
+	S_TP0 = 143, S_TP1 = 144, S_TP2 = 145, S_TP3 = 146, S_TP4 = 147,
+	S_PMA = 148, S_PMB = 149, S_PMC = 150, S_PMD = 151;
 
 // ---------------------------------------------------------------- tasks (cache writes)
 task automatic dec(input [9:0] c, input [7:0] nx);
@@ -533,17 +572,27 @@ endtask
 task automatic trm(input [7:0] nx);
 	cab_v <= 1'b1; cab_op <= 3'd3; rs0 <= nx; st <= S_BIN;
 endtask
-task automatic fref(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [5:0] v);
+function automatic [39:0] rmask(input [6:0] s, input [2:0] w, input [2:0] h);
+	reg [39:0] m;
+	m = 40'd0;
 	for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
-		if (x < w && y < h) refc[l][s + 7'(x + 8 * y)] <= v;
+		if (x < w && y < h) m[6'(s + 7'(x + 8 * y))] = 1'b1;
+	rmask = m;
+endfunction
+task automatic fref(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [5:0] v);
+	rfw_v[l] = v; rfw_m[l] = rfw_m[l] | rmask(s, w, h);
 endtask
 task automatic fmv(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [31:0] v);
-	for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
-		if (x < w && y < h) mvc[l][s + 7'(x + 8 * y)] <= v;
+	mvw_v[l] = v; mvw_m[l] = mvw_m[l] | rmask(s, w, h);
+endtask
+task automatic fmvz(input logic l, input [6:0] s, input [2:0] w, input [2:0] h);
+	mvw_z[l] = mvw_z[l] | rmask(s, w, h);
 endtask
 task automatic fmvd(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [13:0] v);
-	for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
-		if (x < w && y < h) mvdc[l][s + 7'(x + 8 * y)] <= v;
+	mdw_v[l] = v; mdw_m[l] = mdw_m[l] | rmask(s, w, h);
+endtask
+task automatic fmvdz(input logic l, input [6:0] s, input [2:0] w, input [2:0] h);
+	mdw_z[l] = mdw_z[l] | rmask(s, w, h);
 endtask
 
 // fill_decode_caches, motion part, one list
@@ -554,69 +603,66 @@ task automatic fill_list(input logic l);
 	ntr = tr_ty != 0 ? -6'sd1 : -6'sd2;
 	ntl = tl_ty != 0 ? -6'sd1 : -6'sd2;
 	if (uses(t_ty, l)) begin
-		for (int k = 0; k < 4; k++) mvc[l][4 + k] <= trec.mv[l * 128 + k * 32 +: 32];
-		refc[l][4] <= trec.rf[l * 12 +: 6];
-		refc[l][5] <= trec.rf[l * 12 +: 6];
-		refc[l][6] <= trec.rf[l * 12 + 6 +: 6];
-		refc[l][7] <= trec.rf[l * 12 + 6 +: 6];
+		for (int k = 0; k < 4; k++) mvc[l][sx(7'(4 + k))] <= trec.mv[l * 128 + k * 32 +: 32];
+		refc[l][sx(7'(4))] <= trec.rf[l * 12 +: 6];
+		refc[l][sx(7'(5))] <= trec.rf[l * 12 +: 6];
+		refc[l][sx(7'(6))] <= trec.rf[l * 12 + 6 +: 6];
+		refc[l][sx(7'(7))] <= trec.rf[l * 12 + 6 +: 6];
 		r6 = trec.rf[l * 12 + 6 +: 6];
 	end
 	else begin
-		for (int k = 0; k < 4; k++) begin mvc[l][4 + k] <= 32'd0; refc[l][4 + k] <= nt; end
+		for (int k = 0; k < 4; k++) begin mvc[l][sx(7'(4 + k))] <= 32'd0; refc[l][sx(7'(4 + k))] <= nt; end
 		r6 = nt;
 	end
 	if ((mbt & (MT_168 | MT_88)) != 0) begin
 		if (uses(l_ty, l)) begin
-			for (int k = 0; k < 4; k++) mvc[l][11 + 8 * k] <= lrec.mv[l * 128 + k * 32 +: 32];
-			refc[l][11] <= lrec.rf[l * 12 +: 6];
-			refc[l][19] <= lrec.rf[l * 12 +: 6];
-			refc[l][27] <= lrec.rf[l * 12 + 6 +: 6];
-			refc[l][35] <= lrec.rf[l * 12 + 6 +: 6];
+			for (int k = 0; k < 4; k++) mvc[l][sx(7'(11 + 8 * k))] <= lrec.mv[l * 128 + k * 32 +: 32];
+			refc[l][sx(7'(11))] <= lrec.rf[l * 12 +: 6];
+			refc[l][sx(7'(19))] <= lrec.rf[l * 12 +: 6];
+			refc[l][sx(7'(27))] <= lrec.rf[l * 12 + 6 +: 6];
+			refc[l][sx(7'(35))] <= lrec.rf[l * 12 + 6 +: 6];
 		end
 		else
-			for (int k = 0; k < 4; k++) begin mvc[l][11 + 8 * k] <= 32'd0; refc[l][11 + 8 * k] <= nl; end
+			for (int k = 0; k < 4; k++) begin mvc[l][sx(7'(11 + 8 * k))] <= 32'd0; refc[l][sx(7'(11 + 8 * k))] <= nl; end
 	end
 	else begin
 		if (uses(l_ty, l)) begin
-			mvc[l][11] <= lrec.mv[l * 128 +: 32];
-			refc[l][11] <= lrec.rf[l * 12 +: 6];
+			mvc[l][sx(7'(11))] <= lrec.mv[l * 128 +: 32];
+			refc[l][sx(7'(11))] <= lrec.rf[l * 12 +: 6];
 		end
 		else begin
-			mvc[l][11] <= 32'd0;
-			refc[l][11] <= nl;
+			mvc[l][sx(7'(11))] <= 32'd0;
+			refc[l][sx(7'(11))] <= nl;
 		end
 	end
 	if (uses(tr_ty, l)) begin
-		mvc[l][8] <= trr.mv[l * 128 +: 32];
+		mvc[l][sx(7'(8))] <= trr.mv[l * 128 +: 32];
 		r8 = trr.rf[l * 12 +: 6];
 	end
 	else begin
-		mvc[l][8] <= 32'd0;
+		mvc[l][sx(7'(8))] <= 32'd0;
 		r8 = ntr;
 	end
-	refc[l][8] <= r8;
+	refc[l][sx(7'(8))] <= r8;
 	if (r6 < 0 || r8 < 0) begin
 		if (uses(tl_ty, l)) begin
-			mvc[l][3] <= tlr.mv[l * 128 + 96 +: 32];
-			refc[l][3] <= tlr.rf[l * 12 + 6 +: 6];
+			mvc[l][sx(7'(3))] <= tlr.mv[l * 128 + 96 +: 32];
+			refc[l][sx(7'(3))] <= tlr.rf[l * 12 + 6 +: 6];
 		end
 		else begin
-			mvc[l][3] <= 32'd0;
-			refc[l][3] <= ntl;
+			mvc[l][sx(7'(3))] <= 32'd0;
+			refc[l][sx(7'(3))] <= ntl;
 		end
 	end
 	if ((mbt & (MT_SKIP | MT_DIR)) == 0) begin
-		refc[l][14] <= -6'sd2;
-		refc[l][30] <= -6'sd2;
-		mvc[l][14] <= 32'd0;
-		mvc[l][30] <= 32'd0;
-		for (int k = 0; k < 4; k++) mvdc[l][4 + k] <= uses(t_ty, l) ? trec.mvd[l * 56 + k * 14 +: 14] : 14'd0;
-		mvdc[l][11] <= uses(l_ty, l) ? lrec.mvd[l * 56 +: 14] : 14'd0;
-		mvdc[l][19] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 14 +: 14] : 14'd0;
-		mvdc[l][27] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 28 +: 14] : 14'd0;
-		mvdc[l][35] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 42 +: 14] : 14'd0;
-		mvdc[l][14] <= 14'd0;
-		mvdc[l][30] <= 14'd0;
+		rfw_n[l][14] = 1'b1; rfw_n[l][30] = 1'b1;
+		mvw_z[l][14] = 1'b1; mvw_z[l][30] = 1'b1;
+		for (int k = 0; k < 4; k++) mvdc[l][sx(7'(4 + k))] <= uses(t_ty, l) ? trec.mvd[l * 56 + k * 14 +: 14] : 14'd0;
+		mvdc[l][sx(7'(11))] <= uses(l_ty, l) ? lrec.mvd[l * 56 +: 14] : 14'd0;
+		mvdc[l][sx(7'(19))] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 14 +: 14] : 14'd0;
+		mvdc[l][sx(7'(27))] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 28 +: 14] : 14'd0;
+		mvdc[l][sx(7'(35))] <= uses(l_ty, l) ? lrec.mvd[l * 56 + 42 +: 14] : 14'd0;
+		mdw_z[l][14] = 1'b1; mdw_z[l][30] = 1'b1;
 		if (s_B) begin
 			for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) dirc[12 + x + 8 * y] <= 1'b0;
 			if ((t_ty & MT_DIR) != 0) dirc[7:4] <= 4'hF;
@@ -683,9 +729,13 @@ wire        cur_pcm = (mbt & MT_PCM) != 0;
 wire  [5:0] qrec = cur_pcm ? 6'd0 : qs;
 
 always @(posedge clk) begin
+	mvw_m = '0; mvw_z = '0; mvw_v = '0;
+	mdw_m = '0; mdw_z = '0; mdw_v = '0;
+	rfw_m = '0; rfw_n = '0; rfw_v = '0;
 	of_we <= 1'b0;
 	t_we <= 1'b0;
 	cr_we <= 1'b0;
+	colm_we <= 1'b0;
 	rb_we <= 1'b0;
 	sl_done <= 1'b0;
 	sl_err <= 1'b0;
@@ -810,9 +860,7 @@ always @(posedge clk) begin
 			cqp1 <= cqp(1'b1, s_qp0);
 			lqd_nz <= 1'b0;
 			for (int l = 0; l < 2; l++) begin
-				refc[l][16] <= -6'sd2;
-				refc[l][24] <= -6'sd2;
-				refc[l][32] <= -6'sd2;
+				rfw_n[l][16] = 1'b1; rfw_n[l][24] = 1'b1; rfw_n[l][32] = 1'b1;
 			end
 			st <= S_MB0;
 		end
@@ -1240,8 +1288,7 @@ always @(posedge clk) begin
 		end
 		S_P8E: begin
 			for (int l = 0; l < 2; l++) begin
-				refc[l][14] <= -6'sd2;
-				refc[l][30] <= -6'sd2;
+				rfw_n[l][14] = 1'b1; rfw_n[l][30] = 1'b1;
 			end
 			for (int i = 0; i < 4; i++) begin
 				reg [6:0] s8;
@@ -1268,9 +1315,8 @@ always @(posedge clk) begin
 		S_RF1: begin
 			reg [6:0] s8;
 			s8 = f_scan8({2'd0, ii, 2'b00});
-			refc[ll][s8 + 1] <= rfv;
-			refc[ll][s8 + 8] <= rfv;
-			refc[ll][s8 + 9] <= rfv;
+			fref(ll, s8 + 7'd1, 3'd1, 3'd1, rfv);
+			fref(ll, s8 + 7'd8, 3'd2, 3'd1, rfv);
 			st <= S_RF2;
 		end
 		S_RF2: begin
@@ -1292,9 +1338,9 @@ always @(posedge clk) begin
 		S_MV0: begin
 			reg [6:0] s8;
 			s8 = f_scan8({2'd0, ii, 2'b00});
-			refc[ll][s8] <= refc[ll][s8 + 1];
+			fref(ll, s8, 3'd1, 3'd1, refc[ll][sx(7'(s8 + 1))]);
 			if ((sub[ii] & MT_DIR) != 0) begin
-				fmvd(ll, s8, 3'd2, 3'd2, 14'd0);
+				fmvdz(ll, s8, 3'd2, 3'd2);
 				st <= S_MV4;
 			end
 			else if (isdir(sub[ii], 1'b0, ll)) begin
@@ -1302,8 +1348,8 @@ always @(posedge clk) begin
 				st <= S_MV1;
 			end
 			else begin
-				fmv(ll, s8, 3'd2, 3'd2, 32'd0);
-				fmvd(ll, s8, 3'd2, 3'd2, 14'd0);
+				fmvz(ll, s8, 3'd2, 3'd2);
+				fmvdz(ll, s8, 3'd2, 3'd2);
 				st <= S_MV4;
 			end
 		end
@@ -1317,11 +1363,17 @@ always @(posedge clk) begin
 			pm_pw <= bw;
 			pm_l <= ll;
 			pm_mode <= 2'd0;
-			pm_ref <= refc[ll][f_scan8({2'd0, idx})];
+			pm_ref <= refc[ll][sx(7'(f_scan8({2'd0, idx})))];
 			mv_l <= ll;
 			mv_n <= idx;
-			st <= S_MV2;
+			pm_ret <= S_MV2;
+			st <= S_PMA;
 		end
+		// neighbours of block pm_n, list pm_l: left, top, top right, top left
+		S_PMA: begin pv_a <= cv_q; pr_a <= cf_q; pd_a <= cd_q; st <= S_PMB; end
+		S_PMB: begin pv_b <= cv_q; pr_b <= cf_q; pd_b <= cd_q; st <= S_PMC; end
+		S_PMC: begin pv_c <= cv_q; pr_c <= cf_q; st <= S_PMD; end
+		S_PMD: begin pv_d <= cv_q; pr_d <= cf_q; st <= pm_ret; end
 		S_MV2: begin
 			mx_acc <= pm_mx;
 			my_acc <= pm_my;
@@ -1336,19 +1388,21 @@ always @(posedge clk) begin
 			v = {16'(my_acc), 16'(mx_acc)};
 			d = {mdy_r[6:0], mdax};
 			if ((sub[ii] & MT_16) != 0) begin
-				mvc[ll][s8 + 1] <= v; mvc[ll][s8 + 8] <= v; mvc[ll][s8 + 9] <= v;
-				mvdc[ll][s8 + 1] <= d; mvdc[ll][s8 + 8] <= d; mvdc[ll][s8 + 9] <= d;
+				fmv(ll, s8, 3'd2, 3'd2, v);
+				fmvd(ll, s8, 3'd2, 3'd2, d);
 			end
 			else if ((sub[ii] & MT_168) != 0) begin
-				mvc[ll][s8 + 1] <= v;
-				mvdc[ll][s8 + 1] <= d;
+				fmv(ll, s8, 3'd2, 3'd1, v);
+				fmvd(ll, s8, 3'd2, 3'd1, d);
 			end
 			else if ((sub[ii] & MT_816) != 0) begin
-				mvc[ll][s8 + 8] <= v;
-				mvdc[ll][s8 + 8] <= d;
+				fmv(ll, s8, 3'd1, 3'd2, v);
+				fmvd(ll, s8, 3'd1, 3'd2, d);
 			end
-			mvc[ll][s8] <= v;
-			mvdc[ll][s8] <= d;
+			else begin
+				fmv(ll, s8, 3'd1, 3'd1, v);
+				fmvd(ll, s8, 3'd1, 3'd1, d);
+			end
 			if ({1'b0, jj} + 3'd1 >= spc[ii]) st <= S_MV4;
 			else begin jj <= jj + 2'd1; st <= S_MV1; end
 		end
@@ -1363,8 +1417,8 @@ always @(posedge clk) begin
 
 		// ------------------------------------------------ B_Direct_16x16
 		S_DIRE: begin
-			fmvd(1'b0, 7'd12, 3'd4, 3'd4, 14'd0);
-			fmvd(1'b1, 7'd12, 3'd4, 3'd4, 14'd0);
+			fmvdz(1'b0, 7'd12, 3'd4, 3'd4);
+			fmvdz(1'b1, 7'd12, 3'd4, 3'd4);
 			d8ok <= d8ok & s_d8;
 			st <= S_CB0;
 		end
@@ -1406,19 +1460,20 @@ always @(posedge clk) begin
 				pm_pw <= (mbt & MT_816) != 0 ? 3'd2 : 3'd4;
 				pm_l <= ll;
 				pm_mode <= (mbt & MT_16) != 0 ? 2'd0 : (mbt & MT_168) != 0 ? 2'd1 : 2'd2;
-				pm_ref <= (mbt & MT_816) != 0 ? refc[ll][12 + (ii[0] ? 2 : 0)] : refc[ll][12 + (ii[0] ? 16 : 0)];
+				pm_ref <= (mbt & MT_816) != 0 ? refc[ll][sx(7'(12 + (ii[0] ? 2 : 0)))] : refc[ll][sx(7'(12 + (ii[0] ? 16 : 0)))];
 				mv_l <= ll;
 				mv_n <= n;
-				st <= S_PV1;
+				pm_ret <= S_PV1;
+				st <= S_PMA;
 			end
 			else begin
 				if ((mbt & MT_168) != 0) begin
-					fmvd(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2, 14'd0);
-					fmv(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2, 32'd0);
+					fmvdz(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2);
+					fmvz(ll, 7'd12 + (ii[0] ? 7'd16 : 7'd0), 3'd4, 3'd2);
 				end
 				else if ((mbt & MT_816) != 0) begin
-					fmvd(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4, 14'd0);
-					fmv(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4, 32'd0);
+					fmvdz(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4);
+					fmvz(ll, 7'd12 + (ii[0] ? 7'd2 : 7'd0), 3'd2, 3'd4);
 				end
 				st <= S_PV2;
 			end
@@ -1833,8 +1888,8 @@ always @(posedge clk) begin
 				reg signed [5:0] r0, r1;
 				reg [8:0] wt;
 				s8 = f_scan8({2'd0, ok[1:0] - 2'd1, 2'b00});
-				r0 = uses(mbt, 1'b0) ? refc[0][s8] : -6'sd1;
-				r1 = s_lc > 2'd1 && uses(mbt, 1'b1) ? refc[1][s8] : -6'sd1;
+				r0 = uses(mbt, 1'b0) ? refc[0][sx(7'(s8))] : -6'sd1;
+				r1 = s_lc > 2'd1 && uses(mbt, 1'b1) ? refc[1][sx(7'(s8))] : -6'sd1;
 				wt = iw_q;
 				w = {7'd0, (r0 >= 0 && r1 >= 0 && s_uw == 2'd2) ? wt : 9'd32, 2'd0, r1 < 0, r1[5:0], r0 < 0, r0[5:0]};
 			end
@@ -1843,7 +1898,7 @@ always @(posedge clk) begin
 				reg l;
 				k = 5'(ok - 6'd5);
 				l = k[4];
-				w = ({1'b0, l} < s_lc && uses(mbt, l)) ? mvc[l][f_scan8({2'd0, k[3:0]})] : 32'd0;
+				w = ({1'b0, l} < s_lc && uses(mbt, l)) ? cv_q : 32'd0;
 			end
 			of_we <= 1'b1;
 			of_wd <= w;
@@ -1905,11 +1960,11 @@ always @(posedge clk) begin
 			t.nz = sk ? 8'd0 : cur_pcm ? 8'hFF : {nzc[101], nzc[100], nzc[61], nzc[60], nzc[39], nzc[38], nzc[37], nzc[36]};
 			t.dt = {sub[3][8], sub[2][8]};
 			for (int ls = 0; ls < 2; ls++) begin
-				t.rf[ls * 12 +: 6] = refc[ls][28];
-				t.rf[ls * 12 + 6 +: 6] = refc[ls][30];
+				t.rf[ls * 12 +: 6] = refc[ls][sx(7'(28))];
+				t.rf[ls * 12 + 6 +: 6] = refc[ls][sx(7'(30))];
 				for (int k = 0; k < 4; k++) begin
-					t.mv[ls * 128 + k * 32 +: 32] = mvc[ls][36 + k];
-					t.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mvdc[ls][36 + k];
+					t.mv[ls * 128 + k * 32 +: 32] = mvc[ls][sx(7'(36 + k))];
+					t.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mvdc[ls][sx(7'(36 + k))];
 				end
 			end
 			l = t;
@@ -1917,11 +1972,11 @@ always @(posedge clk) begin
 			l.nz = sk ? 8'd0 : cur_pcm ? 8'hFF : {nzc[101], nzc[93], nzc[61], nzc[53], nzc[39], nzc[31], nzc[23], nzc[15]};
 			l.dt = {sub[3][8], sub[1][8]};
 			for (int ls = 0; ls < 2; ls++) begin
-				l.rf[ls * 12 +: 6] = refc[ls][14];
-				l.rf[ls * 12 + 6 +: 6] = refc[ls][30];
+				l.rf[ls * 12 +: 6] = refc[ls][sx(7'(14))];
+				l.rf[ls * 12 + 6 +: 6] = refc[ls][sx(7'(30))];
 				for (int k = 0; k < 4; k++) begin
-					l.mv[ls * 128 + k * 32 +: 32] = mvc[ls][15 + 8 * k];
-					l.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mvdc[ls][15 + 8 * k];
+					l.mv[ls * 128 + k * 32 +: 32] = mvc[ls][sx(7'(15 + 8 * k))];
+					l.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mvdc[ls][sx(7'(15 + 8 * k))];
 				end
 			end
 			rb_we <= 1'b1;
@@ -1947,14 +2002,14 @@ always @(posedge clk) begin
 					else if (mr_k <= 6'd2) begin
 						l = mr_k == 6'd2;
 						if (uses(mbt, l))
-							w = {{2{refc[l][30][5]}}, refc[l][30], {2{refc[l][28][5]}}, refc[l][28],
-							     {2{refc[l][14][5]}}, refc[l][14], {2{refc[l][12][5]}}, refc[l][12]};
+							w = {{2{refc[l][sx(7'(30))][5]}}, refc[l][sx(7'(30))], {2{refc[l][sx(7'(28))][5]}}, refc[l][sx(7'(28))],
+							     {2{refc[l][sx(7'(14))][5]}}, refc[l][sx(7'(14))], {2{refc[l][sx(7'(12))][5]}}, refc[l][sx(7'(12))]};
 						else w = 32'hFFFFFFFF;
 					end
 					else begin
 						reg [4:0] k;
 						k = 5'(mr_k - 6'd3);
-						w = mvc[k[4]][7'd12 + {5'd0, k[1:0]} + {2'd0, k[3:2], 3'd0}];
+						w = cv_q;
 					end
 					mem_req <= 1'b1;
 					mem_we <= 1'b1;
@@ -2009,9 +2064,9 @@ always @(posedge clk) begin
 				reg signed [5:0] lr, tr, rc;
 				reg [31:0] A, B, C;
 				reg [5:0] m;
-				lr = refc[l][11]; tr = refc[l][4]; rc = refc[l][8]; C = mvc[l][8];
-				if (rc == -6'sd2) begin rc = refc[l][3]; C = mvc[l][3]; end
-				A = mvc[l][11]; B = mvc[l][4];
+				lr = refc[l][sx(7'(11))]; tr = refc[l][sx(7'(4))]; rc = refc[l][sx(7'(8))]; C = mvc[l][sx(7'(8))];
+				if (rc == -6'sd2) begin rc = refc[l][sx(7'(3))]; C = mvc[l][sx(7'(3))]; end
+				A = mvc[l][sx(7'(11))]; B = mvc[l][sx(7'(4))];
 				m = $unsigned(lr) < $unsigned(tr) ? lr : tr;
 				m = $unsigned(m) < $unsigned(rc) ? m : rc;
 				rr[l] = m;
@@ -2040,8 +2095,8 @@ always @(posedge clk) begin
 			if (!(dr_b8 || mm[0] != 32'd0 || mm[1] != 32'd0)) begin
 				fref(1'b0, 7'd12, 3'd4, 3'd4, rr[0]);
 				fref(1'b1, 7'd12, 3'd4, 3'd4, rr[1]);
-				fmv(1'b0, 7'd12, 3'd4, 3'd4, 32'd0);
-				fmv(1'b1, 7'd12, 3'd4, 3'd4, 32'd0);
+				fmvz(1'b0, 7'd12, 3'd4, 3'd4);
+				fmvz(1'b1, 7'd12, 3'd4, 3'd4);
 				mbt <= (t & ~(MT_88 | MT_168 | MT_816 | MT_P1L0 | MT_P1L1)) | MT_16 | MT_DIR;
 				st <= rsd;
 			end
@@ -2066,8 +2121,8 @@ always @(posedge clk) begin
 			if ((t & MT_16) != 0) begin
 				reg [31:0] a, b;
 				reg signed [15:0] x0, y0, x1, y1;
-				x0 = colm0[0][15:0]; y0 = colm0[0][31:16];
-				x1 = colm1[0][15:0]; y1 = colm1[0][31:16];
+				x0 = colm00[15:0]; y0 = colm00[31:16];
+				x1 = colm10[15:0]; y1 = colm10[31:16];
 				fref(1'b0, 7'd12, 3'd4, 3'd4, dr_ref[0]);
 				fref(1'b1, 7'd12, 3'd4, 3'd4, dr_ref[1]);
 				if (!intra(colty) && !s_l1l &&
@@ -2122,12 +2177,13 @@ always @(posedge clk) begin
 							reg [3:0] ci;
 							if ((sb & MT_16) != 0) ci = {i8[1], i8[1], i8[0], i8[0]};          // x8 * 3 + y8 * 12
 							else ci = {i8[1], k[1], i8[0], k[0]};
-							cm = colr0[i8] == 8'sd0 ? colm0[ci] : colm1[ci];
+							cm = col_q[k];         // col_a[k]: {colr0 != 0, ci}
 							cx = cm[15:0]; cy = cm[31:16];
 							ze = cx >= -1 && cx <= 1 && cy >= -1 && cy <= 1;
 						end
-						mvc[0][e] <= (ze && dr_ref[0] == 6'sd0) ? 32'd0 : dr_mv[0];
-						mvc[1][e] <= (ze && dr_ref[1] == 6'sd0) ? 32'd0 : dr_mv[1];
+						for (int l = 0; l < 2; l++)
+							if (ze && dr_ref[l] == 6'sd0) mvw_z[l][6'(e)] = 1'b1;
+							else begin mvw_v[l] = dr_mv[l]; mvw_m[l][6'(e)] = 1'b1; end
 						if (ze) n = n + 5'd1;
 						if (k == 3 && (sb & MT_16) == 0) begin
 							// !(m & 3): sub-block count of this 8x8
@@ -2203,14 +2259,14 @@ always @(posedge clk) begin
 					if (intra(colty)) begin
 						if (is16) begin
 							fref(1'b0, 7'd12, 3'd4, 3'd4, 6'd0);
-							fmv(1'b0, 7'd12, 3'd4, 3'd4, 32'd0);
-							fmv(1'b1, 7'd12, 3'd4, 3'd4, 32'd0);
+							fmvz(1'b0, 7'd12, 3'd4, 3'd4);
+							fmvz(1'b1, 7'd12, 3'd4, 3'd4);
 							st <= rsd;
 						end
 						else begin
 							fref(1'b0, s8, 3'd2, 3'd2, 6'd0);
-							fmv(1'b0, s8, 3'd2, 3'd2, 32'd0);
-							fmv(1'b1, s8, 3'd2, 3'd2, 32'd0);
+							fmvz(1'b0, s8, 3'd2, 3'd2);
+							fmvz(1'b1, s8, 3'd2, 3'd2);
 							dr_i8 <= dr_i8 + 3'd1;
 						end
 					end
@@ -2221,7 +2277,7 @@ always @(posedge clk) begin
 						rr = $signed(rrk[i8]);
 						if (sub8) ci = {i8[1], i8[1], i8[0], i8[0]};
 						else ci = {i8[1], dr_i4[1], i8[0], dr_i4[0]};
-						cm = r0 >= 0 ? colm0[ci] : colm1[ci];
+						cm = col_q[0];           // col_a[0]: {r0 < 0, ci}
 						cx = cm[15:0]; cy = cm[31:16];
 						px = $signed(sck[i8]) * cx + 32'sd128;
 						py = $signed(sck[i8]) * cy + 32'sd128;
@@ -2248,8 +2304,8 @@ always @(posedge clk) begin
 							if (dr_i4 == 2'd0) fref(1'b0, s8, 3'd2, 3'd2, rr[5:0]);
 							lx = mx[15:0];
 							ly = my[15:0];
-							mvc[0][e] <= {ly, lx};
-							mvc[1][e] <= {16'(ly - cy), 16'(lx - cx)};
+							fmv(1'b0, e, 3'd1, 3'd1, {ly, lx});
+							fmv(1'b1, e, 3'd1, 3'd1, {16'(ly - cy), 16'(lx - cx)});
 							dr_i4 <= dr_i4 + 2'd1;
 							if (dr_i4 == 2'd3) dr_i8 <= dr_i8 + 3'd1;
 						end
@@ -2277,8 +2333,13 @@ always @(posedge clk) begin
 				if (mc_r == 6'd0) colty <= tunpack(mem_rdata[13:0]);
 				else if (mc_r == 6'd1) for (int k = 0; k < 4; k++) colr0[k] <= mem_rdata[8 * k +: 8];
 				else if (mc_r == 6'd2) for (int k = 0; k < 4; k++) colr1[k] <= mem_rdata[8 * k +: 8];
-				else if (mc_r < 6'd19) colm0[4'(mc_r - 6'd3)] <= mem_rdata;
-				else colm1[4'(mc_r - 6'd19)] <= mem_rdata;
+				else begin
+					colm_we <= 1'b1;
+					colm_wa <= 5'(mc_r - 6'd3);
+					colm_wd <= mem_rdata;
+					if (mc_r == 6'd3) colm00 <= mem_rdata;
+					if (mc_r == 6'd19) colm10 <= mem_rdata;
+				end
 				mc_r <= mc_r + 6'd1;
 				if (mc_r == 6'd34) st <= rs1;
 			end
@@ -2317,6 +2378,12 @@ always @(posedge clk) begin
 				c0_d <= qdiv(r_qp);
 				c0_by <= smi[1:0];
 			end
+		end
+		// cache write buses
+		for (int l = 0; l < 2; l++) for (int i = 0; i < 40; i++) if (i % 8 >= 3 || (i % 8 == 0 && i >= 8)) begin
+			if (mvw_m[l][i] || mvw_z[l][i]) mvc[l][sx(7'(i))] <= mvw_z[l][i] ? 32'd0 : mvw_v[l];
+			if (mdw_m[l][i] || mdw_z[l][i]) mvdc[l][sx(7'(i))] <= mdw_z[l][i] ? 14'd0 : mdw_v[l];
+			if (rfw_m[l][i] || rfw_n[l][i]) refc[l][sx(7'(i))] <= rfw_n[l][i] ? -6'sd2 : rfw_v[l];
 		end
 		// stage 1: dequant factor (class, scaling matrix byte, QP / 6)
 		if (c0_v) begin
@@ -2368,9 +2435,40 @@ always @(*) begin
 	reg [6:0] s8;
 	pt = of_room ? ok[1:0] : ok[1:0] - 2'd1;
 	s8 = f_scan8({2'd0, pt, 2'b00});
-	iw_c = {refc[0][s8][4:0], refc[1][s8][4:0]};
+	iw_c = {refc[0][sx(7'(s8))][4:0], refc[1][sx(7'(s8))][4:0]};
 end
 assign iw_ra = iw_c;
+// shared cache read port
+always @(*) begin
+	reg [6:0] i8;
+	reg [4:0] k;
+	i8 = f_scan8({2'd0, pm_n});
+	cr_a = {pm_l, 6'(i8 - 7'd1)};
+	case (st)
+	S_PMB: cr_a = {pm_l, 6'(i8 - 7'd8)};
+	S_PMC: cr_a = {pm_l, 6'(i8 - 7'd8 + {4'd0, pm_pw})};
+	S_PMD: cr_a = {pm_l, 6'(i8 - 7'd9)};
+	S_O3: begin k = 5'(ok - 6'd5); cr_a = {k[4], 6'(f_scan8({2'd0, k[3:0]}))}; end
+	S_E1: begin k = 5'(mr_k - 6'd3); cr_a = {k[4], 6'(7'd12 + {5'd0, k[1:0]} + {2'd0, k[3:2], 3'd0})}; end
+	default: ;
+	endcase
+end
+// co-located vector reads: S_TD2 one block (copy 0), S_SD2 the 4 blocks of 8x8 dr_i8
+always @(*) begin
+	reg [1:0] i8;
+	reg sub8;
+	if (st == S_TD2) begin
+		i8 = dr_i8 == 3'd7 ? 2'd0 : dr_i8[1:0];
+		sub8 = dr_i8 == 3'd7 || (dr_sub & MT_16) != 0;
+		col_a[0] = {colr0[i8] < 0, sub8 ? {i8[1], i8[1], i8[0], i8[0]} : {i8[1], dr_i4[1], i8[0], dr_i4[0]}};
+		for (int k = 1; k < 4; k++) col_a[k] = 5'd0;
+	end
+	else begin
+		i8 = dr_i8[1:0];
+		for (int k = 0; k < 4; k++)
+			col_a[k] = {colr0[i8] != 8'sd0, (dr_sub & MT_16) != 0 ? {i8[1], i8[1], i8[0], i8[0]} : {i8[1], k[1], i8[0], k[0]}};
+	end
+end
 // coefficient word of the output scan
 assign cr_re = st == S_O5 && of_room && grp != 24'd0;
 assign cr_ra = (sc_g < 5'd16 && (mbt & MT_DCT) != 0) ? {1'b0, sc_g[3:2], t8({sc_g[1:0], sc_b})} : {sc_g, t4(sc_b)};
