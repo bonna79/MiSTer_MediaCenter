@@ -80,6 +80,7 @@ function automatic logic isdir(input [31:0] t, input logic p, input logic l);
 endfunction
 function automatic logic intra(input [31:0] t); intra = t[2:0] != 3'd0; endfunction
 function automatic logic inter(input [31:0] t); inter = t[6:3] != 4'd0; endfunction
+function automatic [5:0] sat33(input [6:0] a); sat33 = a > 7'd33 ? 6'd33 : a[5:0]; endfunction
 function automatic [13:0] tpack(input [31:0] t); tpack = {t[24], t[15:11], t[8], t[6:0]}; endfunction
 function automatic [31:0] tunpack(input [13:0] p);
 	tunpack = {7'd0, p[13], 8'd0, p[12:8], 2'd0, p[7], 1'b0, p[6:0]};
@@ -158,7 +159,7 @@ typedef struct packed {
 	logic [1:0]   dt;     // direct flags of two 8x8 blocks
 	logic [23:0]  rf;     // [l * 12 + k * 6], k: 2 ref_index
 	logic [255:0] mv;     // [l * 128 + k * 32], k: 4 vectors
-	logic [111:0] mvd;    // [l * 56 + k * 14], k: 4 |mvd| x | y << 7
+	logic [95:0]  mvd;    // [l * 48 + k * 12], k: 4 |mvd| x | y << 6, each at most 33
 } nrec_t;
 
 // ---------------------------------------------------------------- CABAC
@@ -307,7 +308,7 @@ endfunction
 // interior (rows 1..4, columns 4..7): 16 places per list, index (row - 1) * 4 + column - 4
 reg  signed [5:0] refc[0:1][0:15];
 reg  [31:0] mvc[0:1][0:15];
-reg  [13:0] mvdc[0:1][0:15];
+reg  [11:0] mvdc[0:1][0:15];
 // neighbours of the macroblock (row 0, column 3; column 8 of rows 1..4 is
 // never available): what fill_decode_caches would copy, read from the records
 function automatic signed [5:0] rfr(input logic l, input [6:0] p);
@@ -339,15 +340,15 @@ function automatic [31:0] mvr(input logic l, input [6:0] p);
 	else v = mvc[l][ix(p)];
 	mvr = v;
 endfunction
-function automatic [13:0] mdr(input logic l, input [6:0] p);
-	reg [13:0] v;
-	reg [111:0] tm, lm;
+function automatic [11:0] mdr(input logic l, input [6:0] p);
+	reg [11:0] v;
+	reg [95:0] tm, lm;
 	reg [2:0] y;
 	tm = trec.mvd; lm = lrec.mvd;
 	y = p[5:3] - 3'd1;
-	if (p[2:0] == 3'd0 || p == 7'd3) v = 14'd0;
-	else if (p[5:3] == 3'd0) v = uses(t_ty, l) ? 14'(tm >> ({l, p[1:0]} * 14)) : 14'd0;
-	else if (p[2:0] == 3'd3) v = uses(l_ty, l) ? 14'(lm >> ({l, y[1:0]} * 14)) : 14'd0;
+	if (p[2:0] == 3'd0 || p == 7'd3) v = 12'd0;
+	else if (p[5:3] == 3'd0) v = uses(t_ty, l) ? 12'(tm >> ({l, p[1:0]} * 12)) : 12'd0;
+	else if (p[2:0] == 3'd3) v = uses(l_ty, l) ? 12'(lm >> ({l, y[1:0]} * 12)) : 12'd0;
 	else v = mvdc[l][ix(p)];
 	mdr = v;
 endfunction
@@ -360,14 +361,14 @@ reg  [1:0][39:0] mvw_m, mvw_z, mdw_m, mdw_z, rfw_m, rfw_n;
 // one shared read port of the vector, mvd and ref caches
 reg   [6:0] cr_a;                   // {list, scan8 index}
 wire [31:0] cv_q = mvr(cr_a[6], 7'(cr_a[5:0]));
-wire [13:0] cd_q = mdr(cr_a[6], 7'(cr_a[5:0]));
+wire [11:0] cd_q = mdr(cr_a[6], 7'(cr_a[5:0]));
 wire signed [5:0] cf_q = rfr(cr_a[6], 7'(cr_a[5:0]));
 // neighbours of the block being predicted, read one a clock (S_PMA..S_PMD)
 reg  [31:0] pv_a, pv_b, pv_c, pv_d;
 reg  signed [5:0] pr_a, pr_b, pr_c, pr_d;
-reg  [13:0] pd_a, pd_b;
+reg  [11:0] pd_a, pd_b;
 reg  [1:0][31:0] mvw_v;
-reg  [1:0][13:0] mdw_v;
+reg  [1:0][11:0] mdw_v;
 reg  [1:0][5:0]  rfw_v;
 
 // row buffer
@@ -407,7 +408,7 @@ assign br_q = bw_we && bw_a == br_a ? bw_d : bmr[br_a];
 assign br_m = rv[br_a] ? br_q : 16'd0;
 reg   [8:0] ncoef;
 reg  [31:0] pcm[0:95];
-reg  signed [15:0] ldc[0:15];
+reg  signed [17:0] ldc[0:15];       // luma DC; the row pass of S_DC1 is done in place
 reg  signed [15:0] cdc[0:7];
 
 // residual block being read
@@ -561,9 +562,10 @@ endfunction
 reg         mv_l;
 reg   [3:0] mv_n;
 wire  [6:0] mv_i8 = f_scan8({2'd0, mv_n});
-wire [13:0] mv_a = pd_a, mv_b = pd_b;          // fetched with the vector neighbours (mv_n = pm_n)
-wire  [7:0] amvd0 = {1'b0, mv_a[6:0]} + {1'b0, mv_b[6:0]};
-wire  [7:0] amvd1 = {1'b0, mv_a[13:7]} + {1'b0, mv_b[13:7]};
+wire [11:0] mv_a = pd_a, mv_b = pd_b;          // fetched with the vector neighbours (mv_n = pm_n)
+// each |mvd| is kept at most 33: the contexts only ask sum > 2 and sum > 32
+wire  [7:0] amvd0 = {2'b0, mv_a[5:0]} + {2'b0, mv_b[5:0]};
+wire  [7:0] amvd1 = {2'b0, mv_a[11:6]} + {2'b0, mv_b[11:6]};
 
 // ref context
 reg         rf_l;
@@ -650,7 +652,7 @@ endtask
 task automatic fmvz(input logic l, input [6:0] s, input [2:0] w, input [2:0] h);
 	mvw_z[l] = mvw_z[l] | rmask(s, w, h);
 endtask
-task automatic fmvd(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [13:0] v);
+task automatic fmvd(input logic l, input [6:0] s, input [2:0] w, input [2:0] h, input [11:0] v);
 	mdw_v[l] = v; mdw_m[l] = mdw_m[l] | rmask(s, w, h);
 endtask
 task automatic fmvdz(input logic l, input [6:0] s, input [2:0] w, input [2:0] h);
@@ -701,7 +703,6 @@ reg   [6:0] qdv;
 reg   [1:0] qdc;
 reg   [4:0] rq;
 reg   [4:0] dck;
-reg  signed [17:0] tmp[0:15];
 reg  [23:0] qmul_dc;
 reg         td_ph;                  // temporal direct: 0 scale, 1 write
 reg         dc_ph;                  // luma DC output: 0 sum, 1 scale and write
@@ -759,7 +760,7 @@ always @(posedge clk) begin
 		r_on <= 1'b0;
 		mdy <= 1'b0;
 		c0_v <= 1'b0; c1_v <= 1'b0; c2_v <= 1'b0; c3_v <= 1'b0;
-		for (int k = 0; k < 16; k++) ldc[k] <= 16'sd0;
+		for (int k = 0; k < 16; k++) ldc[k] <= 18'sd0;
 		for (int k = 0; k < 8; k++) cdc[k] <= 16'sd0;
 	end
 	else begin
@@ -1391,10 +1392,10 @@ always @(posedge clk) begin
 		S_MV3: begin
 			reg [6:0] s8;
 			reg [31:0] v;
-			reg [13:0] d;
+			reg [11:0] d;
 			s8 = f_scan8({2'd0, mv_n});
 			v = {16'(my_acc), 16'(mx_acc)};
-			d = {mdy_r[6:0], mdax};
+			d = {sat33(mdy_r[6:0]), sat33(mdax)};
 			if ((sub[ii] & MT_16) != 0) begin
 				fmv(ll, s8, 3'd2, 3'd2, v);
 				fmvd(ll, s8, 3'd2, 3'd2, d);
@@ -1494,9 +1495,9 @@ always @(posedge clk) begin
 		end
 		S_PV3: begin
 			reg [31:0] v;
-			reg [13:0] d;
+			reg [11:0] d;
 			v = {16'(my_acc), 16'(mx_acc)};
-			d = {mdy_r[6:0], mdax};
+			d = {sat33(mdy_r[6:0]), sat33(mdax)};
 			if ((mbt & MT_16) != 0) begin
 				fmvd(ll, 7'd12, 3'd4, 3'd4, d);
 				fmv(ll, 7'd12, 3'd4, 3'd4, v);
@@ -1657,7 +1658,7 @@ always @(posedge clk) begin
 			go = 1'b0;
 			if (rq == 5'd0) begin
 				if ((mbt & MT_I16) != 0) begin
-					for (int k = 0; k < 16; k++) ldc[k] <= 16'sd0;
+					for (int k = 0; k < 16; k++) ldc[k] <= 18'sd0;
 					r_cat <= 3'd0; r_blk <= 6'd48; go = 1'b1;
 				end
 			end
@@ -1766,14 +1767,14 @@ always @(posedge clk) begin
 			reg signed [17:0] z0, z1, z2, z3;
 			reg [1:0] i;
 			i = dck[1:0];
-			z0 = 18'(ldc[{i, 2'd0}]) + 18'(ldc[{i, 2'd1}]);
-			z1 = 18'(ldc[{i, 2'd0}]) - 18'(ldc[{i, 2'd1}]);
-			z2 = 18'(ldc[{i, 2'd2}]) - 18'(ldc[{i, 2'd3}]);
-			z3 = 18'(ldc[{i, 2'd2}]) + 18'(ldc[{i, 2'd3}]);
-			tmp[{i, 2'd0}] <= z0 + z3;
-			tmp[{i, 2'd1}] <= z0 - z3;
-			tmp[{i, 2'd2}] <= z1 - z2;
-			tmp[{i, 2'd3}] <= z1 + z2;
+			z0 = ldc[{i, 2'd0}] + ldc[{i, 2'd1}];
+			z1 = ldc[{i, 2'd0}] - ldc[{i, 2'd1}];
+			z2 = ldc[{i, 2'd2}] - ldc[{i, 2'd3}];
+			z3 = ldc[{i, 2'd2}] + ldc[{i, 2'd3}];
+			ldc[{i, 2'd0}] <= z0 + z3;
+			ldc[{i, 2'd1}] <= z0 - z3;
+			ldc[{i, 2'd2}] <= z1 - z2;
+			ldc[{i, 2'd3}] <= z1 + z2;
 			dck <= i == 2'd3 ? 5'd0 : dck + 5'd1;
 			if (i == 2'd3) st <= S_DC0;
 		end
@@ -1785,10 +1786,10 @@ always @(posedge clk) begin
 				reg [31:0] z0, z1, z2, z3;
 				i = dck[3:2];
 				r = dck[1:0];
-				z0 = tmp[i] + tmp[8 + i];
-				z1 = tmp[i] - tmp[8 + i];
-				z2 = tmp[4 + i] - tmp[12 + i];
-				z3 = tmp[4 + i] + tmp[12 + i];
+				z0 = 32'(ldc[i]) + 32'(ldc[8 + i]);
+				z1 = 32'(ldc[i]) - 32'(ldc[8 + i]);
+				z2 = 32'(ldc[4 + i]) - 32'(ldc[12 + i]);
+				z3 = 32'(ldc[4 + i]) + 32'(ldc[12 + i]);
 				dc_z <= r == 2'd0 ? z0 + z3 : r == 2'd1 ? z1 + z2 : r == 2'd2 ? z1 - z2 : z0 - z3;
 				dc_blk <= (i == 2'd0 ? 4'd0 : i == 2'd1 ? 4'd2 : i == 2'd2 ? 4'd8 : 4'd10) +
 				          (r == 2'd0 ? 4'd0 : r == 2'd1 ? 4'd1 : r == 2'd2 ? 4'd4 : 4'd5);
@@ -1988,7 +1989,7 @@ always @(posedge clk) begin
 				t.rf[ls * 12 + 6 +: 6] = rfr(ls, 7'(30));
 				for (int k = 0; k < 4; k++) begin
 					t.mv[ls * 128 + k * 32 +: 32] = mvr(ls, 7'(36 + k));
-					t.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mdr(ls, 7'(36 + k));
+					t.mvd[ls * 48 + k * 12 +: 12] = sk ? 12'd0 : mdr(ls, 7'(36 + k));
 				end
 			end
 			l = t;
@@ -2000,7 +2001,7 @@ always @(posedge clk) begin
 				l.rf[ls * 12 + 6 +: 6] = rfr(ls, 7'(30));
 				for (int k = 0; k < 4; k++) begin
 					l.mv[ls * 128 + k * 32 +: 32] = mvr(ls, 7'(15 + 8 * k));
-					l.mvd[ls * 56 + k * 14 +: 14] = sk ? 14'd0 : mdr(ls, 7'(15 + 8 * k));
+					l.mvd[ls * 48 + k * 12 +: 12] = sk ? 12'd0 : mdr(ls, 7'(15 + 8 * k));
 				end
 			end
 			rb_we <= 1'b1;
@@ -2402,7 +2403,7 @@ always @(posedge clk) begin
 			reg [6:0] pos;
 			reg [7:0] smi;
 			pos = cab_pos;
-			if (r_cat == 3'd0) ldc[f_zz4(pos[3:0])] <= cab_val[15:0];
+			if (r_cat == 3'd0) ldc[f_zz4(pos[3:0])] <= {{2{cab_val[15]}}, cab_val[15:0]};
 			else if (r_cat == 3'd3) cdc[{r_blk == 6'd50, pos[1:0]}] <= cab_val[15:0];
 			else begin
 				if (r_cat == 3'd5) begin j = f_zz8(pos[5:0]); p = t8(j); end
@@ -2427,7 +2428,7 @@ always @(posedge clk) begin
 		// (interior places only; the -2 of column 8 is constant in rfr)
 		for (int l = 0; l < 2; l++) for (int i = 12; i < 40; i++) if (i % 8 >= 4) begin
 			if (mvw_m[l][i] || mvw_z[l][i]) mvc[l][ix(7'(i))] <= mvw_z[l][i] ? 32'd0 : mvw_v[l];
-			if (mdw_m[l][i] || mdw_z[l][i]) mvdc[l][ix(7'(i))] <= mdw_z[l][i] ? 14'd0 : mdw_v[l];
+			if (mdw_m[l][i] || mdw_z[l][i]) mvdc[l][ix(7'(i))] <= mdw_z[l][i] ? 12'd0 : mdw_v[l];
 			if (rfw_m[l][i] || rfw_n[l][i]) refc[l][ix(7'(i))] <= rfw_n[l][i] ? -6'sd2 : rfw_v[l];
 		end
 		// stage 1: dequant factor (class, scaling matrix byte, QP / 6)

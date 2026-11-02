@@ -31,10 +31,10 @@ GROUPS = {
 # text edits instead of removed states: (old, new) pairs, each must occur
 EDITS = {
     'mvcint':  [('else v = mvc[l][ix(p)];', 'else v = 32\'d0;')],
-    'mvdcint': [('else v = mvdc[l][ix(p)];', 'else v = 14\'d0;')],
+    'mvdcint': [('else v = mvdc[l][ix(p)];', 'else v = 12\'d0;')],
     'refcint': [('else r = refc[l][ix(p)];', 'else r = 6\'sd0;')],
     'cvq':     [('wire [31:0] cv_q = mvr(cr_a[6], 7\'(cr_a[5:0]));', 'wire [31:0] cv_q = 32\'d0;')],
-    'cdq':     [('wire [13:0] cd_q = mdr(cr_a[6], 7\'(cr_a[5:0]));', 'wire [13:0] cd_q = 14\'d0;')],
+    'cdq':     [('wire [11:0] cd_q = mdr(cr_a[6], 7\'(cr_a[5:0]));', 'wire [11:0] cd_q = 12\'d0;')],
 }
 
 src, grp = sys.argv[1], sys.argv[2]
