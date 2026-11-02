@@ -727,6 +727,8 @@ reg  [23:0] qmul_dc;
 reg         td_ph;                  // temporal direct: 0 scale, 1 write
 reg         dc_ph;                  // luma DC output: 0 sum, 1 scale and write
 reg  [31:0] dc_z;
+wire [31:0] dc_pr = dc_z * {8'd0, qmul_dc};   // shared by the luma and chroma DC scale
+reg   [5:0] cq0_r;                  // S_O1: chroma QP (Cb) of this macroblock, word 1 for word 2
 reg   [3:0] dc_blk;
 reg  [15:0] td_mx, td_my, td_cx, td_cy;
 reg   [5:0] ok;                     // output counter
@@ -1823,7 +1825,7 @@ always @(posedge clk) begin
 			else begin
 				reg [31:0] pr;
 				reg [15:0] v;
-				pr = dc_z * {8'd0, qmul_dc} + 32'd128;
+				pr = dc_pr + 32'd128;
 				v = pr[23:8];
 				cr_we <= 1'b1;
 				cr_wa <= {1'b0, dc_blk, 4'd0};
@@ -1866,7 +1868,7 @@ always @(posedge clk) begin
 				reg [31:0] pr;
 				reg [15:0] v;
 				reg [2:0] cb;
-				pr = dc_z * {8'd0, qmul_dc};
+				pr = dc_pr;
 				v = pr[22:7];
 				cb = {dck[2], dck[1:0]};
 				cr_we <= 1'b1;
@@ -1890,8 +1892,8 @@ always @(posedge clk) begin
 			// A5 (or A0 A0 A0), word ok
 			if (s_dbk == 2'd0) begin ok <= 6'd0; st <= S_O2; end
 			else begin
-				reg [5:0] q, nl, nt;
-				reg [6:0] qy0, qy1, qb0, qb1, qr0, qr1;
+				reg [5:0] q, nl, nt, cq, cl, ct;
+				reg [6:0] qy0, qy1, qc0, qc1;
 				reg bad;
 				bad = s_alpha < -8'sd16 || s_alpha > 8'sd15 || s_beta < -8'sd16 || s_beta > 8'sd15;
 				q = qrec;
@@ -1899,16 +1901,19 @@ always @(posedge clk) begin
 				nt = dt_av ? trec.qp : q;
 				qy0 = ({1'b0, q} + {1'b0, nl} + 7'd1) >> 1;
 				qy1 = ({1'b0, q} + {1'b0, nt} + 7'd1) >> 1;
-				qb0 = ({1'b0, cqp(1'b0, q)} + {1'b0, cqp(1'b0, nl)} + 7'd1) >> 1;
-				qb1 = ({1'b0, cqp(1'b0, q)} + {1'b0, cqp(1'b0, nt)} + 7'd1) >> 1;
-				qr0 = ({1'b0, cqp(1'b1, q)} + {1'b0, cqp(1'b1, nl)} + 7'd1) >> 1;
-				qr1 = ({1'b0, cqp(1'b1, q)} + {1'b0, cqp(1'b1, nt)} + 7'd1) >> 1;
+				// chroma: Cb for word 1, Cr for word 2
+				cq = cqp(ok == 6'd2, q);
+				cl = cqp(ok == 6'd2, nl);
+				ct = cqp(ok == 6'd2, nt);
+				qc0 = ({1'b0, cq} + {1'b0, cl} + 7'd1) >> 1;
+				qc1 = ({1'b0, cq} + {1'b0, ct} + 7'd1) >> 1;
+				if (ok == 6'd1) cq0_r <= cq;
 				of_we <= 1'b1;
 				if (bad) of_wd <= 32'hA0000000;
 				else case (ok)
 				6'd0: of_wd <= {8'hA5, 12'd0, s_beta[4:0], s_alpha[4:0], dt_av, dl_av};
-				6'd1: of_wd <= {2'd0, qb1[5:0], qb0[5:0], q, qy1[5:0], qy0[5:0]};
-				default: of_wd <= {8'd0, cqp(1'b1, q), qr1[5:0], qr0[5:0], cqp(1'b0, q)};
+				6'd1: of_wd <= {2'd0, qc1[5:0], qc0[5:0], q, qy1[5:0], qy0[5:0]};
+				default: of_wd <= {8'd0, cq, qc1[5:0], qc0[5:0], cq0_r};
 				endcase
 				ok <= ok == 6'd2 ? 6'd0 : ok + 6'd1;
 				if (ok == 6'd2) st <= S_O2;
