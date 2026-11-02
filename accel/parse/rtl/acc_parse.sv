@@ -158,7 +158,7 @@ typedef struct packed {
 	logic [7:0]   nz;     // luma 4, Cb 2, Cr 2
 	logic [1:0]   dt;     // direct flags of two 8x8 blocks
 	logic [23:0]  rf;     // [l * 12 + k * 6], k: 2 ref_index
-	logic [255:0] mv;     // [l * 128 + k * 32], k: 4 vectors
+	logic [207:0] mv;     // [l * 104 + k * 26], k: 4 vectors packed by mvp (y 12 | x 14 bits)
 	logic [95:0]  mvd;    // [l * 48 + k * 12], k: 4 |mvd| x | y << 6, each at most 33
 } nrec_t;
 
@@ -307,10 +307,21 @@ function automatic [3:0] ix(input [6:0] p);
 endfunction
 // interior (rows 1..4, columns 4..7): 16 places per list, index (row - 1) * 4 + column - 4
 reg  signed [5:0] refc[0:1][0:15];
-reg  [31:0] mvc[0:1][0:15];
+reg  [25:0] mvc[0:1][0:15];        // packed by mvp
+// H.264 level limits: |mv x| < 2048 pels, |mv y| < 512 pels in quarter pels -> x 14, y 12 bits
+function automatic [25:0] mvp(input [31:0] v); mvp = {v[27:16], v[13:0]}; endfunction
+function automatic [31:0] mvu(input [25:0] p); mvu = {{4{p[25]}}, p[25:14], {2{p[13]}}, p[13:0]}; endfunction
+function automatic [25:0] mvs(input [207:0] m, input logic l, input [1:0] k);
+	reg [103:0] h;
+	h = l ? m[207:104] : m[103:0];
+	case (k) 2'd0: mvs = h[25:0]; 2'd1: mvs = h[51:26]; 2'd2: mvs = h[77:52]; default: mvs = h[103:78]; endcase
+endfunction
 reg  [11:0] mvdc[0:1][0:15];
 // neighbours of the macroblock (row 0, column 3; column 8 of rows 1..4 is
 // never available): what fill_decode_caches would copy, read from the records
+function automatic [5:0] rfs(input [23:0] m, input [1:0] i);
+	case (i) 2'd0: rfs = m[5:0]; 2'd1: rfs = m[11:6]; 2'd2: rfs = m[17:12]; default: rfs = m[23:18]; endcase
+endfunction
 function automatic signed [5:0] rfr(input logic l, input [6:0] p);
 	reg signed [5:0] r;
 	reg [1:0] k;
@@ -322,23 +333,27 @@ function automatic signed [5:0] rfr(input logic l, input [6:0] p);
 		else r = -6'sd2;
 	end
 	else if (p == 7'd3) r = uses(tl_ty, l) ? $signed(l ? tlr.rf[23:18] : tlr.rf[11:6]) : (tl_ty != 0 ? -6'sd1 : -6'sd2);
-	else if (p[5:3] == 3'd0) r = uses(t_ty, l) ? $signed(6'(tf >> {l, p[1]} * 6)) : (t_ty != 0 ? -6'sd1 : -6'sd2);
-	else if (p[2:0] == 3'd3) r = uses(l_ty, l) ? $signed(6'(lf >> {l, k[0]} * 6)) : (l_ty != 0 ? -6'sd1 : -6'sd2);
+	else if (p[5:3] == 3'd0) r = uses(t_ty, l) ? $signed(rfs(tf, {l, p[1]})) : (t_ty != 0 ? -6'sd1 : -6'sd2);
+	else if (p[2:0] == 3'd3) r = uses(l_ty, l) ? $signed(rfs(lf, {l, k[0]})) : (l_ty != 0 ? -6'sd1 : -6'sd2);
 	else r = refc[l][ix(p)];
 	rfr = r;
 endfunction
 function automatic [31:0] mvr(input logic l, input [6:0] p);
 	reg [31:0] v;
-	reg [255:0] tm, lm;
+	reg [207:0] tm, lm;
 	reg [2:0] y;
 	tm = trec.mv; lm = lrec.mv;
 	y = p[5:3] - 3'd1;
-	if (p[2:0] == 3'd0) v = p == 7'd8 && uses(tr_ty, l) ? (l ? trr.mv[159:128] : trr.mv[31:0]) : 32'd0;
-	else if (p == 7'd3) v = uses(tl_ty, l) ? (l ? tlr.mv[255:224] : tlr.mv[127:96]) : 32'd0;
-	else if (p[5:3] == 3'd0) v = uses(t_ty, l) ? 32'(tm >> {l, p[1:0], 5'd0}) : 32'd0;
-	else if (p[2:0] == 3'd3) v = uses(l_ty, l) ? 32'(lm >> {l, y[1:0], 5'd0}) : 32'd0;
-	else v = mvc[l][ix(p)];
+	if (p[2:0] == 3'd0) v = p == 7'd8 && uses(tr_ty, l) ? mvu(l ? trr.mv[129:104] : trr.mv[25:0]) : 32'd0;
+	else if (p == 7'd3) v = uses(tl_ty, l) ? mvu(l ? tlr.mv[207:182] : tlr.mv[103:78]) : 32'd0;
+	else if (p[5:3] == 3'd0) v = uses(t_ty, l) ? mvu(mvs(tm, l, p[1:0])) : 32'd0;
+	else if (p[2:0] == 3'd3) v = uses(l_ty, l) ? mvu(mvs(lm, l, y[1:0])) : 32'd0;
+	else v = mvu(mvc[l][ix(p)]);
 	mvr = v;
+endfunction
+function automatic [11:0] mds(input [95:0] m, input [2:0] i);
+	case (i) 3'd0: mds = m[11:0]; 3'd1: mds = m[23:12]; 3'd2: mds = m[35:24]; 3'd3: mds = m[47:36];
+	3'd4: mds = m[59:48]; 3'd5: mds = m[71:60]; 3'd6: mds = m[83:72]; default: mds = m[95:84]; endcase
 endfunction
 function automatic [11:0] mdr(input logic l, input [6:0] p);
 	reg [11:0] v;
@@ -347,8 +362,8 @@ function automatic [11:0] mdr(input logic l, input [6:0] p);
 	tm = trec.mvd; lm = lrec.mvd;
 	y = p[5:3] - 3'd1;
 	if (p[2:0] == 3'd0 || p == 7'd3) v = 12'd0;
-	else if (p[5:3] == 3'd0) v = uses(t_ty, l) ? 12'(tm >> ({l, p[1:0]} * 12)) : 12'd0;
-	else if (p[2:0] == 3'd3) v = uses(l_ty, l) ? 12'(lm >> ({l, y[1:0]} * 12)) : 12'd0;
+	else if (p[5:3] == 3'd0) v = uses(t_ty, l) ? mds(tm, {l, p[1:0]}) : 12'd0;
+	else if (p[2:0] == 3'd3) v = uses(l_ty, l) ? mds(lm, {l, y[1:0]}) : 12'd0;
 	else v = mvdc[l][ix(p)];
 	mdr = v;
 endfunction
@@ -953,21 +968,21 @@ always @(posedge clk) begin
 			fref(1'b0, 7'd12, 3'd4, 3'd4, 6'd0);
 			if (uses(l_ty, 1'b0)) begin
 				lr = lrec.rf[5:0];
-				A = lrec.mv[31:0];
+				A = mvu(lrec.mv[25:0]);
 				if (lr == 6'sd0 && A == 32'd0) z = 1'b1;
 			end
 			else if (l_ty != 0) begin lr = -6'sd1; A = 32'd0; end
 			else z = 1'b1;
 			if (uses(t_ty, 1'b0)) begin
 				tr = trec.rf[5:0];
-				B = trec.mv[31:0];
+				B = mvu(trec.mv[25:0]);
 				if (tr == 6'sd0 && B == 32'd0) z = 1'b1;
 			end
 			else if (t_ty != 0) begin tr = -6'sd1; B = 32'd0; end
 			else z = 1'b1;
-			if (uses(tr_ty, 1'b0)) begin dr = trr.rf[5:0]; C = trr.mv[31:0]; end
+			if (uses(tr_ty, 1'b0)) begin dr = trr.rf[5:0]; C = mvu(trr.mv[25:0]); end
 			else if (tr_ty != 0) begin dr = -6'sd1; C = 32'd0; end
-			else if (uses(tl_ty, 1'b0)) begin dr = tlr.rf[11:6]; C = tlr.mv[127:96]; end
+			else if (uses(tl_ty, 1'b0)) begin dr = tlr.rf[11:6]; C = mvu(tlr.mv[103:78]); end
 			else if (tl_ty != 0) begin dr = -6'sd1; C = 32'd0; end
 			else begin dr = -6'sd2; C = 32'd0; end
 			mc = {1'b0, dr == 6'sd0} + {1'b0, tr == 6'sd0} + {1'b0, lr == 6'sd0};
@@ -1988,7 +2003,7 @@ always @(posedge clk) begin
 				t.rf[ls * 12 +: 6] = rfr(ls, 7'(28));
 				t.rf[ls * 12 + 6 +: 6] = rfr(ls, 7'(30));
 				for (int k = 0; k < 4; k++) begin
-					t.mv[ls * 128 + k * 32 +: 32] = mvr(ls, 7'(36 + k));
+					t.mv[ls * 104 + k * 26 +: 26] = mvp(mvr(ls, 7'(36 + k)));
 					t.mvd[ls * 48 + k * 12 +: 12] = sk ? 12'd0 : mdr(ls, 7'(36 + k));
 				end
 			end
@@ -2000,7 +2015,7 @@ always @(posedge clk) begin
 				l.rf[ls * 12 +: 6] = rfr(ls, 7'(14));
 				l.rf[ls * 12 + 6 +: 6] = rfr(ls, 7'(30));
 				for (int k = 0; k < 4; k++) begin
-					l.mv[ls * 128 + k * 32 +: 32] = mvr(ls, 7'(15 + 8 * k));
+					l.mv[ls * 104 + k * 26 +: 26] = mvp(mvr(ls, 7'(15 + 8 * k)));
 					l.mvd[ls * 48 + k * 12 +: 12] = sk ? 12'd0 : mdr(ls, 7'(15 + 8 * k));
 				end
 			end
@@ -2427,7 +2442,7 @@ always @(posedge clk) begin
 		// cache write buses
 		// (interior places only; the -2 of column 8 is constant in rfr)
 		for (int l = 0; l < 2; l++) for (int i = 12; i < 40; i++) if (i % 8 >= 4) begin
-			if (mvw_m[l][i] || mvw_z[l][i]) mvc[l][ix(7'(i))] <= mvw_z[l][i] ? 32'd0 : mvw_v[l];
+			if (mvw_m[l][i] || mvw_z[l][i]) mvc[l][ix(7'(i))] <= mvw_z[l][i] ? 26'd0 : mvp(mvw_v[l]);
 			if (mdw_m[l][i] || mdw_z[l][i]) mvdc[l][ix(7'(i))] <= mdw_z[l][i] ? 12'd0 : mdw_v[l];
 			if (rfw_m[l][i] || rfw_n[l][i]) refc[l][ix(7'(i))] <= rfw_n[l][i] ? -6'sd2 : rfw_v[l];
 		end
