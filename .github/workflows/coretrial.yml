@@ -15,11 +15,17 @@ on:
 jobs:
   trial:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@v4
       - name: Compile the core with acc_parse (copy in the runner only)
         run: |
           git apply accel/parse/coretrial/mc_acc_trial.patch
+          sed -i 's/^set_global_assignment -name SEED .*/set_global_assignment -name SEED ${{ matrix.seed }}/' fpga/menu/menu.qsf
+          grep -n "SEED" fpga/menu/menu.qsf
           cat >> fpga/menu/files.qip <<'QIP'
           set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/parse/rtl/acc_parse.sv
           set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/parse/rtl/cab_dec.sv
@@ -60,5 +66,5 @@ jobs:
           grep -A12 "; Fitter Resource Usage Summary" fpga/menu/output_files/menu.fit.rpt | head -20 || true
           docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
             quartus_sta -t slack.tcl > slack.log 2>&1 || true
-          grep "^SLACK" slack.log | sort -k3 -n
+          grep "^SLACK" slack.log | sort -k3 -n | sed "s/^/seed ${{ matrix.seed }} /"
           grep "^PATH" slack.log | cut -c1-220
