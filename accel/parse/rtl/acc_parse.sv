@@ -375,6 +375,8 @@ reg  [39:0] dirc;
 reg  [1:0][39:0] mvw_m, mvw_z, mdw_m, mdw_z, rfw_m, rfw_n;
 // one shared read port of the vector, mvd and ref caches
 reg   [6:0] cr_a;                   // {list, scan8 index}
+reg   [6:0] cr_ar;                  // registered address of the S_PMB..S_PME neighbour reads
+reg         pm_rd;                  // 1 in S_PMB..S_PME: cr_a = cr_ar
 wire [31:0] cv_q = mvr(cr_a[6], 7'(cr_a[5:0]));
 wire [11:0] cd_q = mdr(cr_a[6], 7'(cr_a[5:0]));
 wire signed [5:0] cf_q = rfr(cr_a[6], 7'(cr_a[5:0]));
@@ -483,6 +485,7 @@ reg   [5:0] mc_i, mc_r;
 // pred_motion / 16x8 / 8x16 (FFmpeg h264_mvpred.h), for pm_n, pm_pw, pm_l, pm_ref, pm_mode
 reg   [3:0] pm_n;
 reg   [2:0] pm_pw;
+wire  [6:0] pm_i8 = f_scan8({2'd0, pm_n});
 reg         pm_l;
 reg  signed [5:0] pm_ref;
 reg   [1:0] pm_mode;                // 0 pred_motion, 1 16x8, 2 8x16
@@ -605,11 +608,13 @@ always @(*) begin
 	sc_g = 5'd0;
 	for (int g = 23; g >= 0; g--) if (grp[g]) sc_g = 5'(g);
 end
+// the block being sent (S_O5): its word sc_w, group sc_gr, first bit sc_b
+reg  [15:0] sc_w;
+reg         sc_wv;
+reg   [4:0] sc_gr;
 always @(*) begin
-	reg [15:0] w;
-	w = br_m | {15'd0, dcm[sc_g]};
 	sc_b = 4'd0;
-	for (int b = 15; b >= 0; b--) if (w[b]) sc_b = 4'(b);
+	for (int b = 15; b >= 0; b--) if (sc_w[b]) sc_b = 4'(b);
 end
 
 // ---------------------------------------------------------------- states
@@ -639,7 +644,7 @@ localparam
 	S_P8E = 137, S_RF3 = 138, S_PV3 = 139, S_T8B = 140, S_ERW = 141, S_PRN = 142,
 	S_TP0 = 143, S_TP1 = 144, S_TP2 = 145, S_TP3 = 146, S_TP4 = 147,
 	S_PMA = 148, S_PMB = 149, S_PMC = 150, S_PMD = 151,
-	S_SDA = 152, S_SDB = 153, S_SDC = 154;
+	S_SDA = 152, S_SDB = 153, S_SDC = 154, S_PME = 155;
 
 // ---------------------------------------------------------------- tasks (cache writes)
 task automatic dec(input [9:0] c, input [7:0] nx);
@@ -735,6 +740,8 @@ reg   [5:0] mr_k;
 reg   [1:0] mr_sub;
 reg  [31:0] mr_base;
 reg   [2:0] dr_i8;
+reg         sd_ph;                  // S_SD2: 0 reads the co-located vectors, 1 writes
+reg   [3:0] sd_ze;                  // S_SD2: co-located vector k is near zero
 reg   [1:0] dr_i4;
 reg   [4:0] dr_n;
 reg   [2:0] dr_m;
@@ -765,6 +772,7 @@ always @(posedge clk) begin
 	if (data_on && in_valid && in_ready) dleft <= dleft - 30'd1;
 	if (reset) begin
 		st <= S_DESC;
+		pm_rd <= 1'b0;
 		dpart <= 4'd0;
 		data_on <= 1'b0;
 		cab_v <= 1'b0;
@@ -1394,10 +1402,12 @@ always @(posedge clk) begin
 			st <= S_PMA;
 		end
 		// neighbours of block pm_n, list pm_l: left, top, top right, top left
-		S_PMA: begin pv_a <= cv_q; pr_a <= cf_q; pd_a <= cd_q; st <= S_PMB; end
-		S_PMB: begin pv_b <= cv_q; pr_b <= cf_q; pd_b <= cd_q; st <= S_PMC; end
-		S_PMC: begin pv_c <= cv_q; pr_c <= cf_q; st <= S_PMD; end
-		S_PMD: begin pv_d <= cv_q; pr_d <= cf_q; st <= pm_ret; end
+		// the address is registered one clock ahead of each read (timing)
+		S_PMA: begin cr_ar <= {pm_l, 6'(pm_i8 - 7'd1)}; pm_rd <= 1'b1; st <= S_PMB; end
+		S_PMB: begin pv_a <= cv_q; pr_a <= cf_q; pd_a <= cd_q; cr_ar <= {pm_l, 6'(pm_i8 - 7'd8)}; st <= S_PMC; end
+		S_PMC: begin pv_b <= cv_q; pr_b <= cf_q; pd_b <= cd_q; cr_ar <= {pm_l, 6'(pm_i8 - 7'd8 + {4'd0, pm_pw})}; st <= S_PMD; end
+		S_PMD: begin pv_c <= cv_q; pr_c <= cf_q; cr_ar <= {pm_l, 6'(pm_i8 - 7'd9)}; st <= S_PME; end
+		S_PME: begin pv_d <= cv_q; pr_d <= cf_q; pm_rd <= 1'b0; st <= pm_ret; end
 		S_MV2: begin
 			mx_acc <= pm_mx;
 			my_acc <= pm_my;
@@ -1841,30 +1851,38 @@ always @(posedge clk) begin
 			else dck <= 5'd4;
 		end
 		S_DC3: begin
-			reg [31:0] a, b, c, d, e, z, pr;
-			reg [15:0] v;
-			reg [2:0] cb;
-			a = 32'(cdc[{dck[2], 2'd0}]);
-			b = 32'(cdc[{dck[2], 2'd1}]);
-			c = 32'(cdc[{dck[2], 2'd2}]);
-			d = 32'(cdc[{dck[2], 2'd3}]);
-			e = a - b; a = a + b; b = c - d; c = c + d;
-			z = dck[1:0] == 2'd0 ? a + c : dck[1:0] == 2'd1 ? e + b : dck[1:0] == 2'd2 ? a - c : e - b;
-			pr = z * {8'd0, qmul_dc};
-			v = pr[22:7];
-			cb = {dck[2], dck[1:0]};
-			cr_we <= 1'b1;
-			cr_wa <= 9'd256 + {2'd0, cb, 4'd0};
-			cr_wd <= v;
-			if (v != 16'd0) begin
-				dcm[5'd16 + {2'd0, cb}] <= 1'b1;
-				ncoef <= ncoef + 9'd1;
+			// chroma DC dck: first clock the sum, second the scale and the write
+			if (!dc_ph) begin
+				reg [31:0] a, b, c, d, e;
+				a = 32'(cdc[{dck[2], 2'd0}]);
+				b = 32'(cdc[{dck[2], 2'd1}]);
+				c = 32'(cdc[{dck[2], 2'd2}]);
+				d = 32'(cdc[{dck[2], 2'd3}]);
+				e = a - b; a = a + b; b = c - d; c = c + d;
+				dc_z <= dck[1:0] == 2'd0 ? a + c : dck[1:0] == 2'd1 ? e + b : dck[1:0] == 2'd2 ? a - c : e - b;
+				dc_ph <= 1'b1;
 			end
-			if (dck[1:0] == 2'd3) begin
-				if (dck[2]) st <= S_O1;
-				else begin dck <= 5'd4; st <= S_DC2; end
+			else begin
+				reg [31:0] pr;
+				reg [15:0] v;
+				reg [2:0] cb;
+				pr = dc_z * {8'd0, qmul_dc};
+				v = pr[22:7];
+				cb = {dck[2], dck[1:0]};
+				cr_we <= 1'b1;
+				cr_wa <= 9'd256 + {2'd0, cb, 4'd0};
+				cr_wd <= v;
+				if (v != 16'd0) begin
+					dcm[5'd16 + {2'd0, cb}] <= 1'b1;
+					ncoef <= ncoef + 9'd1;
+				end
+				dc_ph <= 1'b0;
+				if (dck[1:0] == 2'd3) begin
+					if (dck[2]) st <= S_O1;
+					else begin dck <= 5'd4; st <= S_DC2; end
+				end
+				else dck <= dck + 5'd1;
 			end
-			else dck <= dck + 5'd1;
 		end
 
 		// ------------------------------------------------ mcacc: output
@@ -1945,6 +1963,7 @@ always @(posedge clk) begin
 			of_we <= 1'b1;
 			of_wd <= {23'd0, ncoef};
 			sc_pend <= 1'b0;
+			sc_wv <= 1'b0;
 			st <= S_O5;
 		end
 		// coefficients: the first set bit, its RAM word a clock later
@@ -1953,27 +1972,34 @@ always @(posedge clk) begin
 				of_we <= 1'b1;
 				of_wd <= {5'd0, sc_blk_r, sc_p_r, cr_q};
 			end
-			if (grp != 24'd0) begin
+			if (sc_wv) begin
+				// next coefficient of the loaded block
 				reg [4:0] blk;
 				reg [5:0] p;
 				reg [15:0] nw;
-				nw = br_m & ~(16'd1 << sc_b);
-				bw_we <= 1'b1;
-				bw_a <= sc_g;
-				bw_d <= nw;
-				rv[sc_g] <= nw != 16'd0;
-				if (sc_b == 4'd0) dcm[sc_g] <= 1'b0;
-				if (sc_g < 5'd16 && (mbt & MT_DCT) != 0) begin
-					blk = {1'b0, sc_g[3:2], 2'b00};
-					p = {sc_g[1:0], sc_b};
+				nw = sc_w & ~(16'd1 << sc_b);
+				sc_w <= nw;
+				sc_wv <= nw != 16'd0;
+				if (sc_gr < 5'd16 && (mbt & MT_DCT) != 0) begin
+					blk = {1'b0, sc_gr[3:2], 2'b00};
+					p = {sc_gr[1:0], sc_b};
 				end
 				else begin
-					blk = sc_g;
+					blk = sc_gr;
 					p = {2'd0, sc_b};
 				end
 				sc_blk_r <= blk;
 				sc_p_r <= p;
 				sc_pend <= 1'b1;
+			end
+			else if (grp != 24'd0) begin
+				// load the first block with coefficients (its DC bit included)
+				sc_w <= br_m | {15'd0, dcm[sc_g]};
+				sc_gr <= sc_g;
+				sc_wv <= 1'b1;
+				rv[sc_g] <= 1'b0;
+				dcm[sc_g] <= 1'b0;
+				sc_pend <= 1'b0;
 			end
 			else begin
 				sc_pend <= 1'b0;
@@ -2198,6 +2224,7 @@ always @(posedge clk) begin
 				mbt <= t;
 				dr_i8 <= 3'd0;
 				dr_n <= 5'd0;
+				sd_ph <= 1'b0;
 				st <= S_SD2;
 			end
 		end
@@ -2206,6 +2233,20 @@ always @(posedge clk) begin
 				if (!dr_b8 && dr_n[3:0] == 4'd0)
 					mbt <= (mbt & ~(MT_88 | MT_168 | MT_816 | MT_P1L0 | MT_P1L1)) | MT_16 | MT_DIR;
 				st <= rsd;
+			end
+			else if (!sd_ph) begin
+				// first clock: the 4 co-located vectors of this 8x8 near zero?
+				reg [1:0] i8;
+				i8 = dr_i8[1:0];
+				for (int k = 0; k < 4; k++) begin
+					reg [31:0] cm;
+					reg signed [15:0] cx, cy;
+					cm = col_q[k];         // col_a[k]: {colr0 != 0, ci}
+					cx = cm[15:0]; cy = cm[31:16];
+					sd_ze[k] <= !intra(colty) && !s_l1l && (colr0[i8] == 8'sd0 || (colr0[i8] < 0 && colr1[i8] == 8'sd0 && s_x264)) &&
+					            cx >= -1 && cx <= 1 && cy >= -1 && cy <= 1;
+				end
+				sd_ph <= 1'b1;
 			end
 			else begin
 				reg [1:0] i8;
@@ -2223,18 +2264,8 @@ always @(posedge clk) begin
 					for (int k = 0; k < 4; k++) begin
 						reg [6:0] e;
 						reg ze;
-						reg signed [15:0] cx, cy;
-						reg [31:0] cm;
 						e = s8 + (k[0] ? 7'd1 : 7'd0) + (k[1] ? 7'd8 : 7'd0);
-						ze = 1'b0;
-						if (!intra(colty) && !s_l1l && (colr0[i8] == 8'sd0 || (colr0[i8] < 0 && colr1[i8] == 8'sd0 && s_x264))) begin
-							reg [3:0] ci;
-							if ((sb & MT_16) != 0) ci = {i8[1], i8[1], i8[0], i8[0]};          // x8 * 3 + y8 * 12
-							else ci = {i8[1], k[1], i8[0], k[0]};
-							cm = col_q[k];         // col_a[k]: {colr0 != 0, ci}
-							cx = cm[15:0]; cy = cm[31:16];
-							ze = cx >= -1 && cx <= 1 && cy >= -1 && cy <= 1;
-						end
+						ze = sd_ze[k];
 						for (int l = 0; l < 2; l++)
 							if (ze && dr_ref[l] == 6'sd0) mvw_z[l][6'(e)] = 1'b1;
 							else begin mvw_v[l] = dr_mv[l]; mvw_m[l][6'(e)] = 1'b1; end
@@ -2250,6 +2281,7 @@ always @(posedge clk) begin
 				end
 				dr_n <= n;
 				dr_i8 <= dr_i8 + 3'd1;
+				sd_ph <= 1'b0;
 			end
 		end
 		// temporal: map_col_to_list0 and dist_scale_factor of the 4 co-located 8x8 blocks
@@ -2504,14 +2536,9 @@ end
 assign iw_ra = iw_c;
 // shared cache read port
 always @(*) begin
-	reg [6:0] i8;
 	reg [4:0] k;
-	i8 = f_scan8({2'd0, pm_n});
-	cr_a = {pm_l, 6'(i8 - 7'd1)};
-	case (st)
-	S_PMB: cr_a = {pm_l, 6'(i8 - 7'd8)};
-	S_PMC: cr_a = {pm_l, 6'(i8 - 7'd8 + {4'd0, pm_pw})};
-	S_PMD: cr_a = {pm_l, 6'(i8 - 7'd9)};
+	cr_a = cr_ar;
+	if (!pm_rd) case (st)
 	S_O3: begin k = 5'(ok - 6'd5); cr_a = {k[4], 6'(f_scan8({2'd0, k[3:0]}))}; end
 	S_E1: begin k = 5'(mr_k - 6'd3); cr_a = {k[4], 6'(7'd12 + {5'd0, k[1:0]} + {2'd0, k[3:2], 3'd0})}; end
 	default: ;
@@ -2536,8 +2563,8 @@ end
 // coefficient word of the output scan
 // bitmap RAM read: the output scan in S_O5, else the coefficient of stage 3
 assign br_a = st == S_O5 ? sc_g : bm_ix[8:4];
-assign cr_re = st == S_O5 && of_room && grp != 24'd0;
-assign cr_ra = (sc_g < 5'd16 && (mbt & MT_DCT) != 0) ? {1'b0, sc_g[3:2], t8({sc_g[1:0], sc_b})} : {sc_g, t4(sc_b)};
+assign cr_re = st == S_O5 && of_room && sc_wv;
+assign cr_ra = (sc_gr < 5'd16 && (mbt & MT_DCT) != 0) ? {1'b0, sc_gr[3:2], t8({sc_gr[1:0], sc_b})} : {sc_gr, t4(sc_b)};
 
 endmodule
 `default_nettype wire
