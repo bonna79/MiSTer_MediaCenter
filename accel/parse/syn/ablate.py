@@ -14,7 +14,7 @@ GROUPS = {
     'intra':   ['S_IN\\d', 'S_IM\\d', 'S_IMA', 'S_IWB', 'S_ICHK', 'S_CP\\d'],
     'pcm':     ['S_PCM\\d'],
     'sub8':    ['S_SB\\d', 'S_SBE', 'S_SP\\d', 'S_P8D', 'S_P8E'],
-    'mvpred':  ['S_RF\\d', 'S_MV\\d', 'S_PR\\d', 'S_PRN', 'S_PV\\d', 'S_PM[A-D]'],
+    'mvpred':  ['S_RF\\d', 'S_MV\\d', 'S_PR\\d', 'S_PRN', 'S_PV\\d', 'S_PM[A-E]'],
     'refmvd':  ['S_RD\\d', 'S_MD\\d'],
     'cbpqp':   ['S_CB\\d', 'S_T8', 'S_T8B', 'S_QD\\d'],
     'resid':   ['S_RS', 'S_RC\\d', 'S_RW'],
@@ -30,7 +30,7 @@ GROUPS = {
 
 # text edits instead of removed states: (old, new) pairs, each must occur
 EDITS = {
-    'mvcint':  [('else v = mvc[l][ix(p)];', 'else v = 32\'d0;')],
+    'mvcint':  [('else v = mvu(mvc[l][ix(p)]);', 'else v = 32\'d0;')],
     'mvdcint': [('else v = mvdc[l][ix(p)];', 'else v = 12\'d0;')],
     'refcint': [('else r = refc[l][ix(p)];', 'else r = 6\'sd0;')],
     'cvq':     [('wire [31:0] cv_q = mvr(cr_a[6], 7\'(cr_a[5:0]));', 'wire [31:0] cv_q = 32\'d0;')],
