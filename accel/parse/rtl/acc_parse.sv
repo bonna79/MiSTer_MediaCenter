@@ -704,6 +704,9 @@ reg   [4:0] dck;
 reg  signed [17:0] tmp[0:15];
 reg  [23:0] qmul_dc;
 reg         td_ph;                  // temporal direct: 0 scale, 1 write
+reg         dc_ph;                  // luma DC output: 0 sum, 1 scale and write
+reg  [31:0] dc_z;
+reg   [3:0] dc_blk;
 reg  [15:0] td_mx, td_my, td_cx, td_cy;
 reg   [5:0] ok;                     // output counter
 reg         sc_pend;
@@ -1750,6 +1753,7 @@ always @(posedge clk) begin
 		// ------------------------------------------------ mcacc: DC transforms
 		S_O0: if (!(c0_v || c1_v || c2_v || c3_v)) begin
 			dck <= 5'd0;
+			dc_ph <= 1'b0;
 			ok <= 6'd0;
 			if ((mbt & MT_I16) != 0 && nzc[0]) begin
 				qmul_dc <= 24'({19'd0, d4init(qmod(qs), 2'd0)} * {16'd0, sm0[0]} << (qdiv(qs) + 4'd2));
@@ -1774,31 +1778,38 @@ always @(posedge clk) begin
 			if (i == 2'd3) st <= S_DC0;
 		end
 		S_DC0: begin
-			// output dck: column i = dck >> 2, row r = dck & 3 of {0, 1, 4, 5}
-			reg [1:0] i, r;
-			reg [31:0] z0, z1, z2, z3, z, pr;
-			reg [3:0] blk;
-			reg [15:0] v;
-			i = dck[3:2];
-			r = dck[1:0];
-			z0 = tmp[i] + tmp[8 + i];
-			z1 = tmp[i] - tmp[8 + i];
-			z2 = tmp[4 + i] - tmp[12 + i];
-			z3 = tmp[4 + i] + tmp[12 + i];
-			z = r == 2'd0 ? z0 + z3 : r == 2'd1 ? z1 + z2 : r == 2'd2 ? z1 - z2 : z0 - z3;
-			pr = z * {8'd0, qmul_dc} + 32'd128;
-			v = pr[23:8];
-			blk = (i == 2'd0 ? 4'd0 : i == 2'd1 ? 4'd2 : i == 2'd2 ? 4'd8 : 4'd10) +
-			      (r == 2'd0 ? 4'd0 : r == 2'd1 ? 4'd1 : r == 2'd2 ? 4'd4 : 4'd5);
-			cr_we <= 1'b1;
-			cr_wa <= {1'b0, blk, 4'd0};
-			cr_wd <= v;
-			if (v != 16'd0) begin
-				dcm[{1'b0, blk}] <= 1'b1;
-				ncoef <= ncoef + 9'd1;
+			// output dck: column i = dck >> 2, row r = dck & 3 of {0, 1, 4, 5};
+			// first clock the sum, second the scale and the write
+			if (!dc_ph) begin
+				reg [1:0] i, r;
+				reg [31:0] z0, z1, z2, z3;
+				i = dck[3:2];
+				r = dck[1:0];
+				z0 = tmp[i] + tmp[8 + i];
+				z1 = tmp[i] - tmp[8 + i];
+				z2 = tmp[4 + i] - tmp[12 + i];
+				z3 = tmp[4 + i] + tmp[12 + i];
+				dc_z <= r == 2'd0 ? z0 + z3 : r == 2'd1 ? z1 + z2 : r == 2'd2 ? z1 - z2 : z0 - z3;
+				dc_blk <= (i == 2'd0 ? 4'd0 : i == 2'd1 ? 4'd2 : i == 2'd2 ? 4'd8 : 4'd10) +
+				          (r == 2'd0 ? 4'd0 : r == 2'd1 ? 4'd1 : r == 2'd2 ? 4'd4 : 4'd5);
+				dc_ph <= 1'b1;
 			end
-			dck <= dck == 5'd15 ? 5'd0 : dck + 5'd1;
-			if (dck == 5'd15) st <= S_DC2;
+			else begin
+				reg [31:0] pr;
+				reg [15:0] v;
+				pr = dc_z * {8'd0, qmul_dc} + 32'd128;
+				v = pr[23:8];
+				cr_we <= 1'b1;
+				cr_wa <= {1'b0, dc_blk, 4'd0};
+				cr_wd <= v;
+				if (v != 16'd0) begin
+					dcm[{1'b0, dc_blk}] <= 1'b1;
+					ncoef <= ncoef + 9'd1;
+				end
+				dc_ph <= 1'b0;
+				dck <= dck == 5'd15 ? 5'd0 : dck + 5'd1;
+				if (dck == 5'd15) st <= S_DC2;
+			end
 		end
 		// chroma DC, dck >> 2 = component
 		S_DC2: begin
