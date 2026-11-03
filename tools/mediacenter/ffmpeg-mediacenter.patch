@@ -72,8 +72,8 @@ index 0000000..36a6710
 +    if (!h->mcacc_on)
 +        return;
 +    if (h->picture_structure != PICT_FRAME || FRAME_MBAFF(h) || h->pixel_shift ||
-+        h->ps.sps->chroma_format_idc != 1) {
-+        mc_acc_hooks->fail(mc_acc_hooks->opaque, "interlaced, 4:2:2/4:4:4 or more than 8 bits");
++        h->ps.sps->chroma_format_idc != 1 || h->ps.sps->transform_bypass) {
++        mc_acc_hooks->fail(mc_acc_hooks->opaque, "interlaced, 4:2:2/4:4:4, more than 8 bits or lossless");
 +        return;
 +    }
 +    h->mcacc = mc_acc_hooks->begin(mc_acc_hooks->opaque, h->cur_pic_ptr->f, h->mb_width, h->mb_height);
