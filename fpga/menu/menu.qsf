@@ -9,6 +9,9 @@
 # --------------------------------------------------------------------------
 
 set_global_assignment -name VERILOG_MACRO "MENU_CORE=1"
+# space for the 4.0 accelerator: no composite/S-Video output, no adaptive HDMI scanlines
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_YC=1"
+set_global_assignment -name VERILOG_MACRO "MISTER_DISABLE_ADAPTIVE=1"
 
 set_global_assignment -name TOP_LEVEL_ENTITY sys_top
 set_global_assignment -name PARTITION_NETLIST_TYPE SOURCE -section_id Top
