@@ -316,6 +316,8 @@ reg        dx;                // region in the right half of its buffer's window
 reg  [3:0] dy;                // rows below the union window's top
 reg  [2:0] cdy;               // chroma
 reg signed [15:0] mvx, mvy;
+reg [31:0] c_mv_r;
+reg        c_ld;
 reg  [1:0] plane;             // chroma plane being predicted: 1 U, 2 V
 wire [3:0] c_bi = all16 || quad_eq[c_rq] ? {c_rq, 2'b00} : {c_rq, c_rk};
 wire [31:0] c_mv = c_l ? `MV1OF(c_bi) : `MVOF(c_bi);
@@ -600,6 +602,9 @@ always @(posedge clk) begin
 	u_v2 <= u_v1;
 	u_k2 <= u_kk;
 	if (u_v1) begin
+		// integer x vectors compared a clock after the read (timing)
+		if (u_kk == 0) begin u_mx0 <= f_mvr[15:2]; u_xne <= 0; end
+		else if (f_mvr[15:2] != u_mx0) u_xne <= 1;
 		p_ly <= $signed({10'd0, f_rq[1], u_kk[1], 2'd0}) + 14'($signed(f_mvr[31:16]) >>> 2);
 		p_cy <= $signed({11'd0, f_rq[1], u_kk[1], 1'd0}) + 14'($signed(f_mvr[31:16]) >>> 3);
 	end
@@ -629,8 +634,6 @@ always @(posedge clk) begin
 		F_UN: begin
 			f_mvr <= f_mv;
 			u_kk <= f_rk;
-			if (f_rk == 0) begin u_mx0 <= f_mv[15:2]; u_xne <= 0; end
-			else if (f_mv[15:2] != u_mx0) u_xne <= 1;
 			u_v1 <= 1;
 			f_rk <= f_rk + 1'd1;
 			if (f_rk == 3) fs <= F_M1;
@@ -751,6 +754,14 @@ always @(posedge clk) begin
 	if (r2_v && r2_done) got[r2_b][r2_j] <= 1;
 
 	// ---- calculation
+	// the region's vector: picked in M_REGION into c_mv_r, kept a clock later
+	// (timing; first used in M_OFF, after at least one clock of M_WAITY)
+	c_mv_r <= c_mv;
+	c_ld <= ms == M_REGION;
+	if (c_ld) begin
+		mvx <= c_mv_r[15:0];
+		mvy <= c_mv_r[31:16];
+	end
 	case (ms)
 		M_IDLE: if (start) begin
 			all16 <= 1;
@@ -777,8 +788,6 @@ always @(posedge clk) begin
 			if (all16) begin rx <= 0; ry <= 0; end
 			else if (quad_eq[c_rq]) begin rx <= {c_rq[0], 3'd0}; ry <= {c_rq[1], 3'd0}; end
 			else begin rx <= {c_rq[0], c_rk[0], 2'd0}; ry <= {c_rq[1], c_rk[1], 2'd0}; end
-			mvx <= c_mv[15:0];
-			mvy <= c_mv[31:16];
 			ms <= M_WAITY;
 		end
 

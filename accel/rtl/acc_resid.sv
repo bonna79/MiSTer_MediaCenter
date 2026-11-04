@@ -48,26 +48,36 @@ integer k, j;
 
 // ------------------------------------------------------------------ write
 
+// the block and its size, copied here a clock late (timing): the transform
+// sets them at its start, many clocks before its first column comes out, and
+// keeps them until after its last one
+reg  [4:0] wb;
+reg        wbig;
+always @(posedge clk) begin
+	wb <= w_blk;
+	wbig <= w_big;
+end
+
 reg  [3:0] wx, wy0;         // x and first row of the column
 reg  [1:0] wpl;
 reg  [3:0] wn;
 always @* begin
-	if (w_blk < 16 && w_big) begin
-		wx  = {w_blk[2], w_col};
-		wy0 = {w_blk[3], 3'd0};
+	if (wb < 16 && wbig) begin
+		wx  = {wb[2], w_col};
+		wy0 = {wb[3], 3'd0};
 		wpl = 0;
 		wn  = 8;
 	end
-	else if (w_blk < 16) begin
-		wx  = {w_blk[2], w_blk[0], w_col[1:0]};
-		wy0 = {w_blk[3], w_blk[1], 2'd0};
+	else if (wb < 16) begin
+		wx  = {wb[2], wb[0], w_col[1:0]};
+		wy0 = {wb[3], wb[1], 2'd0};
 		wpl = 0;
 		wn  = 4;
 	end
 	else begin
-		wx  = {1'b0, w_blk[0], w_col[1:0]};
-		wy0 = {1'b0, w_blk[1], 2'd0};
-		wpl = w_blk < 20 ? 2'd1 : 2'd2;
+		wx  = {1'b0, wb[0], w_col[1:0]};
+		wy0 = {1'b0, wb[1], 2'd0};
+		wpl = wb < 20 ? 2'd1 : 2'd2;
 		wn  = 4;
 	end
 end
@@ -80,6 +90,11 @@ endfunction
 function [9:0] sat10(input signed [15:0] v);
 	sat10 = v < -512 ? 10'h200 : (v > 511 ? 10'h1FF : v[9:0]);
 endfunction
+
+// the column's values saturated first, then picked per bank
+reg  [9:0] wsat[8];
+integer sj;
+always @* for (sj = 0; sj < 8; sj = sj + 1) wsat[sj] = sat10(w_vals[sj * 16 +: 16]);
 
 reg        bwe[8];
 reg  [6:0] bwa[8];
@@ -99,7 +114,7 @@ always @* begin
 			wy = wy0 + wi;
 			bwe[k] = w_en && wi < wn;
 			bwa[k] = {w_buf, baddr(wpl, wx, wy)};
-			bwd[k] = sat10(w_vals[wi[2:0] * 16 +: 16]);
+			bwd[k] = wsat[wi[2:0]];
 		end
 	end
 end
