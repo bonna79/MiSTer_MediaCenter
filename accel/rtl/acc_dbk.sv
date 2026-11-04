@@ -355,6 +355,8 @@ reg  [2:0] wi;                // write item of the row
 reg  [2:0] li;                // line buffer write item of the row
 reg [63:0] nw0, nw1;          // the next macroblock's words of the row
 reg        fin_pend;
+reg        rfin;              // the row's writes are all out (registered a
+                              // clock early, for timing: the move needs rj >= 2)
 
 // filters: running and clock counters
 reg        lv_on, lh_on, cv_on, ch_on;
@@ -609,8 +611,10 @@ always @(posedge clk) begin
 			lb_wd <= Y[0][(lb_i == 0 ? 1 : (lb_i == 1 ? 0 : 2)) * 64 +: 64];
 			li <= lb_i + 1'd1;
 		end
+		rfin <= nexti({1'b0, lwant}, (lw_i != 4 && port_free) ? lw_i + 3'd1 + lw_two : wi) == 4
+			&& nexti({1'b0, lbwant}, lb_i != 4 ? lb_i + 3'd1 : li) == 4;
 		// the move, once the row is read and written
-		if (rj[1] && lw_i == 4 && lb_i == 4) begin
+		if (rj[1] && rfin) begin
 			for (r = 0; r < 19; r = r + 1) Y[r] <= Y[r + 1];
 			Y[19] <= {rj[0] ? nw1 : lrd, nw0, Y[0][191:128]};
 			rj <= 0; wi <= 0; li <= 0;
@@ -641,7 +645,9 @@ always @(posedge clk) begin
 			clb_wd <= cb_i[0] ? CV[0][cb_i[1] * 64 +: 64] : CU[0][cb_i[1] * 64 +: 64];
 			li <= cb_i + 1'd1;
 		end
-		if (rj[1] && cw_i == 4 && cb_i == 4) begin
+		rfin <= nexti(cwant, (cw_i != 4 && port_free) ? cw_i + 3'd1 + cw_two : wi) == 4
+			&& nexti(cbwant, cb_i != 4 ? cb_i + 3'd1 : li) == 4;
+		if (rj[1] && rfin) begin
 			for (r = 0; r < 9; r = r + 1) begin
 				CU[r] <= CU[r + 1];
 				CV[r] <= CV[r + 1];

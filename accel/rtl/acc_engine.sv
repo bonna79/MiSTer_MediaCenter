@@ -119,6 +119,11 @@ reg        go_pending;
 // pixel i at bits i*8; for chroma the bottom row and right column.
 reg [127:0] brow[4], rcol[4];
 reg  [63:0] cbot_u, cbot_v, crt_u, crt_v;
+// chroma right column: written a clock after the pixel (timing); read only
+// at the end of the macroblock (S_LB, lbk 3)
+reg        cr_we = 0, cr_u;
+reg  [2:0] cr_y;
+reg  [7:0] cr_d;
 
 reg  [7:0] topy[24];          // row above (16 + 8 above right)
 reg  [7:0] topu[8], topv[8];
@@ -361,6 +366,7 @@ reg [12:0] stop_r, sleft_r;
 reg [10:0] sqt0_r, sqt1_r, sql0_r, sql1_r;
 reg  [3:0] nrow;
 reg  [1:0] ngrp;
+reg signed [19:0] pgx;        // pb * 4 * ngrp, a pick of shifts (keeps ngrp out of the multiplier)
 integer bxx, byy;
 wire signed [5:0] prow_o = $signed({2'b00, prow16}) - (sb == S_I16 ? 6'sd7 : 6'sd3);
 always @(posedge clk) begin
@@ -368,6 +374,12 @@ always @(posedge clk) begin
 	else if (sb == S_I16 ? pgrp == 3 : pgrp[0]) begin nrow = prow16 + 1'd1; ngrp = 0; end
 	else begin nrow = prow16; ngrp = pgrp + 1'd1; end
 	byy = nrow;
+	case (ngrp)
+		0: pgx = 0;
+		1: pgx = pb <<< 2;
+		2: pgx = pb <<< 3;
+		default: pgx = (pb <<< 3) + (pb <<< 2);
+	endcase
 	bp_pl <= !pcm && (sb == S_I16 ? i16mode == 3 : cmode == 3);
 	// plane row term pa + pc * (nrow - 7 or 3) + 16, with nrow = 0, prow16 or
 	// prow16 + 1: the three values are made apart and nrow only picks one
@@ -377,7 +389,7 @@ always @(posedge clk) begin
 	else bp_y <= pa + pc * prow_o + 20'sd16;
 	for (pp = 0; pp < 4; pp = pp + 1) begin
 		bxx = ngrp * 4 + pp;
-		bp_x[pp] <= sb == S_I16 ? pb * (bxx - 7) : pb * (bxx - 3);
+		bp_x[pp] <= (sb == S_I16 ? pb * (pp - 7) : pb * (pp - 3)) + pgx;
 		if (sb == S_I16) begin
 			if (pcm) bp_v[pp] <= 0;
 			else case (i16mode)
@@ -702,6 +714,11 @@ always @(posedge clk) begin
 	px_n <= p1_n;
 	px_pr <= p1_pr;
 
+	cr_we <= 0;
+	if (cr_we) begin
+		if (cr_u) crt_u[cr_y * 8 +: 8] <= cr_d;
+		else crt_v[cr_y * 8 +: 8] <= cr_d;
+	end
 	// intra edges inside the macroblock, from every pixel write
 	if (px_we) begin
 		if (px_pl == 0) begin
@@ -720,8 +737,10 @@ always @(posedge clk) begin
 				end
 			end
 			if (px_x[2:0] + px_n == 8) begin
-				if (px_pl == 1) crt_u[px_y[2:0] * 8 +: 8] <= px_n == 2 ? px_d[15:8] : px_d[31:24];
-				else crt_v[px_y[2:0] * 8 +: 8] <= px_n == 2 ? px_d[15:8] : px_d[31:24];
+				cr_we <= 1;
+				cr_u <= px_pl == 1;
+				cr_y <= px_y[2:0];
+				cr_d <= px_n == 2 ? px_d[15:8] : px_d[31:24];
 			end
 		end
 	end
