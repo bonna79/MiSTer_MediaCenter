@@ -86,6 +86,16 @@ pll pll
 	.locked(locked)
 );
 
+// the accelerator's own clock (mc_acc), not tied to clk_sys and CLK_VIDEO
+wire clk_acc;
+pll_acc pll_acc
+(
+	.refclk(CLK_50M),
+	.rst(0),
+	.outclk_0(clk_acc),
+	.locked()
+);
+
 
 /////////////////////   SDRAM   ///////////////////
 //
@@ -269,7 +279,8 @@ mc_zc mc_zc
 // the accelerator works only in FB mode (MiSTer MediaCenter's player)
 mc_acc mc_acc
 (
-	.clk(clk_sys),
+	.clk(clk_acc),
+	.clk_bus(clk_sys),
 	.enable(fb_own & FB),
 	.ddr_addr(acc_addr),
 	.ddr_burst(acc_burst),

@@ -70,6 +70,7 @@ static struct
 	uint32_t last_pics;
 	unsigned fp_n;
 	double fp_since, fp_starve, fp_mwait;
+	double khz;              // the accelerator's clock (word 20 bit 21: 104 MHz, else 108)
 	struct { unsigned shown, late, lost, ring_waits, sent, fp_n; uint64_t words, direct; double send, wait, fp_since, fp_starve, fp_mwait, start; } w;
 } al = { .fd = -1, .pagemap = -1 };
 
@@ -455,6 +456,7 @@ static int al_wait(const acc_buf_t *b)
 		if (m[16] == ACC_OKAY && m[17] == al.fsess)
 		{
 			uint32_t st = m[20], pics = m[19];
+			al.khz = st & (1u << 21) ? 104000.0 : 108000.0;
 			if (st & 3)
 			{
 				acc_fail(NULL, st & 2 ? "the FPGA memory does not answer" : "the FPGA engine got an unexpected command");
@@ -661,6 +663,9 @@ static void acc_close(void)
 	al.pinned = 0;
 }
 
+// clocks of the accelerator to ms (its clock, from the answer)
+#define ACC_KHZ (al.khz ? al.khz : 108000.0)
+
 static void acc_diag(double t)
 {
 	if (!al.w.start) al.w.start = t;
@@ -674,8 +679,8 @@ static void acc_diag(double t)
 			mc.clock, sent, sent ? (double)(acc.words_sent - al.w.words) * 4 / 1024 / sent : 0,
 			acc.words_sent > al.w.words ? 100.0 * (acc.words_direct - al.w.direct) / (acc.words_sent - al.w.words) : 0,
 			sent ? 1000 * (acc.send_time - al.w.send) / sent : 0, al.ring_waits - al.w.ring_waits,
-			fp_n ? (al.fp_since - al.w.fp_since) / fp_n / 108000.0 : 0, fp_n ? (al.fp_starve - al.w.fp_starve) / fp_n / 108000.0 : 0,
-			fp_n ? (al.fp_mwait - al.w.fp_mwait) / fp_n / 108000.0 : 0,
+			fp_n ? (al.fp_since - al.w.fp_since) / fp_n / ACC_KHZ : 0, fp_n ? (al.fp_starve - al.w.fp_starve) / fp_n / ACC_KHZ : 0,
+			fp_n ? (al.fp_mwait - al.w.fp_mwait) / fp_n / ACC_KHZ : 0,
 			shown, shown ? 1000 * (al.wait_t - al.w.wait) / shown : 0, al.late - al.w.late, al.lost - al.w.lost, acc.slots_peak);
 	al.w.sent = acc.pics_sent;
 	al.w.words = acc.words_sent;
@@ -703,8 +708,8 @@ static void acc_report(void)
 		acc.pics_sent, acc.pics_sent ? (double)acc.words_sent * 4 / 1024 / acc.pics_sent : 0,
 		acc.words_sent ? 100.0 * acc.words_direct / acc.words_sent : 0,
 		acc.pics_sent ? 1000 * acc.send_time / acc.pics_sent : 0, al.ring_waits, al.ring_wait_t,
-		al.fp_n ? al.fp_since / al.fp_n / 108000.0 : 0, al.fp_n ? al.fp_starve / al.fp_n / 108000.0 : 0,
-		al.fp_n ? al.fp_mwait / al.fp_n / 108000.0 : 0, al.shown, al.shown ? 1000 * al.wait_t / al.shown : 0,
+		al.fp_n ? al.fp_since / al.fp_n / ACC_KHZ : 0, al.fp_n ? al.fp_starve / al.fp_n / ACC_KHZ : 0,
+		al.fp_n ? al.fp_mwait / al.fp_n / ACC_KHZ : 0, al.shown, al.shown ? 1000 * al.wait_t / al.shown : 0,
 		al.late, al.lost, acc.pics_dropped, acc.slots_peak, acc.failed ? "; spento: " : "", acc.failed ? acc.why : "");
 }
 

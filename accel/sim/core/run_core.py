@@ -30,9 +30,9 @@ os.makedirs(work, exist_ok=True)
 with open(os.path.join(work, 'cmd.hex'), 'w') as f:
     f.write('\n'.join('%08x' % v for v in cmd))
 defs = ['-DCMDFILE="cmd.hex"', '-DNCMD=%d' % len(cmd), '-DCMDMAX=%d' % (len(cmd) + 1), '-DNPICS=%d' % len(exp),
-        '-DRING_PAGES=%d' % pages, '-DLAT=%d' % lat]
+        '-DRING_PAGES=%d' % pages, '-DLAT=%d' % lat] + sys.argv[5:]
 rtl = os.path.join(root, 'accel', 'rtl')
-srcs = [os.path.join(here, 'tb_core.sv'), os.path.join(root, 'fpga/menu/rtl/mc_acc.sv'), os.path.join(root, 'fpga/menu/rtl/mc_bus.sv')] + \
+srcs = [os.path.join(here, 'tb_core.sv'), os.path.join(root, 'fpga/menu/rtl/mc_acc.sv'), os.path.join(root, 'fpga/menu/rtl/mc_afifo.sv'), os.path.join(root, 'fpga/menu/rtl/mc_bus.sv')] + \
        [os.path.join(rtl, f) for f in ('acc_engine.sv', 'acc_dbk.sv', 'acc_bs.sv', 'acc_mc.sv', 'acc_idct.sv', 'acc_resid.sv', 'acc_recon.sv', 'acc_ram.sv')]
 subprocess.check_call(['iverilog', '-g2012', '-o', os.path.join(work, 'sim')] + defs + srcs)
 r = subprocess.run(['vvp', '-n', 'sim'], cwd=work, capture_output=True, text=True)

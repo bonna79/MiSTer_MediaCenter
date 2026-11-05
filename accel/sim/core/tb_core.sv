@@ -19,8 +19,15 @@ module tb_core;
 localparam [31:0] MBOX = 32'h23E00000;
 localparam [31:0] SLOTS = 32'h30000000;
 
+`ifndef ACC_HALF
+`define ACC_HALF 4.8077
+`endif
 reg clk = 0;
-always #4.63 clk = ~clk;   // 108 MHz
+always #4.63 clk = ~clk;   // 108 MHz, the bus
+reg aclk = 0;
+always #`ACC_HALF aclk = ~aclk;   // mc_acc's own clock (104 MHz)
+integer aclocks = 0;
+always @(posedge aclk) aclocks <= aclocks + 1;
 
 reg  [31:0] cmd[0:`CMDMAX];
 integer ncmd;
@@ -81,7 +88,7 @@ reg         dout_ready = 0;
 
 mc_acc dut
 (
-	.clk(clk), .enable(1'b1),
+	.clk(aclk), .clk_bus(clk), .enable(1'b1),
 	.ddr_addr(a_addr), .ddr_burst(a_burst), .ddr_rd(a_rd), .ddr_we(a_we), .ddr_din(a_din),
 	.ddr_busy(busy), .ddr_dout(dout), .ddr_dout_ready(a_ready),
 	.grant(a_grant), .want(a_want), .idle(a_idle)
@@ -204,7 +211,7 @@ end
 
 // every command the engine takes must be the next one of the stream
 integer ci = 0;
-always @(posedge clk) if (dut.e_used) begin
+always @(posedge aclk) if (dut.e_used) begin
 	if (dut.e_cmd !== cmd[ci]) begin
 		$display("command %0d: engine got %08x, expected %08x (clock %0d)", ci, dut.e_cmd, cmd[ci], clocks);
 		$finish;
@@ -218,12 +225,12 @@ reg [63:0] pw;
 reg [7:0] dump_slot;
 reg dump_wait = 0;
 initial fo = $fopen("out.yuv", "wb");
-always @(posedge clk) begin
+always @(posedge aclk) begin
 	if (dut.e_err) begin $display("engine error"); $finish; end
 	if (dut.dead) begin $display("memory dead"); $finish; end
 	// a picture is in memory once its last writes left the queue
 	if (dut.engine.pic_done) begin dump_slot <= dut.engine.pic_slot; dump_wait <= 1; end
-	if (dump_wait && dut.rq_n == 0 && !dut.on_bus && !dut.engine.pic_done) begin
+	if (dump_wait && dut.q_done && !dut.engine.pic_done) begin
 		dump_wait <= 0;
 		wd = dut.engine.wmb * 16;
 		ht = dut.engine.hmb * 16;
@@ -235,9 +242,9 @@ always @(posedge clk) begin
 					$fwrite(fo, "%c", pw[(x % 8) * 8 +: 8]);
 				end
 		$display("picture %0d slot %0d: %0d macroblocks, %0d clocks, %0d per macroblock",
-			pics, dump_slot, dut.engine.mb_count - last_mb, clocks - last_clk,
-			(clocks - last_clk) / (dut.engine.mb_count - last_mb));
-		last_clk = clocks;
+			pics, dump_slot, dut.engine.mb_count - last_mb, aclocks - last_clk,
+			(aclocks - last_clk) / (dut.engine.mb_count - last_mb));
+		last_clk = aclocks;
 		last_mb = dut.engine.mb_count;
 		pics = pics + 1;
 	end
