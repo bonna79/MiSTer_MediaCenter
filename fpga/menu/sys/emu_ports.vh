@@ -1,6 +1,9 @@
 //Master input clock
 input         CLK_50M,
 
+//Second 50 MHz input (FPGA_CLK3_50), for a PLL that must sit away from pll_hdmi
+input         CLK_50M_2,
+
 //Async reset from top-level module.
 //Can be used as initial reset.
 input         RESET,

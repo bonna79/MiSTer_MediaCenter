@@ -1756,6 +1756,7 @@ wire [13:0] fb_stride;
 emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
+	.CLK_50M_2(FPGA_CLK3_50),
 	.RESET(reset),
 	.HPS_BUS({f1, HDMI_TX_VS, 
 				 clk_100m, clk_ihdmi,

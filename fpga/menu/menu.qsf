@@ -57,9 +57,12 @@ set_global_assignment -name ALM_REGISTER_PACKING_EFFORT LOW
 set_global_assignment -name OPTIMIZE_POWER_DURING_SYNTHESIS OFF
 set_global_assignment -name ROUTER_REGISTER_DUPLICATION ON
 set_global_assignment -name FITTER_AGGRESSIVE_ROUTABILITY_OPTIMIZATION ALWAYS
-set_global_assignment -name SEED 1
+set_global_assignment -name SEED 7
 
 source sys/sys.tcl
 source sys/sys_analog.tcl
 source files.qip
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Top
+# accelerator PLL (pll_acc, fed by FPGA_CLK3_50) kept away from pll_hdmi (X0_Y1):
+# next to it (X0_Y15) the HDMI clock change done by Main failed on hardware
+set_location_assignment FRACTIONALPLL_X0_Y56_N0 -to "emu:emu|pll_acc:pll_acc|altera_pll:altera_pll_i|general[0].gpll~FRACTIONAL_PLL"

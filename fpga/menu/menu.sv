@@ -86,11 +86,14 @@ pll pll
 	.locked(locked)
 );
 
-// the accelerator's own clock (mc_acc), not tied to clk_sys and CLK_VIDEO
+// the accelerator's own clock (mc_acc), not tied to clk_sys and CLK_VIDEO.
+// It takes the other 50 MHz pin (FPGA_CLK3_50) so it can be placed at
+// FRACTIONALPLL_X0_Y56 (menu.qsf), away from pll_hdmi: next to it (X0_Y15)
+// the HDMI clock change done by Main failed on hardware.
 wire clk_acc;
 pll_acc pll_acc
 (
-	.refclk(CLK_50M),
+	.refclk(CLK_50M_2),
 	.rst(0),
 	.outclk_0(clk_acc),
 	.locked()
