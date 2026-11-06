@@ -42,7 +42,13 @@ module acc_engine #(
 	output reg        pic_done,     // pulse at the end of each picture
 	output reg  [7:0] pic_slot,
 	output reg        error,        // unexpected command
-	output reg [31:0] mb_count
+	output reg [31:0] mb_count,
+
+	// command A6 (a CABAC slice for acc_parse, 4.0): pulse as the engine
+	// takes it; the words that follow it in the ring are the slice's, and
+	// the engine's next commands come from acc_parse (mc_acc switches them)
+	output            ps_go,
+	output     [23:0] ps_len
 );
 
 // ------------------------------------------------------------------ state
@@ -525,11 +531,13 @@ wire [7:0] tag = cmd_data[31:24];
 wire coef_blk_change = coef_have && cmd_data[26:22] != coef_blk;
 wire b_free = sb == S_IDLE;                // B can take the next macroblock
 wire b_idle = b_free && !dbk_busy && !dbk_start;   // and all written
-assign cmd_ready = !reset && ((sa == S_CMD && (tag == 8'hA3 || tag == 8'hA5 || tag == 8'hA0 || b_idle)) || sa == S_PIC || sa == S_REFS || sa == S_MB1 ||
+assign cmd_ready = !reset && ((sa == S_CMD && (tag == 8'hA3 || tag == 8'hA5 || tag == 8'hA0 || tag == 8'hA6 || b_idle)) || sa == S_PIC || sa == S_REFS || sa == S_MB1 ||
                    sa == S_DBK ||
                    sa == S_INFO || sa == S_NCOEF || sa == S_PCM ||
                    (sa == S_COEF && !coef_blk_change && idct_in && !idct_go));
 wire take = cmd_valid && cmd_ready;
+assign ps_go  = take && sa == S_CMD && tag == 8'hA6;
+assign ps_len = cmd_data[23:0];
 
 wire [15:0] X16 = {mbx, 4'd0};
 
@@ -795,6 +803,7 @@ always @(posedge clk) begin
 					sa <= S_DBK;
 				end
 				8'hA0: ;                     // padding to a 64-bit word: nothing
+				8'hA6: ;                     // slice for acc_parse: ps_go, mc_acc switches
 				default: error <= 1;
 			endcase
 		end

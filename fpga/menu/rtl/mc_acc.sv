@@ -26,11 +26,20 @@
 //     [20] 1: mc_zc resamples any width and height (mailbox word 10 bit 19)
 //     [21] 1: the clocks of words 21 to 25 are this block's own, 100 MHz
 //          (0: the core clock, 108 MHz)
+//     [22] 1: acc_parse reads CABAC slices (command A6, 4.0)
+//     [2]  acc_parse found an error in a slice since the session started
 //  21 clocks between the last two finished pictures
 //  22 of them, clocks the engine had no command to read
 //  23 of them, clocks the engine waited for the memory
 //  24 macroblocks done            25 clocks since the session started
 // The player may write over ring bytes once word 18 says they were read.
+//
+// Command A6 (4.0): 0xA6 << 24 | n, then n words for acc_parse (a CABAC
+// slice: descriptor + slice data, see accel/parse/rtl/acc_parse.sv). As the
+// engine takes A6, the next n ring words go to acc_parse (mc_parse, on its
+// own clock clk_par) and the engine's commands come from acc_parse until it
+// marks the end of the slice; then the ring again. acc_parse keeps the
+// motion record of every macroblock (for later B pictures) at MOTION.
 //
 // The bus is shared with mc_out (the CRT output, always first) and mc_zc
 // through mc_bus: this block starts a transfer only while granted.
@@ -38,10 +47,12 @@
 // bus side of its queue runs on the bus clock (clk_bus, 108 MHz).
 module mc_acc #(
 	parameter [31:0] MBOX  = 32'h23E00000,
-	parameter [31:0] SLOTS = 32'h30000000
+	parameter [31:0] SLOTS = 32'h30000000,
+	parameter [31:0] MOTION = 32'h24000000   // acc_parse's motion records, 64 x 1.18 MB
 )
 (
 	input             clk,           // this block's own clock
+	input             clk_par,       // acc_parse's clock
 	input             clk_bus,       // the bus clock: ddr_*, grant, want, idle
 	input             enable,        // the bus is the frame buffer's (FB mode)
 
@@ -76,6 +87,8 @@ wire [31:0] e_cmd;
 wire        e_done, e_err;
 wire  [7:0] e_slot;
 wire [31:0] e_mbs;
+wire        ps_go;                      // the engine took an A6
+wire [23:0] ps_len;
 reg  [63:0] e_dout;
 reg         e_dout_ready = 0;
 
@@ -86,7 +99,8 @@ acc_engine #(.AW(25)) engine
 	.cmd_valid(e_valid), .cmd_data(e_cmd), .cmd_ready(e_ready),
 	.mem_rd(e_rd), .mem_we(e_we), .mem_addr(e_addr), .mem_burst(e_burst), .mem_din(e_din), .mem_din2(e_din2), .mem_be(e_be),
 	.mem_busy(!e_take), .mem_dout(e_dout), .mem_dout_ready(e_dout_ready),
-	.pic_done(e_done), .pic_slot(e_slot), .error(e_err), .mb_count(e_mbs)
+	.pic_done(e_done), .pic_slot(e_slot), .error(e_err), .mb_count(e_mbs),
+	.ps_go(ps_go), .ps_len(ps_len)
 );
 
 // ================================================================ request queue
@@ -96,7 +110,7 @@ acc_engine #(.AW(25)) engine
 // The queue crosses from this block's clock to the bus clock (clk_bus) in a
 // FIFO (mc_afifo), and the read data come back in another one. cr counts the
 // words asked for and not yet arrived: they always have room in the second.
-localparam K_ENG = 0, K_MBOX = 1, K_TAB = 2, K_RING = 3;
+localparam K_ENG = 0, K_MBOX = 1, K_TAB = 2, K_RING = 3, K_PAR = 4;
 localparam RQ_L2 = 4;                   // 16 requests
 localparam RX_L2 = 9;                   // 512 words on their way back
 wire       rq_room;                     // room for a request (counted a clock late)
@@ -105,7 +119,7 @@ localparam TQ = 32;
 reg  [4:0] tq_wp = 0, tq_rp = 0;
 reg  [5:0] tq_n = 0;
 reg        tq_room = 1;
-reg  [1:0] tq_kind[TQ];
+reg  [2:0] tq_kind[TQ];
 reg  [7:0] tq_len[TQ];
 reg  [7:0] rx_n = 0;                    // words of the head tag arrived
 reg  [9:0] cr = 0;                      // read words asked for, not arrived
@@ -113,21 +127,29 @@ reg        cr_ok = 1;                   // room for 32 more, counted a clock lat
 
 // this block's own requests
 reg        f_req = 0, f_we = 0;
-reg  [1:0] f_kind = K_MBOX;
+reg  [2:0] f_kind = K_MBOX;
 reg [28:0] f_addr;
 reg  [7:0] f_burst;
 reg [63:0] f_din;
 wire       f_take = f_req && rq_room && (f_we || (tq_room && cr_ok));
 
-assign e_take = (e_rd || e_we) && !e_reset && !f_req && rq_room && (e_we || (tq_room && cr_ok));
+// acc_parse's motion memory transfers (m_*, below): after this block's own,
+// before the engine's
+reg        m_req = 0, m_we = 0;
+reg [28:0] m_addr;
+reg  [7:0] m_burst;
+reg [63:0] m_din, m_din2;
+wire       m_take = m_req && !f_req && rq_room && (m_we || (tq_room && cr_ok));
 
-wire        push    = f_take || e_take;
-wire        p_we    = f_take ? f_we : e_we;
-wire [28:0] p_addr  = f_take ? f_addr : {SLOTS[31:28], e_addr};
-wire  [7:0] p_burst = f_take ? f_burst : e_burst;
-wire [63:0] p_din   = f_take ? f_din : e_din;
-wire [63:0] p_din2  = e_din2;
-wire  [1:0] p_kind  = f_take ? f_kind : 2'd0;
+assign e_take = (e_rd || e_we) && !e_reset && !f_req && !m_req && rq_room && (e_we || (tq_room && cr_ok));
+
+wire        push    = f_take || m_take || e_take;
+wire        p_we    = f_take ? f_we : m_take ? m_we : e_we;
+wire [28:0] p_addr  = f_take ? f_addr : m_take ? m_addr : {SLOTS[31:28], e_addr};
+wire  [7:0] p_burst = f_take ? f_burst : m_take ? m_burst : e_burst;
+wire [63:0] p_din   = f_take ? f_din : m_take ? m_din : e_din;
+wire [63:0] p_din2  = m_take ? m_din2 : e_din2;
+wire  [2:0] p_kind  = f_take ? f_kind : m_take ? K_PAR[2:0] : 3'd0;
 wire        tpush   = push && !p_we;
 
 // requests handed to the bus and finished there (Gray code, from clk_bus)
@@ -210,11 +232,13 @@ mc_afifo #(.W(64), .L2(RX_L2), .ROOM(3)) rxq
 );
 
 // read data: to the engine or to this block, by the head tag
-wire [1:0] rx_kind = tq_kind[tq_rp];
+wire [2:0] rx_kind = tq_kind[tq_rp];
 wire       rx_last = rx && rx_n + 1'd1 == tq_len[tq_rp];
 reg        f_rx = 0;                    // a word for this block
-reg  [1:0] f_rx_kind;
+reg  [2:0] f_rx_kind;
 reg [63:0] f_dout;
+reg [63:0] rx_d_q;
+reg        mret_we = 0;
 
 always @(posedge clk) begin
 	reg [5:0] n;
@@ -234,10 +258,12 @@ always @(posedge clk) begin
 	cr_ok   <= c <= (1 << RX_L2) - 64;
 
 	e_dout_ready <= rx && rx_kind == K_ENG;
-	f_rx         <= rx && rx_kind != K_ENG;
+	f_rx         <= rx && rx_kind != K_ENG && rx_kind != K_PAR;
+	mret_we      <= rx && rx_kind == K_PAR;
 	f_rx_kind    <= rx_kind;
 	e_dout       <= rx_d;
 	f_dout       <= rx_d;
+	rx_d_q       <= rx_d;
 end
 
 // ================================================================ command FIFO
@@ -256,11 +282,117 @@ reg  [63:0] cf_wd;
 always @(posedge clk) if (cf_we) cf[cf_wp[CF_L2-1:0]] <= cf_wd;
 always @(posedge clk) if (cf_next) cf_q <= cf[cf_rp[CF_L2-1:0]];
 
-wire e_used  = e_valid && e_ready;
-wire cf_next = cf_wp != cf_rp && (!cf_qv || (e_used && half));
+wire [31:0] r_word = half ? cf_q[63:32] : cf_q[31:0];
 
-assign e_valid = cf_qv && !e_reset;
-assign e_cmd   = half ? cf_q[63:32] : cf_q[31:0];
+// ------------------------------------------------ acc_parse and the switch
+// p_left: ring words still for acc_parse (after an A6); p_src: the engine
+// reads acc_parse's commands; p_disc: acc_parse ended the slice early, the
+// rest of its words are dropped.
+reg  [23:0] p_left = 0;
+reg         p_src = 0, p_disc = 0;
+wire        pin_room;
+wire [32:0] po_q;
+wire        po_valid;
+wire [64:0] mq;
+wire        mq_valid;
+wire        mq_rd;
+wire        p_errp;
+wire        po_rd, p_in;
+
+mc_parse par
+(
+	.clk(clk), .pclk(clk_par), .reset(e_reset),
+	.in_we(p_in), .in_wd(r_word), .in_room(pin_room),
+	.out_rd(po_rd), .out_q(po_q), .out_valid(po_valid),
+	.mreq_rd(mq_rd), .mreq_q(mq), .mreq_valid(mq_valid),
+	.mret_we(mret_we), .mret_wd(rx_d_q),
+	.err_pulse(p_errp)
+);
+
+wire po_last = po_q[32];
+assign p_in  = cf_qv && p_left != 0 && !p_disc && pin_room && !e_reset;
+wire p_drop  = cf_qv && p_left != 0 && p_disc;
+
+assign e_valid = !e_reset && (p_src ? (po_valid && !po_last) : (cf_qv && p_left == 0));
+assign e_cmd   = p_src ? po_q[31:0] : r_word;
+wire e_used  = e_valid && e_ready;
+assign po_rd = p_src && po_valid && (po_last || e_ready);
+wire r_used  = p_in || p_drop || (e_used && !p_src);
+wire cf_next = cf_wp != cf_rp && (!cf_qv || (r_used && half));
+
+always @(posedge clk) begin
+	if (e_reset) begin
+		p_left <= 0;
+		p_src  <= 0;
+		p_disc <= 0;
+	end
+	else begin
+		if (ps_go) begin
+			p_left <= ps_len;
+			p_src  <= 1;
+			p_disc <= 0;
+		end
+		else if (p_in || p_drop) p_left <= p_left - 1'd1;
+		if (po_rd && po_last) begin
+			p_src <= 0;
+			if (p_left > {23'd0, p_in || p_drop}) p_disc <= 1;
+		end
+	end
+end
+
+// ------------------------------------------------ acc_parse's motion memory
+// Requests come one 32-bit word at a time, a record of 35 words at
+// word * 36 (18 64-bit words, the last half unused). Writes are paired into
+// 64-bit words and sent two at a time (a write burst of two); the first read
+// of a record reads its 18 words in one burst, the next 34 just pass.
+reg  [5:0]  mw_k = 0, mr_k = 0;         // words of the record written, read
+reg  [31:0] mw_lo;
+reg  [63:0] mw_p0;
+reg         mw_have = 0;                // mw_p0 holds the burst's first word
+wire        mq_we   = mq[64];
+wire [31:0] mq_addr = mq[63:32];
+wire [31:0] mq_data = mq[31:0];
+assign mq_rd = mq_valid && !m_req && !e_reset;
+always @(posedge clk) begin
+	if (m_take) m_req <= 0;
+	if (e_reset) begin
+		m_req   <= 0;
+		mw_k    <= 0;
+		mr_k    <= 0;
+		mw_have <= 0;
+	end
+	else if (mq_rd) begin
+		if (mq_we) begin
+			mw_k <= mw_k == 6'd34 ? 6'd0 : mw_k + 1'd1;
+			if (!mq_addr[0] && mw_k != 6'd34) mw_lo <= mq_data;
+			else begin
+				// a 64-bit word is complete (the record's last one alone)
+				if (!mw_have) begin
+					mw_p0   <= mq_addr[0] ? {mq_data, mw_lo} : {32'd0, mq_data};
+					mw_have <= 1;
+				end
+				else begin
+					m_req   <= 1;
+					m_we    <= 1;
+					m_addr  <= MOTION[31:3] + {mq_addr[31:1] - 31'd1};
+					m_burst <= 8'd2;
+					m_din   <= mw_p0;
+					m_din2  <= mq_addr[0] ? {mq_data, mw_lo} : {32'd0, mq_data};
+					mw_have <= 0;
+				end
+			end
+		end
+		else begin
+			mr_k <= mr_k == 6'd34 ? 6'd0 : mr_k + 1'd1;
+			if (mr_k == 6'd0) begin
+				m_req   <= 1;
+				m_we    <= 0;
+				m_addr  <= MOTION[31:3] + mq_addr[31:1];
+				m_burst <= 8'd18;
+			end
+		end
+	end
+end
 
 // ================================================================ the block
 localparam S_IDLE = 0, S_HDR = 1, S_HDR2 = 2, S_DRAIN = 3, S_TABLE = 4, S_RUN = 5, S_ANS = 6, S_DEAD = 7;
@@ -291,7 +423,7 @@ reg [31:0] pics = 0;
 reg [31:0] since = 0, starve = 0, mwait = 0, clocks = 0;
 reg [31:0] l_since = 0, l_starve = 0, l_mwait = 0;
 reg  [7:0] l_slot = 0;
-reg        err = 0, dead = 0;
+reg        err = 0, dead = 0, p_err = 0;
 reg [19:0] wd = 0;
 reg  [5:0] rst_n = 0;
 
@@ -315,7 +447,7 @@ function [63:0] ans_word(input [2:0] i);
 	ans_word =
 		i == 0 ? {session, OKAY} :
 		i == 1 ? {pics, rd_done} :
-		i == 2 ? {l_since, 10'd0, 6'b111101, l_slot, 6'd0, dead, err} :
+		i == 2 ? {l_since, 9'd0, 7'b1111101, l_slot, 5'd0, p_err, dead, err} :
 		i == 3 ? {l_mwait, l_starve} :
 		         {clocks, e_mbs};
 endfunction
@@ -337,13 +469,13 @@ always @(posedge clk) begin
 	if (live) clocks <= clocks + 1'd1;
 
 	// ------------------------------------------------ command FIFO
-	if (e_used) half <= !half;
+	if (r_used) half <= !half;
 	if (cf_next) begin
 		cf_rp <= cf_rp + 1'd1;
 		cf_qv <= 1;
 	end
-	else if (e_used && half) cf_qv <= 0;
-	cf_resv <= cf_resv - (e_used && half) + ((f_take && f_kind == K_RING) ? f_burst : 8'd0);
+	else if (r_used && half) cf_qv <= 0;
+	cf_resv <= cf_resv - (r_used && half) + ((f_take && f_kind == K_RING) ? f_burst : 8'd0);
 	if (cf_we) cf_wp <= cf_wp + 1'd1;
 
 	// ------------------------------------------------ this block's read data
@@ -385,6 +517,7 @@ always @(posedge clk) begin
 		mwait  <= mwait + ((e_rd || e_we) && !e_take);
 	end
 	if (e_err && !err) begin err <= 1; need_ans <= 1; end
+	if (p_errp && !p_err) begin p_err <= 1; need_ans <= 1; end
 
 	// ------------------------------------------------ the memory never answers
 	if (b_out_s2 && !rx) begin
@@ -505,6 +638,7 @@ always @(posedge clk) begin
 					starve  <= 0;
 					mwait   <= 0;
 					err     <= 0;
+					p_err   <= 0;
 					t_left  <= t_all;
 					t_got   <= 0;
 					lk      <= 0;

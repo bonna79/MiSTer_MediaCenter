@@ -18,3 +18,7 @@ set_global_assignment -name VERILOG_FILE rtl/lfsr.v
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/cos.sv
 set_global_assignment -name SYSTEMVERILOG_FILE menu.sv
 set_global_assignment -name SDC_FILE menu.sdc
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/mc_parse.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/parse/rtl/acc_parse.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/parse/rtl/cab_dec.sv
+set_global_assignment -name SEARCH_PATH ../../accel/parse/rtl

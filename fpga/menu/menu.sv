@@ -90,12 +90,13 @@ pll pll
 // It takes the other 50 MHz pin (FPGA_CLK3_50) so it can be placed at
 // FRACTIONALPLL_X0_Y56 (menu.qsf), away from pll_hdmi: next to it (X0_Y15)
 // the HDMI clock change done by Main failed on hardware.
-wire clk_acc;
+wire clk_acc, clk_par;
 pll_acc pll_acc
 (
 	.refclk(CLK_50M_2),
 	.rst(0),
 	.outclk_0(clk_acc),
+	.outclk_1(clk_par),
 	.locked()
 );
 
@@ -283,6 +284,7 @@ mc_zc mc_zc
 mc_acc mc_acc
 (
 	.clk(clk_acc),
+	.clk_par(clk_par),
 	.clk_bus(clk_sys),
 	.enable(fb_own & FB),
 	.ddr_addr(acc_addr),
