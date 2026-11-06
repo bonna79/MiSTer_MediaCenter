@@ -443,6 +443,8 @@ static uint32_t al_ring_end(uint32_t *p)
 	return pos;
 }
 
+static int acc_parse_err;                // acc_parse found an error in this file
+
 // Is the picture of b rebuilt? 1 yes, 0 not after a wait of half a second,
 // -1 never (it is from before a seek, or the core stopped).
 static int al_wait(const acc_buf_t *b)
@@ -461,6 +463,15 @@ static int al_wait(const acc_buf_t *b)
 			{
 				acc_fail(NULL, st & 2 ? "the FPGA memory does not answer" : "the FPGA engine got an unexpected command");
 				return -1;
+			}
+			// acc_parse found an error in a slice (bit 2, since the session
+			// started): the ARM reads the macroblocks again from the next
+			// IDR picture (the pictures up to it stay damaged)
+			if ((st & 4) && acc.hooks.parse == 1)
+			{
+				acc.hooks.parse = 2;
+				acc_parse_err = 1;
+				printf("mediacenter: diag acceleratore: errore nel lettore CABAC dell'FPGA, torno all'ARM dalla prossima immagine IDR\n");
 			}
 			if (pics != al.last_pics)
 			{
@@ -644,13 +655,20 @@ static void acc_try(AVCodecContext *ctx, const AVStream *st)
 	e = getenv("MC_NODEBLOCK");
 	int dbk_core = (al.mb[20] & 0x40000) != 0, dbk_off = e && atoi(e);
 	acc.hooks.deblock = dbk_core && !dbk_off;
+	// CABAC slices read by the core (acc_parse, answer word 20 bit 22:
+	// command A6), unless MC_NOCABAC=1: then exactly as 3.6
+	e = getenv("MC_NOCABAC");
+	int par_core = (al.mb[20] & 0x400000) != 0, par_off = e && atoi(e);
+	acc.hooks.parse = par_core && !par_off;
+	acc_parse_err = 0;
 	acc_attach(ctx);
 	memset(&zd, 0, sizeof(zd));
-	printf("mediacenter: diag acceleratore: acceso (anello %s, scritto direttamente %s, svuotamento L2 %s, sessione %u, pronto in %.0f ms, deblocking %s)\n",
+	printf("mediacenter: diag acceleratore: acceso (anello %s, scritto direttamente %s, svuotamento L2 %s, sessione %u, pronto in %.0f ms, deblocking %s, CABAC %s)\n",
 		al.so ? "fuori da Linux" : "nella memoria del lettore",
 		acc.copy_only ? "no (MC_ACC_COPY)" : al.so ? "no" : al_ring_ok() ? "si" : "no (seconda mappatura non riuscita)",
 		al.l2 ? "si" : "NO", (unsigned)al.fsess, 1000 * (now_seconds() - t0),
-		acc.hooks.deblock ? "nell'FPGA" : (dbk_core ? "spento (MC_NODEBLOCK)" : "no (core senza filtro)"));
+		acc.hooks.deblock ? "nell'FPGA" : (dbk_core ? "spento (MC_NODEBLOCK)" : "no (core senza filtro)"),
+		acc.hooks.parse ? "nell'FPGA" : (par_core ? "sull'ARM (MC_NOCABAC)" : "sull'ARM (core senza acc_parse)"));
 }
 
 // After the decoder and all its pictures are gone.
@@ -704,13 +722,16 @@ static void acc_report(void)
 	printf("mediacenter: diag acceleratore: inviate %u immagini (%.0f KB l'una, scritte direttamente nell'anello %.0f%%, "
 		"invio %.1f ms, %u attese dell'anello per %.1f s), "
 		"FPGA %.1f ms tra due immagini (senza comandi %.1f ms, attesa memoria %.1f ms), disegnate %u (attesa media %.1f ms), "
-		"in ritardo %u, perse %u, scartate dopo un salto %u, slot al massimo %d%s%s\n",
+		"in ritardo %u, perse %u, scartate dopo un salto %u, slot al massimo %d, CABAC %s%s%s\n",
 		acc.pics_sent, acc.pics_sent ? (double)acc.words_sent * 4 / 1024 / acc.pics_sent : 0,
 		acc.words_sent ? 100.0 * acc.words_direct / acc.words_sent : 0,
 		acc.pics_sent ? 1000 * acc.send_time / acc.pics_sent : 0, al.ring_waits, al.ring_wait_t,
 		al.fp_n ? al.fp_since / al.fp_n / ACC_KHZ : 0, al.fp_n ? al.fp_starve / al.fp_n / ACC_KHZ : 0,
 		al.fp_n ? al.fp_mwait / al.fp_n / ACC_KHZ : 0, al.shown, al.shown ? 1000 * al.wait_t / al.shown : 0,
-		al.late, al.lost, acc.pics_dropped, acc.slots_peak, acc.failed ? "; spento: " : "", acc.failed ? acc.why : "");
+		al.late, al.lost, acc.pics_dropped, acc.slots_peak,
+		acc_parse_err ? (acc.hooks.parse ? "nell'FPGA, errore: all'ARM dalla prossima IDR" : "nell'FPGA, poi all'ARM dopo un errore") :
+		acc.hooks.parse ? "nell'FPGA" : "sull'ARM",
+		acc.failed ? "; spento: " : "", acc.failed ? acc.why : "");
 }
 
 // The core's zero-copy block can also narrow by 2:1 (1920 on a 960 frame

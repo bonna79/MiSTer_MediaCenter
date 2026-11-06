@@ -5,7 +5,9 @@
 // player's two threads), and writes <prefix>.cmd (the commands, in the order
 // the FPGA gets them) and <prefix>.rec (FFmpeg's pictures in the same order),
 // for accel/sim/model.py and the test benches. With deblocking (command A5),
-// as the player with a core that filters; MC_NODEBLOCK=1: without.
+// as the player with a core that filters; MC_NODEBLOCK=1: without. MC_A6=1:
+// CABAC slices as command A6 (4.0 core with acc_parse); the .rec is then
+// still FFmpeg's pictures.
 //   acctest <file> <prefix> [threads] [pictures held, like the player's queue]
 // Built with -DACC_FAKE, the commands go through the player's link with the
 // core (tools/mediacenter/accel_link.c: ring, sessions, waiting for each
@@ -110,6 +112,7 @@ static void *fake_core(void *arg)
 			}
 			else if (tag == 0xA4) pics++;
 			else if (tag == 0xA5) left = 2;
+			else if (tag == 0xA6) left = (int)(w & 0xFFFFFF); // the slice for acc_parse
 			else if (tag != 0xA0) { fake_bad++; m[20] = 1; }
 		}
 		rd += take;
@@ -188,6 +191,10 @@ int main(int argc, char **argv)
 	const char *nd = getenv("MC_NODEBLOCK");
 	acc.hooks.deblock = !(nd && atoi(nd));
 	cn->skip_loop_filter = acc.hooks.deblock ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
+	// CABAC slices for the core's acc_parse (command A6) with MC_A6=1, as the
+	// player with a 4.0 core
+	const char *a6 = getenv("MC_A6");
+	acc.hooks.parse = a6 && atoi(a6);
 	cn->flags2 |= AV_CODEC_FLAG2_FAST;
 	ca->thread_count = threads;
 	ca->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
