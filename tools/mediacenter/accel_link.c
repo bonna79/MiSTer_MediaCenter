@@ -70,7 +70,7 @@ static struct
 	uint32_t last_pics;
 	unsigned fp_n;
 	double fp_since, fp_starve, fp_mwait;
-	double khz;              // the accelerator's clock (word 20 bit 21: 104 MHz, else 108)
+	double khz;              // the accelerator's clock (word 20 bit 21: 100 MHz, else 108)
 	struct { unsigned shown, late, lost, ring_waits, sent, fp_n; uint64_t words, direct; double send, wait, fp_since, fp_starve, fp_mwait, start; } w;
 } al = { .fd = -1, .pagemap = -1 };
 
@@ -456,7 +456,7 @@ static int al_wait(const acc_buf_t *b)
 		if (m[16] == ACC_OKAY && m[17] == al.fsess)
 		{
 			uint32_t st = m[20], pics = m[19];
-			al.khz = st & (1u << 21) ? 104000.0 : 108000.0;
+			al.khz = st & (1u << 21) ? 100000.0 : 108000.0;
 			if (st & 3)
 			{
 				acc_fail(NULL, st & 2 ? "the FPGA memory does not answer" : "the FPGA engine got an unexpected command");

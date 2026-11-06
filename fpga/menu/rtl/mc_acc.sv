@@ -24,7 +24,7 @@
 //     [18] 1: the engine filters, working out the strengths (command A5 of 3 words)
 //     [19] 1: mc_zc blends the player's controls (mailbox word 10 bit 18)
 //     [20] 1: mc_zc resamples any width and height (mailbox word 10 bit 19)
-//     [21] 1: the clocks of words 21 to 25 are this block's own, 104 MHz
+//     [21] 1: the clocks of words 21 to 25 are this block's own, 100 MHz
 //          (0: the core clock, 108 MHz)
 //  21 clocks between the last two finished pictures
 //  22 of them, clocks the engine had no command to read
@@ -34,7 +34,7 @@
 //
 // The bus is shared with mc_out (the CRT output, always first) and mc_zc
 // through mc_bus: this block starts a transfer only while granted.
-// This block runs on its own clock (clk, 104 MHz from pll_acc); only the
+// This block runs on its own clock (clk, 100 MHz from pll_acc); only the
 // bus side of its queue runs on the bus clock (clk_bus, 108 MHz).
 module mc_acc #(
 	parameter [31:0] MBOX  = 32'h23E00000,

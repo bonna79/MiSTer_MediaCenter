@@ -20,12 +20,12 @@ localparam [31:0] MBOX = 32'h23E00000;
 localparam [31:0] SLOTS = 32'h30000000;
 
 `ifndef ACC_HALF
-`define ACC_HALF 4.8077
+`define ACC_HALF 5.0
 `endif
 reg clk = 0;
 always #4.63 clk = ~clk;   // 108 MHz, the bus
 reg aclk = 0;
-always #`ACC_HALF aclk = ~aclk;   // mc_acc's own clock (104 MHz)
+always #`ACC_HALF aclk = ~aclk;   // mc_acc's own clock (100 MHz)
 integer aclocks = 0;
 always @(posedge aclk) aclocks <= aclocks + 1;
 
