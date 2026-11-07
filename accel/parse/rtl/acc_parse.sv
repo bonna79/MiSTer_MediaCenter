@@ -439,6 +439,16 @@ reg   [6:0] r_cnt;
 
 // dequantisation pipeline
 reg         c0_v, c1_v, c2_v, c3_v;
+// stage 1a: the dequant factor's parts, registered (the scaling matrix byte
+// comes from a RAM: byte, multiply and shift in one clock were too slow at
+// 85.7 MHz in the core)
+reg         ca_v;
+reg  [21:0] ca_s;
+reg   [5:0] ca_p, ca_j;
+reg   [8:0] ca_b;
+reg  [10:0] ca_f;
+reg   [7:0] ca_sm;
+reg   [4:0] ca_sh;
 reg  [21:0] c0_s, c1_s, c2_s;
 reg   [5:0] c0_p, c1_p, c2_p;
 reg   [5:0] c0_j, c1_j, c2_j;
@@ -784,7 +794,7 @@ always @(posedge clk) begin
 		ncoef <= 9'd0;
 		r_on <= 1'b0;
 		mdy <= 1'b0;
-		c0_v <= 1'b0; c1_v <= 1'b0; c2_v <= 1'b0; c3_v <= 1'b0;
+		c0_v <= 1'b0; ca_v <= 1'b0; c1_v <= 1'b0; c2_v <= 1'b0; c3_v <= 1'b0;
 		for (int k = 0; k < 16; k++) ldc[k] <= 18'sd0;
 		for (int k = 0; k < 8; k++) cdc[k] <= 16'sd0;
 	end
@@ -1779,7 +1789,7 @@ always @(posedge clk) begin
 		end
 
 		// ------------------------------------------------ mcacc: DC transforms
-		S_O0: if (!(c0_v || c1_v || c2_v || c3_v)) begin
+		S_O0: if (!(c0_v || ca_v || c1_v || c2_v || c3_v)) begin
 			dck <= 5'd0;
 			dc_ph <= 1'b0;
 			ok <= 6'd0;
@@ -2447,7 +2457,8 @@ always @(posedge clk) begin
 
 		// ------------------------------------------------ dequantisation pipeline (coefficients from cab_dec)
 		c0_v <= 1'b0;
-		c1_v <= c0_v;
+		ca_v <= c0_v;
+		c1_v <= ca_v;
 		c2_v <= c1_v;
 		c3_v <= c2_v;
 		if (r_on && cab_ov && cab_kind == 2'd1) begin
@@ -2483,14 +2494,17 @@ always @(posedge clk) begin
 			if (mdw_m[l][i] || mdw_z[l][i]) mvdc[l][ix(7'(i))] <= mdw_z[l][i] ? 12'd0 : mdw_v[l];
 			if (rfw_m[l][i] || rfw_n[l][i]) refc[l][ix(7'(i))] <= rfw_n[l][i] ? -6'sd2 : rfw_v[l];
 		end
-		// stage 1: dequant factor (class, scaling matrix byte, QP / 6)
+		// stage 1a: dequant factor parts (class, scaling matrix byte, QP / 6)
 		if (c0_v) begin
-			reg [10:0] f;
-			reg [7:0] sm;
-			sm = 8'(sm_q >> {c0_by, 3'd0});
-			f = c0_8 ? 11'(d8init(c0_m, d8scan({c0_p[4:3], c0_p[1:0]}))) : 11'(d4init(c0_m, {1'b0, c0_p[0]} + {1'b0, c0_p[2]}));
-			c1_s <= c0_s; c1_j <= c0_j; c1_p <= c0_p; c1_b <= c0_b;
-			c1_q <= 22'({11'd0, f} * {14'd0, sm} << (c0_8 ? {1'b0, c0_d} : {1'b0, c0_d} + 5'd2));
+			ca_sm <= 8'(sm_q >> {c0_by, 3'd0});
+			ca_f <= c0_8 ? 11'(d8init(c0_m, d8scan({c0_p[4:3], c0_p[1:0]}))) : 11'(d4init(c0_m, {1'b0, c0_p[0]} + {1'b0, c0_p[2]}));
+			ca_sh <= c0_8 ? {1'b0, c0_d} : {1'b0, c0_d} + 5'd2;
+			ca_s <= c0_s; ca_j <= c0_j; ca_p <= c0_p; ca_b <= c0_b;
+		end
+		// stage 1b: dequant factor
+		if (ca_v) begin
+			c1_s <= ca_s; c1_j <= ca_j; c1_p <= ca_p; c1_b <= ca_b;
+			c1_q <= 22'({11'd0, ca_f} * {14'd0, ca_sm} << ca_sh);
 		end
 		// stage 2: product (the low 22 bits are enough for (product + 32) >> 6 in 16 bits)
 		if (c1_v) begin
