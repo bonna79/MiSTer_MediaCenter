@@ -377,6 +377,7 @@ reg  [1:0][39:0] mvw_m, mvw_z, mdw_m, mdw_z, rfw_m, rfw_n;
 reg   [6:0] cr_a;                   // {list, scan8 index}
 reg   [6:0] cr_ar;                  // registered address of the S_PMB..S_PME neighbour reads
 reg         pm_rd;                  // 1 in S_PMB..S_PME: cr_a = cr_ar
+reg         f_o3, f_e1;             // registered copies of st == S_O3 / st == S_E1 (cache address select)
 wire [31:0] cv_q = mvr(cr_a[6], 7'(cr_a[5:0]));
 wire [11:0] cd_q = mdr(cr_a[6], 7'(cr_a[5:0]));
 wire signed [5:0] cf_q = rfr(cr_a[6], 7'(cr_a[5:0]));
@@ -769,6 +770,18 @@ wire [31:0] mb_lin = {16'd0, mby} * {24'd0, s_mbw} + {24'd0, mbx};
 wire        cur_pcm = (mbt & MT_PCM) != 0;
 wire  [5:0] qrec = cur_pcm ? 6'd0 : qs;
 
+// neighbour loads (S_PMB..S_PME) driven by a small one-hot phase register
+// instead of the 8-bit state decode: the wide st -> pv_* enable paths were
+// the slowest of acc_parse. S_PMA..S_PME always run back to back.
+reg [3:0] pm_ph;
+always @(posedge clk) begin
+	pm_ph <= reset ? 4'd0 : {pm_ph[2:0], st == S_PMA};
+	if (pm_ph[0]) begin pv_a <= cv_q; pr_a <= cf_q; pd_a <= cd_q; end
+	if (pm_ph[1]) begin pv_b <= cv_q; pr_b <= cf_q; pd_b <= cd_q; end
+	if (pm_ph[2]) begin pv_c <= cv_q; pr_c <= cf_q; end
+	if (pm_ph[3]) begin pv_d <= cv_q; pr_d <= cf_q; end
+end
+
 always @(posedge clk) begin
 	mvw_m = '0; mvw_z = '0; mvw_v = '0;
 	mdw_m = '0; mdw_z = '0; mdw_v = '0;
@@ -785,6 +798,8 @@ always @(posedge clk) begin
 	if (reset) begin
 		st <= S_DESC;
 		pm_rd <= 1'b0;
+		f_o3 <= 1'b0;
+		f_e1 <= 1'b0;
 		dpart <= 4'd0;
 		data_on <= 1'b0;
 		cab_v <= 1'b0;
@@ -1416,10 +1431,10 @@ always @(posedge clk) begin
 		// neighbours of block pm_n, list pm_l: left, top, top right, top left
 		// the address is registered one clock ahead of each read (timing)
 		S_PMA: begin cr_ar <= {pm_l, 6'(pm_i8 - 7'd1)}; pm_rd <= 1'b1; st <= S_PMB; end
-		S_PMB: begin pv_a <= cv_q; pr_a <= cf_q; pd_a <= cd_q; cr_ar <= {pm_l, 6'(pm_i8 - 7'd8)}; st <= S_PMC; end
-		S_PMC: begin pv_b <= cv_q; pr_b <= cf_q; pd_b <= cd_q; cr_ar <= {pm_l, 6'(pm_i8 - 7'd8 + {4'd0, pm_pw})}; st <= S_PMD; end
-		S_PMD: begin pv_c <= cv_q; pr_c <= cf_q; cr_ar <= {pm_l, 6'(pm_i8 - 7'd9)}; st <= S_PME; end
-		S_PME: begin pv_d <= cv_q; pr_d <= cf_q; pm_rd <= 1'b0; st <= pm_ret; end
+		S_PMB: begin cr_ar <= {pm_l, 6'(pm_i8 - 7'd8)}; st <= S_PMC; end
+		S_PMC: begin cr_ar <= {pm_l, 6'(pm_i8 - 7'd8 + {4'd0, pm_pw})}; st <= S_PMD; end
+		S_PMD: begin cr_ar <= {pm_l, 6'(pm_i8 - 7'd9)}; st <= S_PME; end
+		S_PME: begin pm_rd <= 1'b0; st <= pm_ret; end
 		S_MV2: begin
 			mx_acc <= pm_mx;
 			my_acc <= pm_my;
@@ -1937,6 +1952,7 @@ always @(posedge clk) begin
 			ok <= 6'd0;
 			pcm_i <= 7'd0;
 			st <= cur_pcm ? S_O6 : S_O3;
+			f_o3 <= !cur_pcm;
 		end
 		S_O3: if (of_room) begin
 			// head: mask, then 4 intra words or 36 inter words
@@ -1971,7 +1987,7 @@ always @(posedge clk) begin
 			end
 			of_we <= 1'b1;
 			of_wd <= w;
-			if (ok == (intra(mbt) ? 6'd4 : 6'd36)) st <= S_O4;
+			if (ok == (intra(mbt) ? 6'd4 : 6'd36)) begin st <= S_O4; f_o3 <= 1'b0; end
 			ok <= ok + 6'd1;
 		end
 		S_O4: if (of_room) begin
@@ -2067,6 +2083,7 @@ always @(posedge clk) begin
 			mr_k <= 6'd0;
 			mr_base <= {24'd0, s_slot} * SLOT_WORDS + mb_lin * 32'd36;
 			st <= S_E1;
+			f_e1 <= 1'b1;
 		end
 		// motion record of the macroblock (co-located data for later B pictures)
 		S_E1: begin
@@ -2075,6 +2092,7 @@ always @(posedge clk) begin
 				if (mr_k == 6'd35) begin
 					mem_req <= 1'b0;
 					st <= S_E2;
+					f_e1 <= 1'b0;
 				end
 				else begin
 					reg [31:0] w;
@@ -2556,13 +2574,18 @@ assign iw_ra = iw_c;
 // shared cache read port
 always @(*) begin
 	reg [4:0] k;
+	// selected by the registered flags f_o3 / f_e1 instead of decoding st:
+	// st no longer reaches the cache address (and so cv_q and pv_*)
 	cr_a = cr_ar;
-	if (!pm_rd) case (st)
-	S_O3: begin k = 5'(ok - 6'd5); cr_a = {k[4], 6'(f_scan8({2'd0, k[3:0]}))}; end
-	S_E1: begin k = 5'(mr_k - 6'd3); cr_a = {k[4], 6'(7'd12 + {5'd0, k[1:0]} + {2'd0, k[3:2], 3'd0})}; end
-	default: ;
-	endcase
+	if (!pm_rd && f_o3) begin k = 5'(ok - 6'd5); cr_a = {k[4], 6'(f_scan8({2'd0, k[3:0]}))}; end
+	else if (!pm_rd && f_e1) begin k = 5'(mr_k - 6'd3); cr_a = {k[4], 6'(7'd12 + {5'd0, k[1:0]} + {2'd0, k[3:2], 3'd0})}; end
 end
+`ifdef VERILATOR
+// simulation check: the flags must always match the state
+always @(posedge clk) if (!reset && (f_o3 != (st == S_O3) || f_e1 != (st == S_E1))) begin
+	$display("acc_parse: f_o3/f_e1 out of step with st=%0d", st); $stop;
+end
+`endif
 // co-located vector reads: S_TD2 one block (copy 0), S_SD2 the 4 blocks of 8x8 dr_i8
 always @(*) begin
 	reg [1:0] i8;
