@@ -386,10 +386,8 @@ reg  [31:0] pv_a, pv_b, pv_c, pv_d;
 reg  signed [5:0] pr_a, pr_b, pr_c, pr_d;
 reg  [11:0] pd_a, pd_b;
 reg  [1:0][31:0] mvw_v;
-`ifdef MVC_DELAY
-reg  [1:0][39:0] mvd_m, mvd_z;
+reg  [1:0][39:0] mvd_m, mvd_z;      // registered vector cache write bus
 reg  [1:0][31:0] mvd_v;
-`endif
 reg  [1:0][11:0] mdw_v;
 reg  [1:0][5:0]  rfw_v;
 
@@ -2511,16 +2509,15 @@ always @(posedge clk) begin
 		end
 		// cache write buses
 		// (interior places only; the -2 of column 8 is constant in rfr)
-`ifdef MVC_DELAY
-		// study only: vector cache write one clock later (registered write bus)
+		// the vector cache is written one clock after the state that computes
+		// the value (registered write bus): the state decode and the vector
+		// prediction stop at mvd_*, not at the 448 cache registers. The parser
+		// never re-reads a vector the clock after writing it (checked on all
+		// test files: pictures and clock counts identical)
 		mvd_m <= mvw_m; mvd_z <= mvw_z; mvd_v <= mvw_v;
 		for (int l = 0; l < 2; l++) for (int i = 12; i < 40; i++) if (i % 8 >= 4)
 			if (mvd_m[l][i] || mvd_z[l][i]) mvc[l][ix(7'(i))] <= mvd_z[l][i] ? 26'd0 : mvp(mvd_v[l]);
-`endif
 		for (int l = 0; l < 2; l++) for (int i = 12; i < 40; i++) if (i % 8 >= 4) begin
-`ifndef MVC_DELAY
-			if (mvw_m[l][i] || mvw_z[l][i]) mvc[l][ix(7'(i))] <= mvw_z[l][i] ? 26'd0 : mvp(mvw_v[l]);
-`endif
 			if (mdw_m[l][i] || mdw_z[l][i]) mvdc[l][ix(7'(i))] <= mdw_z[l][i] ? 12'd0 : mdw_v[l];
 			if (rfw_m[l][i] || rfw_n[l][i]) refc[l][ix(7'(i))] <= rfw_n[l][i] ? -6'sd2 : rfw_v[l];
 		end
