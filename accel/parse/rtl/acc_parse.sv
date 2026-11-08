@@ -740,7 +740,11 @@ reg  [23:0] qmul_dc;
 reg         td_ph;                  // temporal direct: 0 scale, 1 write
 reg         dc_ph;                  // luma DC output: 0 sum, 1 scale and write
 reg  [31:0] dc_z;
-wire [31:0] dc_pr = dc_z * {8'd0, qmul_dc};   // shared by the luma and chroma DC scale
+// shared by the luma and chroma DC scale. Only bits 23..0 of the product are
+// used (luma [23:8] after +128, chroma [22:7]), and the low 24 bits of a
+// product depend only on the low 24 bits of its factors: a 24x24 multiply
+// fits one DSP block and gives the same bits as the old 32x32 one.
+wire [23:0] dc_pr = dc_z[23:0] * qmul_dc;
 reg   [5:0] cq0_r;                  // S_O1: chroma QP (Cb) of this macroblock, word 1 for word 2
 reg   [3:0] dc_blk;
 reg  [15:0] td_mx, td_my, td_cx, td_cy;
@@ -1852,7 +1856,7 @@ always @(posedge clk) begin
 			else begin
 				reg [31:0] pr;
 				reg [15:0] v;
-				pr = dc_pr + 32'd128;
+				pr = {8'd0, dc_pr} + 32'd128;
 				v = pr[23:8];
 				cr_we <= 1'b1;
 				cr_wa <= {1'b0, dc_blk, 4'd0};
@@ -1895,7 +1899,7 @@ always @(posedge clk) begin
 				reg [31:0] pr;
 				reg [15:0] v;
 				reg [2:0] cb;
-				pr = dc_pr;
+				pr = {8'd0, dc_pr};
 				v = pr[22:7];
 				cb = {dck[2], dck[1:0]};
 				cr_we <= 1'b1;
