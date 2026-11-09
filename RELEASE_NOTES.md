@@ -2,34 +2,32 @@
 
 > Sviluppato con l'aiuto dell'intelligenza artificiale (Claude di Anthropic). / Developed with the help of AI (Anthropic's Claude).
 
-**MiSTer MediaCenter 3.6** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB e rete, su HDMI e su CRT a 15 kHz.
+**MiSTer MediaCenter 4.0** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB e rete, su HDMI e su CRT a 15 kHz.
 
-**Novità della 3.6:** porta l'acceleratore H.264 nell'FPGA anche ai video **720p**, **810p** e ai film in formato cinema come **Tears of Steel (1728x720)**, e lo rende più veloce nel 1080p.
+**Novità della 4.0:** porta nell'FPGA anche la lettura del **CABAC**, la parte più pesante della decodifica H.264: fino alla 3.6 la faceva l'ARM, che poi mandava al core circa 1 MB di comandi per ogni immagine. Ora l'ARM manda al core solo i byte compressi del video e non fa quasi più niente.
 
-- **Acceleratore anche per 720p, 810p e altre larghezze:** fino alla 3.5 l'FPGA ricostruiva solo i video larghi 1920 punti. Ora prende tutti i video H.264 a 8 bit, 4:2:0, progressivi da 1024x400 a 2048x1088. Il core del menu copia poi l'immagine nel framebuffer portandola alla misura dello schermo, con gli stessi punti e le stesse righe che sceglieva l'ARM. Tears of Steel passa dal 29,6% di immagini non mostrate allo 0,0%, e l'ARM da circa 41 ms a 3,8 ms per immagine. Con un core del menu più vecchio il lettore spegne da solo l'acceleratore per queste misure.
-- **Video 1440x810 con l'acceleratore:** per esempio gli MKV di Inuyasha. Il core restringe l'immagine a 960x405 con lo stesso restringimento 3:2 del 1080p; all'ARM restano circa 6 ms per immagine invece di 17.
-- **FPGA più veloce nel 1080p:** il motore legge le finestre di riferimento del macroblocco successivo mentre calcola quello attuale, legge con una finestra sola i blocchi piccoli vicini con lo stesso vettore e il filtro anti-blocchi scrive due parole per volta in memoria. HTC.mp4 passa da 23,5 a 20,3 ms di lavoro dell'FPGA per immagine (-14%): più margine per le scene pesanti.
-- **Partenza più sicura:** con l'acceleratore il lettore prepara 48 immagini prima di partire (prima 24) e tiene sempre liberi 10 posti dell'FPGA; HTC.mp4 non ha più immagini in ritardo all'inizio (prima 6). Senza acceleratore ne prepara 24 (prima 12) e le aspetta anche dopo un salto: un 720p con due salti passa da 5 immagini in ritardo a nessuna.
-- **Film più larghi del 16:9 anche senza acceleratore:** quando il video lo decodifica l'ARM, un film 2,40:1 ristretto alla sua finestra resta in YUV (i colori li converte l'FPGA) e il restringimento usa le istruzioni NEON del processore: il disegno di un'immagine passa da 14,3 a 7,8 ms.
-- **Nuova immagine** con la scritta Ver. 3.6, mostrata 3 secondi solo quando si avvia lo script mediacenter dagli Scripts (non quando parte un DVD, un Video CD o un Super Video CD).
+- **Il lettore CABAC nell'FPGA:** un nuovo blocco del core (`acc_parse`, con il decodificatore aritmetico `cab_dec`) legge le slice CABAC bit per bit, ricava i tipi di macroblocco, i vettori di movimento, le previsioni intra e i coefficienti, e passa al motore gli stessi comandi che prima scriveva l'ARM. L'ARM lavora 0,3-0,4 ms per immagine invece di 1,7-26,7 ms, e scrive in memoria 10-20 KB per immagine invece di 0,5-1,3 MB.
+- **Tre clock separati:** il motore gira a 100 MHz, il lettore CABAC a 85,7 MHz e il resto del core a 108 MHz, con code di passaggio fra le zone. Così ogni parte rispetta i tempi anche con il chip pieno al 94%.
+- **Più margine nelle scene pesanti:** HTC.mp4 (1080p a 30 fps), il file più al limite con la 3.6, passa da 6 a 1 immagine in ritardo e l'ARM da 26,7 a 0,4 ms per immagine. L'attesa della memoria dell'FPGA scende in tutti i file provati.
+- **Stesse immagini della 3.6:** le immagini fatte con il CABAC nell'FPGA sono state confrontate in simulazione con quelle della 3.6 su 11 video di prova: identiche byte per byte.
+- **Sempre una strada di ritorno:** i video H.264 CAVLC usano l'acceleratore come nella 3.6. Se il lettore CABAC trova una slice rovinata, il CABAC torna sull'ARM fino alla prossima immagine IDR. `MC_NOCABAC=1` in `mediacenter.ini` fa leggere il CABAC all'ARM come nella 3.6 (solo per i confronti).
+- **Nuova immagine** con la scritta Ver. 4.0 H264 1080P e il numero della build, mostrata 3 secondi quando si avvia lo script mediacenter dagli Scripts.
 
-Il core del menu della 3.6 usa il 78% della logica, il 37% dei blocchi di memoria interna e l'85% dei moltiplicatori dell'FPGA, e rispetta i tempi a 108 MHz a 100 °C e a -40 °C (seed 9 del fitter, margine +0,066 ns). Il lettore e il core vanno aggiornati insieme.
+Il core del menu della 4.0 usa il 94% della logica (39.305 ALM), il 43% dei blocchi di memoria interna e il 74% dei moltiplicatori dell'FPGA. Rispetta tutti i tempi a 100 °C e a -40 °C, nei modelli lento e veloce del chip (seed 12 del fitter, margine minimo +0,014 ns sull'uscita HDMI). Il lettore e il core vanno aggiornati insieme: con un core più vecchio il lettore lascia il CABAC all'ARM.
 
-Provata su un MiSTer vero il 29–31 ottobre 2026, su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme. Tutte le prove dal menu, con l'audio sempre pulito:
+Provata su un MiSTer vero il 9 novembre 2026, su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme. Tutte le prove dal menu, con l'audio sempre pulito e nessuna immagine persa dall'FPGA:
 
-| Prova | Prima | 3.6 |
+| Prova | 3.6 | 4.0 |
 | --- | --- | --- |
-| Tears of Steel, H.264 1728x720 2,40:1, i primi 241 s, con le scene più pesanti, da USB | 29,6% di immagini non mostrate, ARM circa 41 ms per immagine (al limite) | **0,0%**, nessuna in ritardo, nessuna persa dall'FPGA, ARM 3,8 ms |
-| One Piece Episodio 938, H.264 1280x720, 156 s | 0,3% (3.5, senza acceleratore) | **0,1%** (nei primi secondi), nessuna in ritardo, nessuna persa dall'FPGA, ARM 1,7 ms |
-| Inuyasha, H.264 1440x810, 627 s, dal DVD | 0,2%, 10 in ritardo, ARM 16,9 ms (3.5) | **0,0%**, 2 in ritardo (due pause di lettura del disco), nessuna persa dall'FPGA, ARM 5,6 ms |
-| One Piece Episodio 940, H.264 1920x1080, 788 s | 0,3% (3.5) | **0,0%**, nessuna in ritardo, nessuna persa dall'FPGA |
-| HTC.mp4, 1080p 29,97: lavoro dell'FPGA per immagine | 23,5 ms (3.5) | **20,3 ms** (-14%), 0,1% di immagini non mostrate |
-| HTC.mp4, partenza | 6 immagini in ritardo nei primi secondi | **nessuna** |
-| Video 720p decodificato dall'ARM (VisionQuest, prima dell'acceleratore per il 720p) con due salti | 0,5%, 5 in ritardo | **0,2%**, nessuna in ritardo |
+| One Piece Episodio 940, H.264 1920x1080 | 0,0%, ARM 12,3 ms per immagine | **0,1%**, nessuna in ritardo, ARM **0,3 ms** |
+| HTC.mp4, H.264 1920x1080 a 29,97 fps, tutto | 0,2%, 6 in ritardo, ARM 26,7 ms (al limite) | **0,1%**, 1 in ritardo, ARM **0,4 ms** |
+| Tears of Steel, H.264 1728x720 2,40:1 | 0,0%, ARM 3,8 ms | **0,1%**, 3 in ritardo nei primi secondi, ARM **0,3 ms** |
+| One Piece Episodio 938, H.264 1280x720 | 0,1%, ARM 1,7 ms | **0,1%**, nessuna in ritardo, ARM **0,3 ms** |
+| Inuyasha, H.264 1440x810, MKV da DVD-R | 0,0%, ARM 5,6 ms | **0,0%**, nessuna in ritardo, ARM **0,4 ms** |
+| Sega intro, H.264 lossless (lo fa l'ARM) | logo visibile | logo visibile, nessuna in ritardo |
+| DivX 576x432, DVD originale con menu, tracce audio e sottotitoli, Video CD | funzionano | funzionano come prima |
 
-Le immagini che il core disegna con l'acceleratore sono state confrontate prima in simulazione con quelle di FFmpeg e del lettore: identiche punto per punto (16 casi di ridimensionamento; Tears of Steel: 210 immagini nel modello e 6 nel motore Verilog).
-
-Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-36) e nella [scheda tecnica](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/docs/SCHEDA_TECNICA_ACCELERATORE_IT.md). Le novità della 3.5, della 3.0 e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-35).
+Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-40) e nella [scheda tecnica](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/docs/SCHEDA_TECNICA_ACCELERATORE_IT.md). Le novità della 3.6 e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-36).
 
 **Ringraziamenti:**
 
@@ -37,7 +35,7 @@ Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-dell
 - **Max Riptide**, per le numerose prove fatte e i suggerimenti.
 - **mad4gith**, per le idee suggerite per migliorare MMC.
 
-**Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD: contiene tutto quello che serve a MMC. Aggiorna sempre tutti i file insieme. **Dalla 3.5:** estrai lo zip sopra i file vecchi e riavvia; servono insieme il lettore `mediacenter` e il core `menu_mediacenter.rbf` della 3.6 (l'acceleratore per 720p, 810p e le altre larghezze è nel core). `MiSTer.ini` e `mediacenter.ini` restano come sono.
+**Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD: contiene tutto quello che serve a MMC. Aggiorna sempre tutti i file insieme. **Dalla 3.6 o prima:** estrai lo zip sopra i file vecchi e riavvia; servono insieme il lettore `mediacenter` e il core `menu_mediacenter.rbf` della 4.0 (il lettore CABAC è nel core: con il core vecchio il lettore lascia il CABAC all'ARM come nella 3.6). `MiSTer.ini` e `mediacenter.ini` restano come sono.
 
 | File | Cartella |
 | --- | --- |
@@ -54,37 +52,35 @@ Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0
 
 ---
 
-**English:** **MiSTer MediaCenter 3.6** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB and network, over HDMI and on a 15 kHz CRT.
+**English:** **MiSTer MediaCenter 4.0** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB and network, over HDMI and on a 15 kHz CRT.
 
-**What's new in 3.6:** it brings the H.264 accelerator in the FPGA to **720p** and **810p** video and to cinema-format films such as **Tears of Steel (1728x720)**, and makes it faster on 1080p.
+**What's new in 4.0:** it also moves the reading of **CABAC**, the heaviest part of H.264 decoding, into the FPGA: up to 3.6 the ARM did it, then sent the core about 1 MB of commands for every picture. Now the ARM sends the core only the compressed bytes of the video and has almost nothing left to do.
 
-- **Accelerator for 720p, 810p and other widths too:** up to 3.5 the FPGA only rebuilt video 1920 pixels wide. Now it takes all 8-bit, 4:2:0, progressive H.264 video from 1024x400 to 2048x1088. The menu core then copies the picture into the frame buffer at the size of the screen, taking the same pixels and lines the ARM used to take. Tears of Steel goes from 29.6% of pictures not shown to 0.0%, and the ARM from about 41 ms to 3.8 ms per picture. With an older menu core the player turns the accelerator off by itself for these sizes.
-- **1440x810 video with the accelerator:** for example Inuyasha's MKVs. The core narrows the picture to 960x405 with the same 3:2 narrowing as 1080p; the ARM spends about 6 ms per picture instead of 17.
-- **Faster FPGA on 1080p:** the engine reads the reference windows of the next macroblock while it calculates the current one, reads small neighbouring blocks with the same vector through a single window, and the deblocking filter writes two words at a time to memory. HTC.mp4 goes from 23.5 to 20.3 ms of FPGA work per picture (-14%): more headroom for heavy scenes.
-- **Safer start:** with the accelerator the player prepares 48 pictures before starting (before, 24) and always keeps 10 FPGA places free; HTC.mp4 no longer has late pictures at the start (before, 6). Without the accelerator it prepares 24 (before, 12) and waits for them after a seek too: a 720p with two seeks goes from 5 late pictures to none.
-- **Films wider than 16:9 without the accelerator too:** when the ARM decodes the video, a 2.40:1 film narrowed to its window stays in YUV (the FPGA converts the colours) and the narrowing uses the processor's NEON instructions: drawing a picture goes from 14.3 to 7.8 ms.
-- **New picture** reading Ver. 3.6, shown for 3 seconds only when the mediacenter script is started from Scripts (not when a DVD, Video CD or Super Video CD starts).
+- **The CABAC reader in the FPGA:** a new block of the core (`acc_parse`, with the arithmetic decoder `cab_dec`) reads the CABAC slices bit by bit, works out the macroblock types, motion vectors, intra predictions and coefficients, and hands the engine the same commands the ARM used to write. The ARM spends 0.3-0.4 ms per picture instead of 1.7-26.7 ms, and writes 10-20 KB per picture to memory instead of 0.5-1.3 MB.
+- **Three separate clocks:** the engine runs at 100 MHz, the CABAC reader at 85.7 MHz and the rest of the core at 108 MHz, with queues between the zones. This way every part meets timing even with the chip 94% full.
+- **More headroom in heavy scenes:** HTC.mp4 (1080p at 30 fps), the file closest to the limit with 3.6, goes from 6 late pictures to 1 and the ARM from 26.7 to 0.4 ms per picture. The FPGA's memory wait drops on every file tested.
+- **The same pictures as 3.6:** the pictures made with CABAC in the FPGA were compared in simulation with those of 3.6 on 11 test videos: identical byte for byte.
+- **Always a way back:** CAVLC H.264 video uses the accelerator as in 3.6. If the CABAC reader finds a damaged slice, CABAC goes back to the ARM until the next IDR picture. `MC_NOCABAC=1` in `mediacenter.ini` has the ARM read CABAC as in 3.6 (for comparisons only).
+- **New picture** reading Ver. 4.0 H264 1080P with the build number, shown for 3 seconds when the mediacenter script is started from Scripts.
 
-The 3.6 menu core uses 78% of the FPGA's logic, 37% of the internal memory blocks and 85% of the multipliers, and meets timing at 108 MHz at 100 °C and -40 °C (fitter seed 9, margin +0.066 ns). The player and the core must be updated together.
+The 4.0 menu core uses 94% of the FPGA's logic (39,305 ALMs), 43% of the internal memory blocks and 74% of the multipliers. It meets all timing at 100 °C and -40 °C, in the slow and fast models of the chip (fitter seed 12, smallest margin +0.014 ns on the HDMI output). The player and the core must be updated together: with an older core the player leaves CABAC to the ARM.
 
-Tested on a real MiSTer on 29–31 October 2026, on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together. Every test from the menu, with the sound always clean:
+Tested on a real MiSTer on 9 November 2026, on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together. Every test from the menu, with the sound always clean and no picture lost by the FPGA:
 
-| Test | Before | 3.6 |
+| Test | 3.6 | 4.0 |
 | --- | --- | --- |
-| Tears of Steel, H.264 1728x720 2.40:1, the first 241 s, with the heaviest scenes, from USB | 29.6% of pictures not shown, ARM about 41 ms per picture (at the limit) | **0.0%**, none late, none lost by the FPGA, ARM 3.8 ms |
-| One Piece Episode 938, H.264 1280x720, 156 s | 0.3% (3.5, no accelerator) | **0.1%** (in the first seconds), none late, none lost by the FPGA, ARM 1.7 ms |
-| Inuyasha, H.264 1440x810, 627 s, from the DVD | 0.2%, 10 late, ARM 16.9 ms (3.5) | **0.0%**, 2 late (two disc read pauses), none lost by the FPGA, ARM 5.6 ms |
-| One Piece Episode 940, H.264 1920x1080, 788 s | 0.3% (3.5) | **0.0%**, none late, none lost by the FPGA |
-| HTC.mp4, 1080p 29.97: FPGA work per picture | 23.5 ms (3.5) | **20.3 ms** (-14%), 0.1% of pictures not shown |
-| HTC.mp4, start | 6 late pictures in the first seconds | **none** |
-| 720p video decoded by the ARM (VisionQuest, before the 720p accelerator) with two seeks | 0.5%, 5 late | **0.2%**, none late |
+| One Piece Episode 940, H.264 1920x1080 | 0.0%, ARM 12.3 ms per picture | **0.1%**, none late, ARM **0.3 ms** |
+| HTC.mp4, H.264 1920x1080 at 29.97 fps, whole file | 0.2%, 6 late, ARM 26.7 ms (at the limit) | **0.1%**, 1 late, ARM **0.4 ms** |
+| Tears of Steel, H.264 1728x720 2.40:1 | 0.0%, ARM 3.8 ms | **0.1%**, 3 late in the first seconds, ARM **0.3 ms** |
+| One Piece Episode 938, H.264 1280x720 | 0.1%, ARM 1.7 ms | **0.1%**, none late, ARM **0.3 ms** |
+| Inuyasha, H.264 1440x810, MKV from DVD-R | 0.0%, ARM 5.6 ms | **0.0%**, none late, ARM **0.4 ms** |
+| Sega intro, lossless H.264 (done by the ARM) | logo visible | logo visible, none late |
+| DivX 576x432, original DVD with menus, audio tracks and subtitles, Video CD | work | work as before |
 
-The pictures the core draws with the accelerator were first compared in simulation with FFmpeg's and the player's: identical pixel for pixel (16 resizing cases; Tears of Steel: 210 pictures in the model and 6 in the Verilog engine).
-
-Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-36) and the [technical sheet](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/docs/TECHNICAL_SHEET_ACCELERATOR_EN.md). What's new in 3.5, 3.0 and earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-35).
+Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-40) and the [technical sheet](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/docs/TECHNICAL_SHEET_ACCELERATOR_EN.md). What's new in 3.6 and earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-36).
 
 **Thanks:** Umberto Parisi (rmonic79) of the Beceri Videoludici, whose work on [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) made CRT Adjust possible ([YouTube channel](https://youtube.com/@rmonic79_ibecerivideoludici)); Max Riptide for the many tests and suggestions; mad4gith for the ideas to improve MMC.
 
-**Install:** extract `MiSTer_MediaCenter.zip` to the root of the SD card: it holds everything MMC needs. Always update all files together (**from 3.5:** extract the zip over the old files and restart; the 3.6 `mediacenter` player and `menu_mediacenter.rbf` core are needed together, the accelerator for 720p, 810p and the other widths is in the core; `MiSTer.ini` and `mediacenter.ini` stay as they are): Main `MiSTer_MediaCenter` to `/media/fat/`, ARM player `mediacenter` and menu core `menu_mediacenter.rbf` to `/media/fat/linux/`, script `mediacenter.sh` to `/media/fat/Scripts/`, `libdvdcss.so.2` to `/media/fat/dvdcss/`, `MMC_MiSTer_ini.txt` to `/media/fat/`. Copy the lines of `MMC_MiSTer_ini.txt` into `/media/fat/MiSTer.ini`. The [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases) Main, for game discs, is downloaded from its own project. Restart the MiSTer. Full guide in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#installation).
+**Install:** extract `MiSTer_MediaCenter.zip` to the root of the SD card: it holds everything MMC needs. Always update all files together (**from 3.6 or earlier:** extract the zip over the old files and restart; the 4.0 `mediacenter` player and `menu_mediacenter.rbf` core are needed together, the CABAC reader is in the core and with the old core the player leaves CABAC to the ARM as in 3.6; `MiSTer.ini` and `mediacenter.ini` stay as they are): Main `MiSTer_MediaCenter` to `/media/fat/`, ARM player `mediacenter` and menu core `menu_mediacenter.rbf` to `/media/fat/linux/`, script `mediacenter.sh` to `/media/fat/Scripts/`, `libdvdcss.so.2` to `/media/fat/dvdcss/`, `MMC_MiSTer_ini.txt` to `/media/fat/`. Copy the lines of `MMC_MiSTer_ini.txt` into `/media/fat/MiSTer.ini`. The [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases) Main, for game discs, is downloaded from its own project. Restart the MiSTer. Full guide in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#installation).
 
 **Your feedback is very valuable:** write to me, even when everything works. If there are problems, open a report on [Issues](https://github.com/bonna79/MiSTer_MediaCenter/issues) with photos of the screen and the `/tmp/mediacenter.log`, `/tmp/mediacenter_main.log` and `/tmp/mediacenter_crt` files.

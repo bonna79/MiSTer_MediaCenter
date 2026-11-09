@@ -1,6 +1,6 @@
 # Technical sheet: the H.264 accelerator in the FPGA of MiSTer MediaCenter
 
-*Version 3.6, updated on 31 October 2026: accelerator for 720p, 810p and widths up to 2048 too (resampling in `mc_zc`), read-ahead of the reference windows, two-word writes of the deblocking filter, 48-picture start reserve. In 3.5: deblocking filter in the FPGA, the player's controls blended by the core, waiting for the end of start-up, measured bitrate limits. In Italian: [SCHEDA_TECNICA_ACCELERATORE_IT.md](SCHEDA_TECNICA_ACCELERATORE_IT.md).*
+*Version 4.0, updated on 9 November 2026: CABAC reading in the FPGA (`acc_parse`, section 0). In 3.6: accelerator for 720p, 810p and widths up to 2048 too (resampling in `mc_zc`), read-ahead of the reference windows, two-word writes of the deblocking filter, 48-picture start reserve. In 3.5: deblocking filter in the FPGA, the player's controls blended by the core, waiting for the end of start-up, measured bitrate limits. In Italian: [SCHEDA_TECNICA_ACCELERATORE_IT.md](SCHEDA_TECNICA_ACCELERATORE_IT.md).*
 
 This sheet is for programmers who want to understand, change or improve the accelerator, even starting again from scratch. It explains:
 - how the accelerator splits the work between the MiSTer's ARM processor and its FPGA;
@@ -12,6 +12,18 @@ This sheet is for programmers who want to understand, change or improve the acce
 File names are relative to the root of the [bonna79/MiSTer_MediaCenter](https://github.com/bonna79/MiSTer_MediaCenter) repository.
 
 ---
+
+## 0. New in 4.0: CABAC in the FPGA
+
+From 4.0 the reading of CABAC (macroblock types, motion vectors, intra predictions, coefficients) is done in the core too. The rest of this sheet describes the 3.6 path, which is still valid: the commands reaching the engine are the same, only who writes them has changed.
+
+- **Files:** `accel/parse/rtl/acc_parse.sv` (slice reader, with its tables in `acc_parse_tables.svh`), `accel/parse/rtl/cab_dec.sv` (arithmetic decoder), `fpga/menu/rtl/mc_afifo.sv` (queues between clocks). For simulation comparisons: `accel/parse/sim/ffmpeg-cabac-trace.patch`.
+- **Commands:** for each CABAC slice the ARM player writes command `A6` into the ring with the slice's compressed bytes (10-20 KB per picture instead of 0.5-1.3 MB). `acc_parse` reads them and produces the same engine commands FFmpeg used to write; the simulation comparison on 11 videos gave pictures identical byte for byte.
+- **Clocks:** `acc_parse` and `cab_dec` at 85.7 MHz, the engine at 100 MHz (its own PLL, fed from the FPGA_CLK3_50 pin and placed top left, away from the HDMI PLL), the rest of the core at 108 MHz. The zones are joined by `mc_afifo` queues.
+- **Detection:** a core with `acc_parse` sets bit 22 of word 20 of the `mc_acc` mailbox. Only then does the player use `A6`; with an older core it leaves CABAC to the ARM as in 3.6.
+- **Way back to the ARM:** CAVLC video uses the 3.6 path. If `acc_parse` reports a damaged slice, CABAC goes back to the ARM until the next IDR picture. `MC_NOCABAC=1` in `mediacenter.ini` forces the 3.6 path (for comparisons); the log says whether CABAC is read in the FPGA or on the ARM.
+- **Resources and timing:** 39,305 ALMs (94%), M10K 238/553 (43%), DSP 83/112 (74%). Fitter seed 12 (fpga.yml run 42522126993, md5 `7cb8175f995d5b72a49c2ef032fbc963`): the only seed of the final code that meets all timing at 100 °C and -40 °C, slow and fast models; smallest margin +0.014 ns on HDMI.
+- **Measured performance (9 November 2026, player build 220):** ARM 0.3-0.4 ms per picture on accelerated H.264 (1.7 to 26.7 ms with 3.6), no picture lost by the FPGA, no CABAC errors; HTC.mp4 from 6 late pictures to 1.
 
 ## 1. Why it exists and what it does
 
