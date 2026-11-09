@@ -1,0 +1,17 @@
+# Synthesis-only project of acc_parse (step 2 of 4.0, measure only): size and
+# timing on the DE10-Nano FPGA at the menu core clock (108 MHz). Not a core.
+set_global_assignment -name FAMILY "Cyclone V"
+set_global_assignment -name DEVICE 5CSEBA6U23I7
+set_global_assignment -name TOP_LEVEL_ENTITY apar_syn
+set_global_assignment -name SYSTEMVERILOG_FILE apar_syn.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/acc_parse.sv
+set_global_assignment -name SYSTEMVERILOG_FILE ../rtl/cab_dec.sv
+set_global_assignment -name SEARCH_PATH ../rtl
+set_global_assignment -name SDC_FILE cab.sdc
+set_global_assignment -name OPTIMIZATION_MODE "HIGH PERFORMANCE EFFORT"
+set_global_assignment -name SEED 1
+set_instance_assignment -name VIRTUAL_PIN ON -to in_*
+set_instance_assignment -name VIRTUAL_PIN ON -to out_*
+set_instance_assignment -name VIRTUAL_PIN ON -to mem_*
+set_instance_assignment -name VIRTUAL_PIN ON -to sl_*
+set_instance_assignment -name VIRTUAL_PIN ON -to busy

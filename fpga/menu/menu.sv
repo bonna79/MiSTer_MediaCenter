@@ -86,6 +86,20 @@ pll pll
 	.locked(locked)
 );
 
+// the accelerator's own clock (mc_acc), not tied to clk_sys and CLK_VIDEO.
+// It takes the other 50 MHz pin (FPGA_CLK3_50) so it can be placed at
+// FRACTIONALPLL_X0_Y56 (menu.qsf), away from pll_hdmi: next to it (X0_Y15)
+// the HDMI clock change done by Main failed on hardware.
+wire clk_acc, clk_par;
+pll_acc pll_acc
+(
+	.refclk(CLK_50M_2),
+	.rst(0),
+	.outclk_0(clk_acc),
+	.outclk_1(clk_par),
+	.locked()
+);
+
 
 /////////////////////   SDRAM   ///////////////////
 //
@@ -114,6 +128,16 @@ reg  [15:0] sdram_din;
 reg         sdram_we;
 reg         sdram_rd;
 reg  [15:0] cfg = 0;
+
+// SDRAM size check: the read word is first copied (sd_q) and then compared
+// (sd_eq) in separate clocks, so the long SDRAM -> cfg path is split in two.
+// sdram.sv holds dout until the next read, so the extra clocks are safe.
+reg  [15:0] sd_q;
+reg   [2:0] sd_eq;
+always @(posedge clk_sys) begin
+	sd_q  <= sdram_dout;
+	sd_eq <= {sd_q == 3128, sd_q == 2064, sd_q == 1032};
+end
 
 always @(posedge clk_sys) begin
 	reg [4:0] state = 0;
@@ -165,26 +189,32 @@ always @(posedge clk_sys) begin
 					state      <= state+1'd1;
 				end
 			10: state <= state+1'd1;
-			11: if(sdram_ready) begin
-					cfg[2]     <= (sdram_dout == 3128);
+			11: if(sdram_ready) state <= state+1'd1;
+			12: state <= state+1'd1;
+			13: begin
+					cfg[2]     <= sd_eq[2];
 					sdram_addr <= 'h2000000;
 					sdram_rd   <= 1;
 					state      <= state+1'd1;
 				end
-			12: state <= state+1'd1;
-			13: if(sdram_ready) begin
-					cfg[1]     <= (sdram_dout == 2064);
+			14: state <= state+1'd1;
+			15: if(sdram_ready) state <= state+1'd1;
+			16: state <= state+1'd1;
+			17: begin
+					cfg[1]     <= sd_eq[1];
 					sdram_addr <= 'h0000000;
 					sdram_rd   <= 1;
 					state      <= state+1'd1;
 				end
-			14: state <= state+1'd1;
-			15: if(sdram_ready) begin
-					cfg[0]     <= (sdram_dout == 1032);
+			18: state <= state+1'd1;
+			19: if(sdram_ready) state <= state+1'd1;
+			20: state <= state+1'd1;
+			21: begin
+					cfg[0]     <= sd_eq[0];
 					cfg[15]    <= 1;
 					state      <= state+1'd1;
 				end
-			16: begin
+			22: begin
 					sdram_addr <= addr[24:0];
 					sdram_din  <= 0;
 					sdram_we   <= we;
@@ -269,7 +299,9 @@ mc_zc mc_zc
 // the accelerator works only in FB mode (MiSTer MediaCenter's player)
 mc_acc mc_acc
 (
-	.clk(clk_sys),
+	.clk(clk_acc),
+	.clk_par(clk_par),
+	.clk_bus(clk_sys),
 	.enable(fb_own & FB),
 	.ddr_addr(acc_addr),
 	.ddr_burst(acc_burst),

@@ -18,9 +18,20 @@ module tb_core;
 `endif
 localparam [31:0] MBOX = 32'h23E00000;
 localparam [31:0] SLOTS = 32'h30000000;
+localparam [31:0] MOTION = 32'h24000000;   // acc_parse's motion records (4.0)
+localparam integer MSLOT = 147456;         // 64-bit words of a slot's records
 
+`ifndef ACC_HALF
+`define ACC_HALF 5.0
+`endif
 reg clk = 0;
-always #4.63 clk = ~clk;   // 108 MHz
+always #4.63 clk = ~clk;   // 108 MHz, the bus
+reg aclk = 0;
+always #`ACC_HALF aclk = ~aclk;   // mc_acc's own clock (100 MHz)
+integer aclocks = 0;
+reg pclk = 0;
+always #5.8333 pclk = ~pclk;      // acc_parse's clock (85.7 MHz)
+always @(posedge aclk) aclocks <= aclocks + 1;
 
 reg  [31:0] cmd[0:`CMDMAX];
 integer ncmd;
@@ -29,15 +40,17 @@ integer ncmd;
 reg [63:0] mbox[0:2047];                 // MBOX .. +16 KB (mailbox, page table)
 reg [63:0] ring[0:`RING_PAGES * 512 - 1];
 reg [63:0] slot[0:(`NSLOT << 19) - 1];
+reg [63:0] mot[0:`NSLOT * MSLOT - 1];
 integer pfn[0:`RING_PAGES - 1];
 integer bad_addr = 0;
 
-function integer region(input [28:0] a);   // 0 mailbox, 1 ring, 2 slots, -1 other
+function integer region(input [28:0] a);   // 0 mailbox, 1 ring, 2 slots, 3 motion, -1 other
 	integer k;
 	begin
 		region = -1;
 		if (a >= MBOX[31:3] && a < MBOX[31:3] + 2048) region = 0;
 		else if (a >= SLOTS[31:3] && a < SLOTS[31:3] + (1 << 25)) region = 2;
+		else if (a >= MOTION[31:3] && a < MOTION[31:3] + 64 * MSLOT) region = 3;
 		else for (k = 0; k < `RING_PAGES; k = k + 1) if (a[28:9] == pfn[k]) region = 1;
 	end
 endfunction
@@ -48,6 +61,9 @@ function integer ring_i(input [28:0] a);
 		for (k = 0; k < `RING_PAGES; k = k + 1) if (a[28:9] == pfn[k]) ring_i = k * 512 + a[8:0];
 	end
 endfunction
+function integer mot_i(input [28:0] a);
+	mot_i = (((a - MOTION[31:3]) / MSLOT) % `NSLOT) * MSLOT + ((a - MOTION[31:3]) % MSLOT);
+endfunction
 function integer slot_i(input [28:0] a);
 	slot_i = (((a - SLOTS[31:3]) >> 19) % `NSLOT) * (1 << 19) + ((a - SLOTS[31:3]) & ((1 << 19) - 1));
 endfunction
@@ -57,6 +73,7 @@ task mem_write(input [28:0] a, input [63:0] d);
 		0: mbox[a - MBOX[31:3]] = d;
 		1: ring[ring_i(a)] = d;
 		2: slot[slot_i(a)] = d;
+		3: mot[mot_i(a)] = d;
 		default: bad_addr = bad_addr + 1;
 	endcase
 endtask
@@ -65,6 +82,7 @@ function [63:0] mem_read(input [28:0] a);
 		0: mem_read = mbox[a - MBOX[31:3]];
 		1: mem_read = ring[ring_i(a)];
 		2: mem_read = slot[slot_i(a)];
+		3: mem_read = mot[mot_i(a)];
 		default: mem_read = 64'hDEAD_BEEF_DEAD_BEEF;
 	endcase
 endfunction
@@ -81,7 +99,7 @@ reg         dout_ready = 0;
 
 mc_acc dut
 (
-	.clk(clk), .enable(1'b1),
+	.clk(aclk), .clk_par(pclk), .clk_bus(clk), .enable(1'b1),
 	.ddr_addr(a_addr), .ddr_burst(a_burst), .ddr_rd(a_rd), .ddr_we(a_we), .ddr_din(a_din),
 	.ddr_busy(busy), .ddr_dout(dout), .ddr_dout_ready(a_ready),
 	.grant(a_grant), .want(a_want), .idle(a_idle)
@@ -202,15 +220,21 @@ initial begin
 	$display("all commands written at %0d clocks", clocks);
 end
 
-// every command the engine takes must be the next one of the stream
+// every command the engine takes from the ring must be the next one of the
+// stream (an A6's slice words go to acc_parse; acc_parse's commands are not
+// in the stream)
 integer ci = 0;
-always @(posedge clk) if (dut.e_used) begin
+always @(posedge aclk) if (dut.e_used && !dut.p_src) begin
 	if (dut.e_cmd !== cmd[ci]) begin
 		$display("command %0d: engine got %08x, expected %08x (clock %0d)", ci, dut.e_cmd, cmd[ci], clocks);
 		$finish;
 	end
-	ci <= ci + 1;
+	ci <= ci + 1 + (dut.e_cmd[31:24] == 8'hA6 ? dut.e_cmd[23:0] : 0);
 end
+`ifdef TAKES
+always @(posedge aclk) if (dut.engine.take && ci > `NCMD - 8) $display("take ci %0d cmd %08x sa %0d p_src %0d", ci, dut.e_cmd, dut.engine.sa, dut.p_src);
+`endif
+always @(posedge aclk) if (dut.p_errp) $display("acc_parse: slice with an error (clock %0d)", clocks);
 
 // pictures as they finish
 integer fo, pics = 0, x, y, p, wd, ht, last_clk = 0, last_mb = 0;
@@ -218,12 +242,12 @@ reg [63:0] pw;
 reg [7:0] dump_slot;
 reg dump_wait = 0;
 initial fo = $fopen("out.yuv", "wb");
-always @(posedge clk) begin
+always @(posedge aclk) begin
 	if (dut.e_err) begin $display("engine error"); $finish; end
 	if (dut.dead) begin $display("memory dead"); $finish; end
 	// a picture is in memory once its last writes left the queue
 	if (dut.engine.pic_done) begin dump_slot <= dut.engine.pic_slot; dump_wait <= 1; end
-	if (dump_wait && dut.rq_n == 0 && !dut.on_bus && !dut.engine.pic_done) begin
+	if (dump_wait && dut.q_done && !dut.engine.pic_done) begin
 		dump_wait <= 0;
 		wd = dut.engine.wmb * 16;
 		ht = dut.engine.hmb * 16;
@@ -235,9 +259,9 @@ always @(posedge clk) begin
 					$fwrite(fo, "%c", pw[(x % 8) * 8 +: 8]);
 				end
 		$display("picture %0d slot %0d: %0d macroblocks, %0d clocks, %0d per macroblock",
-			pics, dump_slot, dut.engine.mb_count - last_mb, clocks - last_clk,
-			(clocks - last_clk) / (dut.engine.mb_count - last_mb));
-		last_clk = clocks;
+			pics, dump_slot, dut.engine.mb_count - last_mb, aclocks - last_clk,
+			(aclocks - last_clk) / (dut.engine.mb_count - last_mb));
+		last_clk = aclocks;
 		last_mb = dut.engine.mb_count;
 		pics = pics + 1;
 	end

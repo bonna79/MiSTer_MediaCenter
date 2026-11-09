@@ -1,0 +1,70 @@
+name: Menu core + acc_parse trial (measure only)
+
+# 4.0, measure only: does the menu core still fit and meet timing with
+# acc_parse inside? acc_parse is wired to dummy signals in mc_acc.sv
+# (accel/parse/coretrial/mc_acc_trial.patch) and timed as if it ran at half
+# speed. The real core sources in the repository are not changed and no rbf
+# is kept, so nothing from here can reach a release.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/coretrial.yml'
+      - 'accel/parse/coretrial/**'
+
+jobs:
+  trial:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        seed: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile the core with acc_parse (copy in the runner only)
+        run: |
+          git apply accel/parse/coretrial/mc_acc_trial.patch
+          sed -i 's/^set_global_assignment -name SEED .*/set_global_assignment -name SEED ${{ matrix.seed }}/' fpga/menu/menu.qsf
+          grep -n "SEED" fpga/menu/menu.qsf
+          cat >> fpga/menu/files.qip <<'QIP'
+          set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/parse/rtl/acc_parse.sv
+          set_global_assignment -name SYSTEMVERILOG_FILE ../../accel/parse/rtl/cab_dec.sv
+          set_global_assignment -name SEARCH_PATH ../../accel/parse/rtl
+          QIP
+          cat >> fpga/menu/menu.sdc <<'SDC'
+          # MEASURE ONLY: acc_parse as if on its own clock at half speed (54 MHz)
+          set_multicycle_path -setup 2 -from [get_registers {*acc_parse:ap*}] -to [get_registers {*acc_parse:ap*}]
+          set_multicycle_path -hold 1 -from [get_registers {*acc_parse:ap*}] -to [get_registers {*acc_parse:ap*}]
+          SDC
+          cp accel/parse/rtl/*.hex fpga/menu/
+          cat > fpga/menu/slack.tcl <<'TCL'
+          project_open menu
+          create_timing_netlist
+          read_sdc
+          update_timing_netlist
+          foreach t {100 -40} {
+          	set_operating_conditions -model slow -temperature $t -voltage 1100
+          	update_timing_netlist
+          	foreach_in_collection c [all_clocks] {
+          		set n [get_clock_info -name $c]
+          		foreach_in_collection p [get_timing_paths -setup -to_clock $c -npaths 1] {
+          			puts [format "SLACK temp=%s %8.3f %s" $t [get_path_info $p -slack] $n]
+          		}
+          	}
+          }
+          set_operating_conditions -model slow -temperature 100 -voltage 1100
+          update_timing_netlist
+          foreach_in_collection p [get_timing_paths -setup -npaths 40 -nworst 1] {
+          	puts [format "PATH %8.3f %s <- %s" [get_path_info $p -slack] [get_node_info -name [get_path_info $p -to]] [get_node_info -name [get_path_info $p -from]]]
+          }
+          delete_timing_netlist
+          project_close
+          TCL
+          docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
+            quartus_sh --flow compile menu.qpf > compile.log 2>&1 || { grep -E "Error|LABs|ALM" compile.log | head -40; tail -30 compile.log; exit 1; }
+          cat fpga/menu/output_files/menu.fit.summary
+          grep -A12 "; Fitter Resource Usage Summary" fpga/menu/output_files/menu.fit.rpt | head -20 || true
+          docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
+            quartus_sta -t slack.tcl > slack.log 2>&1 || true
+          grep "^SLACK" slack.log | sort -k3 -n | sed "s/^/seed ${{ matrix.seed }} /"
+          grep "^PATH" slack.log | cut -c1-220

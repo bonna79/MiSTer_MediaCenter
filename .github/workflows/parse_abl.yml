@@ -1,0 +1,31 @@
+name: Parser (4.0) cost by part (measure only)
+
+# Measure only: synthesise acc_parse with one group of FSM states removed
+# (accel/parse/syn/ablate.py) and print the logic left. The difference
+# against "none" is what that group costs. Nothing here goes into a core.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/parse_abl.yml'
+
+jobs:
+  part:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [none, slice, skip, mbtype, fill, intra, sub8, mvpred, refmvd, cbpqp, resid, dc, out, mbend, direct, spdir, tpdir, mvcint, mvdcint, refcint, cvq, cdq]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Synthesis without ${{ matrix.group }}
+        run: |
+          cp accel/parse/rtl/*.hex accel/parse/syn/
+          python3 accel/parse/syn/ablate.py accel/parse/rtl/acc_parse.sv ${{ matrix.group }}
+          Q="docker run --rm -v $PWD/accel:/build -w /build/parse/syn theypsilon/quartus-lite-c5:17.0.2"
+          $Q quartus_map apar > map.log 2>&1 || (grep -E "Error" map.log | head -40; exit 1)
+          R=$(dirname $(find accel/parse/syn -name apar.map.rpt | head -1))
+          A=$(grep -E "Combinational ALUT usage for logic" $R/apar.map.rpt | head -1 | awk -F';' '{gsub(/[^0-9]/,"",$3); print $3}')
+          G=$(grep -E "; Dedicated logic registers " $R/apar.map.rpt | head -1 | awk -F';' '{gsub(/[^0-9]/,"",$3); print $3}')
+          echo "RESULT ${{ matrix.group }} ALUT=$A REG=$G"
+          echo "### ${{ matrix.group }}: ALUT $A, registers $G" >> $GITHUB_STEP_SUMMARY

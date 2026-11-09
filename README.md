@@ -2,7 +2,7 @@
 
 **Italiano** · [English](README_EN.md)
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.6 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.0 H264 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > Questo progetto è stato sviluppato con l'aiuto dell'intelligenza artificiale: il codice e la documentazione sono stati scritti con Claude, l'IA di Anthropic, e provati da rgm su un MiSTer vero.
 
@@ -33,6 +33,31 @@ Il pacchetto è formato da queste parti:
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | Le righe da copiare in `MiSTer.ini` (non è un `MiSTer.ini`: copia solo le righe) |
 
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
+
+## Novità della versione 4.0
+
+La 4.0 porta nell'FPGA anche la lettura del **CABAC**, la parte più pesante della decodifica H.264: fino alla 3.6 la faceva l'ARM, che poi mandava al core circa 1 MB di comandi per ogni immagine. Ora l'ARM manda al core solo i byte compressi del video e non fa quasi più niente.
+
+- **Il lettore CABAC nell'FPGA:** un nuovo blocco del core (`acc_parse`, con il decodificatore aritmetico `cab_dec`) legge le slice CABAC bit per bit, ricava i tipi di macroblocco, i vettori di movimento, le previsioni intra e i coefficienti, e passa al motore gli stessi comandi che prima scriveva l'ARM. L'ARM lavora 0,3-0,4 ms per immagine invece di 1,7-26,7 ms, e scrive in memoria 10-20 KB per immagine invece di 0,5-1,3 MB.
+- **Tre clock separati:** il motore gira a 100 MHz, il lettore CABAC a 85,7 MHz e il resto del core a 108 MHz, con code di passaggio fra le zone. Così ogni parte rispetta i tempi anche con il chip pieno al 94%.
+- **Più margine nelle scene pesanti:** HTC.mp4 (1080p a 30 fps), il file più al limite con la 3.6, passa da 6 a 1 immagine in ritardo e l'ARM da 26,7 a 0,4 ms per immagine. L'attesa della memoria dell'FPGA scende in tutti i file provati.
+- **Stesse immagini della 3.6:** le immagini fatte con il CABAC nell'FPGA sono state confrontate in simulazione con quelle della 3.6 su 11 video di prova: identiche byte per byte.
+- **Sempre una strada di ritorno:** i video H.264 CAVLC usano l'acceleratore come nella 3.6. Se il lettore CABAC trova una slice rovinata, il CABAC torna sull'ARM fino alla prossima immagine IDR. `MC_NOCABAC=1` in `mediacenter.ini` fa leggere il CABAC all'ARM come nella 3.6 (solo per i confronti).
+- **Nuova immagine** con la scritta Ver. 4.0 H264 1080P e il numero della build, mostrata 3 secondi quando si avvia lo script mediacenter dagli Scripts.
+
+Il core del menu della 4.0 usa il 94% della logica (39.305 ALM), il 43% dei blocchi di memoria interna e il 74% dei moltiplicatori dell'FPGA. Rispetta tutti i tempi a 100 °C e a -40 °C, nei modelli lento e veloce del chip (seed 12 del fitter, margine minimo +0,014 ns sull'uscita HDMI). Il lettore e il core vanno aggiornati insieme: con un core più vecchio il lettore lascia il CABAC all'ARM.
+
+Provata su un MiSTer vero il 9 novembre 2026, su CRT Sony Trinitron (SCART RGB, 480i) e HDMI insieme. Tutte le prove dal menu, con l'audio sempre pulito e nessuna immagine persa dall'FPGA:
+
+| Prova | 3.6 | 4.0 |
+| --- | --- | --- |
+| One Piece Episodio 940, H.264 1920x1080 | 0,0%, ARM 12,3 ms per immagine | **0,1%**, nessuna in ritardo, ARM **0,3 ms** |
+| HTC.mp4, H.264 1920x1080 a 29,97 fps, tutto | 0,2%, 6 in ritardo, ARM 26,7 ms (al limite) | **0,1%**, 1 in ritardo, ARM **0,4 ms** |
+| Tears of Steel, H.264 1728x720 2,40:1 | 0,0%, ARM 3,8 ms | **0,1%**, 3 in ritardo nei primi secondi, ARM **0,3 ms** |
+| One Piece Episodio 938, H.264 1280x720 | 0,1%, ARM 1,7 ms | **0,1%**, nessuna in ritardo, ARM **0,3 ms** |
+| Inuyasha, H.264 1440x810, MKV da DVD-R | 0,0%, ARM 5,6 ms | **0,0%**, nessuna in ritardo, ARM **0,4 ms** |
+| Sega intro, H.264 lossless (lo fa l'ARM) | logo visibile | logo visibile, nessuna in ritardo |
+| DivX 576x432, DVD originale con menu, tracce audio e sottotitoli, Video CD | funzionano | funzionano come prima |
 
 ## Novità della versione 3.6
 
@@ -228,6 +253,7 @@ Il framebuffer ha tre pagine: l'ARM scrive la prossima immagine in una pagina me
 - **CRT a 15 kHz (modulo `mc_out`):** genera da solo il segnale per il CRT, indipendente dall'HDMI, a 13,5 MHz con 720 punti per riga come un lettore DVD: 576i o 480i per i video, secondo il DVD PAL o NTSC o gli fps del file, oppure 288p o 240p se forzati in Regola CRT. Converte i colori, porta l'immagine a 720 punti (i DVD punto per punto, le altre larghezze con un filtro che fonde i punti vicini), aggiunge le bande nere ai film 16:9 e applica Regola CRT ridisegnando l'immagine nel nuovo riquadro senza toccare il sincronismo, così il CRT non perde mai l'aggancio. Cambia pagina solo all'inizio di un semiquadro e solo quando l'indirizzo è stabile, così l'immagine non si spezza. Il filtro tremolio fa la media di ogni riga con quella sotto.
 
 - **Acceleratore H.264 (moduli `mc_acc`, `acc_engine`, `mc_zc`, dalla 3.0):** per i video H.264 in alta definizione (dalla 3.6 da 1024x400 a 2048x1088: 720p, 810p, 1080p) FFmpeg sull'ARM legge il video (CABAC, vettori di movimento, coefficienti) ma non ricostruisce le immagini: scrive per ogni immagine i comandi del motore (circa 1 MB) in un anello di memoria. Il motore nell'FPGA, a 108 MHz, li legge dalla memoria DDR e ricostruisce le immagini (trasformata inversa, predizione intra, compensazione del movimento con i pesi delle immagini B) in 64 posti da 4 MB della memoria; poi il blocco zero-copy porta l'immagine alla misura dello schermo (restringe il 1080p a 1280 o 960 punti, ricampiona le altre misure) e la scrive nel framebuffer in YUV. L'ARM non tocca più i pixel. Con il core 3.0 il core del menu usa il 55% della logica, il 17% della memoria interna e l'85% dei moltiplicatori dell'FPGA. Il funzionamento completo, per chi vuole modificarlo o migliorarlo, è nella [scheda tecnica dell'acceleratore](docs/SCHEDA_TECNICA_ACCELERATORE_IT.md) ([English](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md)).
+- **Lettore CABAC nell'FPGA (moduli `acc_parse`, `cab_dec`, dalla 4.0):** per i video CABAC l'ARM non legge più il video: scrive nell'anello solo i byte compressi di ogni slice (comando A6, 10-20 KB per immagine). `acc_parse` li legge a 85,7 MHz e genera gli stessi comandi che prima scriveva l'ARM; il motore ora gira a 100 MHz, il resto del core a 108 MHz. Il lettore usa il CABAC nell'FPGA solo se il core lo dichiara (bit 22 della parola 20); i video CAVLC, una slice rovinata (fino alla prossima IDR) o `MC_NOCABAC=1` fanno tornare il lavoro all'ARM come nella 3.6. Il core 4.0 usa il 94% della logica, il 43% della memoria interna e il 74% dei moltiplicatori.
 
 Le due uscite funzionano insieme: la stessa immagine va all'HDMI e alla VGA nello stesso momento. L'audio è uno solo e arriva insieme all'HDMI, all'uscita analogica e a quella ottica.
 
@@ -585,6 +611,7 @@ Apri una segnalazione nella pagina [Issues](../../issues) e allega:
 | `MC_FULLQUALITY=1` | Disattiva la modalità leggera dei video H.264/HEVC in alta definizione (deblocking spento, oltre le 720 righe metà delle righe ingrandite dallo scaler FPGA e, sopra i 30 fps, solo le immagini di riferimento) |
 | `MC_ACC_RING=so` | Acceleratore: l'anello dei comandi in una zona fissa della memoria invece che nelle pagine del lettore (per confrontare i tempi) |
 | `MC_NODEBLOCK=1` | Acceleratore: l'FPGA non fa il filtro anti-blocchi, come nella 3.0 (per i confronti) |
+| `MC_NOCABAC=1` | Acceleratore: il CABAC lo legge l'ARM come nella 3.6, invece dell'FPGA (per i confronti) |
 | `MC_NOCOREOSD=1` | Acceleratore: i comandi del lettore sopra l'immagine li mescola l'ARM invece del core (per i confronti) |
 | `MC_ACC_COPY=1` | Acceleratore: ogni immagine viene copiata nell'anello dei comandi, come prima, invece di essere scritta direttamente (per confrontare i tempi) |
 | `MC_TEST=...` | Prova senza schermo né controller: tasti simulati e immagini salvate in `/tmp/mc_<secondi>.ppm`. Con un file `.cue` riproduce un'immagine di Super Video CD come se fosse nel lettore |

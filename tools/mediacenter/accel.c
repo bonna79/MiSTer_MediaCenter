@@ -43,6 +43,7 @@ struct mc_acc_hooks {
 	int (*slot)(void *opaque, const AVFrame *f);
 	void (*fail)(void *opaque, const char *why);
 	int deblock;                             // the core filters (command A5): set before acc_attach
+	int parse;                               // the core reads CABAC slices (A6): 1, 0, 2 until the next IDR
 };
 extern struct mc_acc_hooks *mc_acc_hooks;    // in our FFmpeg
 

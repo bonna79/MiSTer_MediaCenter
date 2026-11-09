@@ -1,0 +1,101 @@
+Test only (accel/parse/sim, step 2): FFmpeg 6.1.2 with ffmpeg-mediacenter.patch and
+ffmpeg-cabac-trace.patch, plus this one, writes for each CABAC slice what the ARM would
+give acc_parse (refcmd.c reads it). Apply with patch -p1 on top of the other two.
+
+diff -ru a/libavcodec/h264_mcacc.c b/libavcodec/h264_mcacc.c
+--- a/libavcodec/h264_mcacc.c
++++ b/libavcodec/h264_mcacc.c
+@@ -33,6 +33,7 @@
+ };
+ 
+ struct mc_acc_hooks *mc_acc_hooks;
++extern int mc_pd_pic;
+ 
+ static int mcacc_for(const H264Context *h)
+ {
+@@ -65,6 +66,7 @@
+         return;
+     }
+     h->mcacc = mc_acc_hooks->begin(mc_acc_hooks->opaque, h->cur_pic_ptr->f, h->mb_width, h->mb_height);
++    mc_pd_pic++;
+ }
+ 
+ void ff_h264_mcacc_end(H264Context *h)
+@@ -240,3 +242,66 @@
+     if (dw)
+         mcacc_dbk_put(h, sl, dw);
+ }
++
++/* ---- test only (accel/parse/sim): what the ARM would give acc_parse for
++ * each CABAC slice, written to mc_pd_file. Not part of the player. */
++FILE *mc_pd_file;
++int mc_pd_pic;
++
++static void mcpd_w(int32_t v) { fwrite(&v, 4, 1, mc_pd_file); }
++
++static void mcpd_slice(const H264Context *h, const H264SliceContext *sl, const uint8_t *d, unsigned nb)
++{
++    const PPS *pps = h->ps.pps;
++    const SPS *sps = h->ps.sps;
++    if (!mc_pd_file || !h->mcacc)
++        return;
++    mcpd_w(0x534C0001);
++    mcpd_w(mc_pd_pic);
++    mcpd_w(mc_acc_hooks->slot(mc_acc_hooks->opaque, h->cur_pic_ptr->f));
++    mcpd_w(h->mb_width);
++    mcpd_w(h->mb_height);
++    mcpd_w(sl->resync_mb_x);
++    mcpd_w(sl->resync_mb_y);
++    mcpd_w(sl->slice_num);
++    mcpd_w(sl->slice_type_nos == AV_PICTURE_TYPE_I ? 2 : sl->slice_type_nos == AV_PICTURE_TYPE_B ? 1 : 0);
++    mcpd_w(sl->qscale);
++    mcpd_w(sl->cabac_init_idc);
++    mcpd_w(sl->direct_spatial_mv_pred);
++    mcpd_w(sl->ref_count[0]);
++    mcpd_w(sl->ref_count[1]);
++    mcpd_w(sl->list_count);
++    mcpd_w(pps->transform_8x8_mode);
++    mcpd_w(pps->constrained_intra_pred);
++    mcpd_w(sl->deblocking_filter);
++    mcpd_w(sl->slice_alpha_c0_offset);
++    mcpd_w(sl->slice_beta_offset);
++    mcpd_w(pps->chroma_qp_index_offset[0]);
++    mcpd_w(pps->chroma_qp_index_offset[1]);
++    mcpd_w(sl->pwt.use_weight);
++    mcpd_w(sps->direct_8x8_inference_flag);
++    mcpd_w(h->x264_build > 33U);
++    mcpd_w(sl->list_count > 1 && sl->ref_list[1][0].parent ? sl->ref_list[1][0].parent->long_ref : 0);
++    for (int l = 0; l < 2; l++)
++        for (int i = 0; i < 32; i++)
++            mcpd_w(l < sl->list_count && i < (int)sl->ref_count[l] && sl->ref_list[l][i].parent ?
++                   mc_acc_hooks->slot(mc_acc_hooks->opaque, sl->ref_list[l][i].parent->f) : 255);
++    for (int i = 0; i < 32; i++)
++        mcpd_w(sl->dist_scale_factor[i]);
++    for (int l = 0; l < 2; l++)
++        for (int i = 0; i < 48; i++)
++            mcpd_w(sl->map_col_to_list0[l][i]);
++    for (int a = 0; a < 32; a++)
++        for (int b = 0; b < 32; b++)
++            mcpd_w(sl->pwt.implicit_weight[a][b][0] | sl->pwt.implicit_weight[a][b][1] << 16);
++    for (int i = 0; i < 6; i++)
++        for (int j = 0; j < 16; j++)
++            mcpd_w(pps->scaling_matrix4[i][j]);
++    for (int i = 0; i < 6; i++)
++        for (int j = 0; j < 64; j++)
++            mcpd_w(pps->scaling_matrix8[i][j]);
++    mcpd_w(nb);
++    fwrite(d, 1, nb, mc_pd_file);
++    for (unsigned k = nb; k & 3; k++)
++        fputc(0, mc_pd_file);
++}
+diff -ru a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -2597,6 +2597,7 @@
+             return ret;
+ 
+         ff_h264_init_cabac_states(h, sl);
++        mcpd_slice(h, sl, sl->gb.buffer + get_bits_count(&sl->gb) / 8, (get_bits_left(&sl->gb) + 7) / 8 + 2);
+         if (ff_mmc_cabtr.f) {
+             /* slice record: 0x3000, type (0 P, 1 B, 2 I), init idc, qp, flags, bytes (2 words), data */
+             const uint8_t *d = sl->gb.buffer + get_bits_count(&sl->gb) / 8;

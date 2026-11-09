@@ -185,6 +185,16 @@ wire       frame_go = div_go && ilc && fld && field;  // the page is taken here 
 wire       line_go  = ce_pix && hc == 0;
 wire [9:0] half     = flen >> 1;
 
+// The page shown from the next clock on. The line requests carry it to the
+// bus side (req_base), so the bus never reads base while it changes: the
+// first line of a field is asked for on the same clock the page changes.
+// The line length and the flicker filter travel with them (req_words,
+// req_flt): the bus reads nothing else of the video clock's registers.
+wire [31:0] base_n = !active                    ? fb_base :
+                     (div_go && !(ilc && fld))   ? seen    :
+                     frame_go                    ? ((pend_v && !pcnt) ? pend : ready) :
+                                                   base;
+
 always @(posedge clk_vid) begin
 	reg  [9:0] q;
 	reg        near, d;
@@ -230,13 +240,11 @@ always @(posedge clk_vid) begin
 		else pcnt <= pcnt - 1'd1;
 	end
 
+	base <= base_n;
 	if(!active) begin
-		base   <= fb_base;
 		ready  <= fb_base;
 		pend_v <= 0;
 	end
-	else if(div_go && !(ilc && fld)) base <= seen;
-	else if(frame_go) base <= (pend_v && !pcnt) ? pend : ready;
 end
 
 // The line about to be shown, as a line of the whole picture.
@@ -244,9 +252,15 @@ function [10:0] pic_line(input [9:0] y, input f);
 	pic_line = ilc ? {y, f} : {1'b0, y};
 endfunction
 
+wire [12:0] colsp1 = w + 1'd1;
+wire [12:0] colsp3 = w + 2'd3;
+
 reg        req_t = 0;
 reg [11:0] req_line, req_line2;  // the line and the next one (flicker filter)
 reg        req_bank;
+reg [31:0] req_base;               // the page of that line
+reg [10:0] req_words;              // its length in memory words
+reg        req_flt;                // the flicker filter is on
 
 always @(posedge clk_vid) begin
 	reg  [9:0] ny;
@@ -272,6 +286,9 @@ always @(posedge clk_vid) begin
 				req_line  <= sy[27:16];
 				req_line2 <= (sy[27:16] + 1'd1 < h) ? sy[27:16] + 1'd1 : sy[27:16];
 				req_bank  <= ny[0];
+				req_base  <= base_n;
+				req_words <= yuv ? {1'b0, colsp3[11:2]} : colsp1[11:1];
+				req_flt   <= flt;
 				req_t     <= ~req_t;
 			end
 		end
@@ -279,6 +296,9 @@ always @(posedge clk_vid) begin
 			req_line  <= ny - top;
 			req_line2 <= (ny - top + 1'd1 < lines) ? ny - top + 1'd1 : ny - top;
 			req_bank  <= ny[0];
+			req_base  <= base_n;
+			req_words <= yuv ? {1'b0, colsp3[11:2]} : colsp1[11:1];
+			req_flt   <= flt;
 			req_t     <= ~req_t;
 		end
 	end
@@ -291,6 +311,8 @@ reg        fetch = 0;
 reg [11:0] line, line2;
 reg        bank, wbank, sub = 0, wsub, flt_s;
 reg [25:0] offset;
+reg [31:0] lbase;
+reg [10:0] lwords;
 reg [10:0] words;
 reg  [9:0] waddr;
 reg  [7:0] beats = 0;
@@ -299,9 +321,6 @@ reg [10:0] baddr;
 reg [63:0] bdata;
 
 assign ddr_idle = ~fetch & ~|start & ~ddr_rd & ~req_p;
-
-wire [12:0] colsp1 = w + 1'd1;
-wire [12:0] colsp3 = w + 2'd3;
 
 always @(posedge clk_sys) begin
 	reg [31:0] laddr;
@@ -330,8 +349,10 @@ always @(posedge clk_sys) begin
 				line  <= req_line;
 				line2 <= req_line2;
 				bank  <= req_bank;
+				lbase <= req_base;
+				lwords <= req_words;
 				sub   <= 0;
-				flt_s <= flt;
+				flt_s <= req_flt;
 				start <= 1;
 			end
 		1: begin
@@ -339,12 +360,12 @@ always @(posedge clk_sys) begin
 				start  <= 2;
 			end
 		2: begin
-				laddr    = base + offset;
+				laddr    = lbase + offset;
 				ddr_addr <= laddr[31:3];
 				wbank    <= bank;
 				wsub     <= sub;
 				waddr    <= 0;
-				words    <= yuv ? {1'b0, colsp3[11:2]} : colsp1[11:1];
+				words    <= lwords;
 				fetch    <= 1;
 				start    <= 0;
 			end

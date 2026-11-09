@@ -2,7 +2,7 @@
 
 [Italiano](README.md) · **English**
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 3.6 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.0 H264 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
 
@@ -35,6 +35,31 @@ The package is made of these parts:
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
 The player's on-screen texts are in Italian.
+
+## What's new in version 4.0
+
+4.0 also moves the reading of **CABAC**, the heaviest part of H.264 decoding, into the FPGA: up to 3.6 the ARM did it, then sent the core about 1 MB of commands for every picture. Now the ARM sends the core only the compressed bytes of the video and has almost nothing left to do.
+
+- **The CABAC reader in the FPGA:** a new block of the core (`acc_parse`, with the arithmetic decoder `cab_dec`) reads the CABAC slices bit by bit, works out the macroblock types, motion vectors, intra predictions and coefficients, and hands the engine the same commands the ARM used to write. The ARM spends 0.3-0.4 ms per picture instead of 1.7-26.7 ms, and writes 10-20 KB per picture to memory instead of 0.5-1.3 MB.
+- **Three separate clocks:** the engine runs at 100 MHz, the CABAC reader at 85.7 MHz and the rest of the core at 108 MHz, with queues between the zones. This way every part meets timing even with the chip 94% full.
+- **More headroom in heavy scenes:** HTC.mp4 (1080p at 30 fps), the file closest to the limit with 3.6, goes from 6 late pictures to 1 and the ARM from 26.7 to 0.4 ms per picture. The FPGA's memory wait drops on every file tested.
+- **The same pictures as 3.6:** the pictures made with CABAC in the FPGA were compared in simulation with those of 3.6 on 11 test videos: identical byte for byte.
+- **Always a way back:** CAVLC H.264 video uses the accelerator as in 3.6. If the CABAC reader finds a damaged slice, CABAC goes back to the ARM until the next IDR picture. `MC_NOCABAC=1` in `mediacenter.ini` has the ARM read CABAC as in 3.6 (for comparisons only).
+- **New picture** reading Ver. 4.0 H264 1080P with the build number, shown for 3 seconds when the mediacenter script is started from Scripts.
+
+The 4.0 menu core uses 94% of the FPGA's logic (39,305 ALMs), 43% of the internal memory blocks and 74% of the multipliers. It meets all timing at 100 °C and -40 °C, in the slow and fast models of the chip (fitter seed 12, smallest margin +0.014 ns on the HDMI output). The player and the core must be updated together: with an older core the player leaves CABAC to the ARM.
+
+Tested on a real MiSTer on 9 November 2026, on a Sony Trinitron CRT (SCART RGB, 480i) and HDMI together. Every test from the menu, with the sound always clean and no picture lost by the FPGA:
+
+| Test | 3.6 | 4.0 |
+| --- | --- | --- |
+| One Piece Episode 940, H.264 1920x1080 | 0.0%, ARM 12.3 ms per picture | **0.1%**, none late, ARM **0.3 ms** |
+| HTC.mp4, H.264 1920x1080 at 29.97 fps, whole file | 0.2%, 6 late, ARM 26.7 ms (at the limit) | **0.1%**, 1 late, ARM **0.4 ms** |
+| Tears of Steel, H.264 1728x720 2.40:1 | 0.0%, ARM 3.8 ms | **0.1%**, 3 late in the first seconds, ARM **0.3 ms** |
+| One Piece Episode 938, H.264 1280x720 | 0.1%, ARM 1.7 ms | **0.1%**, none late, ARM **0.3 ms** |
+| Inuyasha, H.264 1440x810, MKV from DVD-R | 0.0%, ARM 5.6 ms | **0.0%**, none late, ARM **0.4 ms** |
+| Sega intro, lossless H.264 (done by the ARM) | logo visible | logo visible, none late |
+| DivX 576x432, original DVD with menus, audio tracks and subtitles, Video CD | work | work as before |
 
 ## What's new in version 3.6
 
@@ -232,6 +257,7 @@ It is the MiSTer menu core with two additions, which read the same frame buffer 
 The two outputs work together: the same picture goes to HDMI and VGA at the same time. There is a single sound stream, which reaches HDMI, the analog output and the optical output together.
 
 - **H.264 accelerator (modules `mc_acc`, `acc_engine`, `mc_zc`, from 3.0):** for high-definition H.264 video (from 3.6, 1024x400 to 2048x1088: 720p, 810p, 1080p) FFmpeg on the ARM reads the video (CABAC, motion vectors, coefficients) but does not rebuild the pictures: for each picture it writes the engine's commands (about 1 MB) into a ring in memory. The engine in the FPGA, at 108 MHz, reads them from DDR memory and rebuilds the pictures (inverse transform, intra prediction, motion compensation with the weights of B pictures) in 64 slots of 4 MB; then the zero-copy block brings the picture to the size of the screen (it narrows 1080p to 1280 or 960 pixels and resamples the other sizes) and writes it into the frame buffer in YUV. The ARM no longer touches the pixels. With the 3.0 core the menu core uses 55% of the FPGA's logic, 17% of its internal memory and 85% of its multipliers. How it all works, for anyone who wants to change or improve it, is in the [accelerator technical sheet](docs/TECHNICAL_SHEET_ACCELERATOR_EN.md) ([Italiano](docs/SCHEDA_TECNICA_ACCELERATORE_IT.md)).
+- **CABAC reader in the FPGA (modules `acc_parse`, `cab_dec`, from 4.0):** for CABAC video the ARM no longer reads the video: it writes into the ring only the compressed bytes of each slice (command A6, 10-20 KB per picture). `acc_parse` reads them at 85.7 MHz and produces the same commands the ARM used to write; the engine now runs at 100 MHz, the rest of the core at 108 MHz. The player uses the FPGA CABAC reader only when the core declares it (bit 22 of word 20); CAVLC video, a damaged slice (until the next IDR) or `MC_NOCABAC=1` send the work back to the ARM as in 3.6. The 4.0 core uses 94% of the logic, 43% of the internal memory and 74% of the multipliers.
 
 The FPGA has no room for a complete H.264 decoder: that is why it shares the work with the ARM, which reads the video, and only for progressive 8-bit H.264 from 1024x400 to 2048x1088 (720p, 810p, 1080p). All other video is decoded by the ARM.
 
@@ -587,6 +613,7 @@ Open a report on the [Issues](../../issues) page and attach:
 | `MC_FULLQUALITY=1` | Turns off the light mode for high-definition H.264/HEVC video (no deblocking, above 720 lines half of the lines enlarged by the FPGA scaler and, above 30 fps, only reference pictures) |
 | `MC_ACC_RING=so` | Accelerator: the command ring in a fixed memory area instead of the player's pages (to compare times) |
 | `MC_NODEBLOCK=1` | Accelerator: the FPGA does not run the deblocking filter, as in 3.0 (for comparisons) |
+| `MC_NOCABAC=1` | Accelerator: the ARM reads CABAC as in 3.6, instead of the FPGA (for comparisons) |
 | `MC_NOCOREOSD=1` | Accelerator: the ARM blends the player's controls over the picture instead of the core (for comparisons) |
 | `MC_ACC_COPY=1` | Accelerator: every picture is copied into the command ring, as before, instead of being written straight into it (to compare times) |
 | `MC_TEST=...` | Runs without screen or controller: simulated keys, pictures saved to `/tmp/mc_<seconds>.ppm`. With a `.cue` file it plays a Super Video CD image as if it were in the drive |
