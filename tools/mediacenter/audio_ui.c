@@ -1144,6 +1144,28 @@ static void aui_pause(void)
 	media_seek(h);
 }
 
+// An audio file left with a key (next or previous track, back to the list):
+// the sound still queued is thrown away and aplay is stopped at once
+// (SIGTERM: it drops its buffer), instead of playing it to the end.
+static void aui_cut_sound(void)
+{
+	if (!audio_pipe) return;
+	audio_flush();
+	int me = getpid(), n = 0;
+	DIR *d = opendir("/proc");
+	if (!d) return;
+	for (struct dirent *de; (de = readdir(d));)
+	{
+		int pid = atoi(de->d_name), ppid = 0, pp2 = 0;
+		char name[20], pname[20];
+		if (pid <= 1 || pid == me || !proc_name(pid, name, sizeof(name), &ppid) || strcmp(name, "aplay")) continue;
+		if (ppid != me && !(proc_name(ppid, pname, sizeof(pname), &pp2) && pp2 == me)) continue;
+		if (!kill(pid, SIGTERM)) n++;
+	}
+	closedir(d);
+	printf("mediacenter: suono del brano fermato subito (%d)\n", n);
+}
+
 // Called at every round of the player: draws and shows the next picture
 // when it is due (AUI_HZ a second).
 static void aui_tick(double t, int state, int confirm, double time, double dur, double heard)

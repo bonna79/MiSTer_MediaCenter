@@ -2563,7 +2563,7 @@ static int media_play(int in_playlist)
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), -5);
 	prio_apply(1);
 
-	int result = END_DONE;
+	int result = END_DONE, natural_end = 0;
 	double last = now_seconds(), osd_built = 0, bg_look = last, bg_t0 = last;
 	while (!quit_requested)
 	{
@@ -2742,6 +2742,7 @@ static int media_play(int in_playlist)
 				else
 				{
 					result = in_playlist && (mc.audio_only || svcd_on) ? END_NEXT : END_DONE;
+					natural_end = 1;
 					break;
 				}
 			}
@@ -2823,6 +2824,8 @@ static int media_play(int in_playlist)
 		usleep(p.state == ST_PLAY || aui.on ? 2000 : 10000);
 	}
 
+	// an audio file left with a key: its sound stops at once
+	if (aui.on && !natural_end) aui_cut_sound();
 	aui_end();
 	vt_end();
 	fmt_close();
