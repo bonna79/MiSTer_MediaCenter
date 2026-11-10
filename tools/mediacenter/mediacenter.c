@@ -40,6 +40,9 @@ static double video_aspect = 4.0 / 3.0;
 
 #define MC_AUDIO_RATE 48000
 #define MC_AUDIO_LEAD 0.3
+// Sound sent ahead of the picture (seconds): MC_AUDIO_LEAD, more for the
+// audio files (audio_ui.c), whose sound then rides out a slow SD card.
+static double audio_lead = MC_AUDIO_LEAD;
 #define MC_VQ_MAX 64  // pictures the queue can hold
 #define MC_VQ_FILE 12 // pictures decoded ahead for files
 #define MC_VQ_ARM 24  // with the video thread and no accelerator: a reserve for the start and the heavy moments
@@ -521,7 +524,7 @@ static void feed_audio_output(void)
 		mc.pend_pts += late / (double)MC_AUDIO_RATE;
 	}
 
-	int due = (int)((mc.clock + MC_AUDIO_LEAD - mc.pend_pts) * MC_AUDIO_RATE);
+	int due = (int)((mc.clock + audio_lead - mc.pend_pts) * MC_AUDIO_RATE);
 	if (due <= 0) return;
 	if (due > mc.pend_len) due = mc.pend_len;
 	aui_audio(mc.pend, due, mc.pend_pts);
@@ -1027,7 +1030,7 @@ static int need_more(void)
 		if (mc.vq_count >= MC_VQ_FILE) return 0;
 		if (!mc.vq_count || mc.vq[mc.vq_count - 1].pts <= mc.clock + 0.1) return 1;
 	}
-	if (mc.astream >= 0 && mc.pend_len < mc.pend_cap - MC_AUDIO_RATE / 2 && mc.audio_end < mc.clock + 0.5) return 1;
+	if (mc.astream >= 0 && mc.pend_len < mc.pend_cap - MC_AUDIO_RATE / 2 && mc.audio_end < mc.clock + 0.5 + (audio_lead - MC_AUDIO_LEAD)) return 1;
 	return 0;
 }
 
@@ -2607,7 +2610,7 @@ static int media_play(int in_playlist)
 			case KEY_PAUSE:
 			case KEY_PAUSECD:
 			case KEY_PLAYPAUSE:
-				if (p.state == ST_PLAY) p.state = ST_PAUSE;
+				if (p.state == ST_PLAY) { p.state = ST_PAUSE; aui_pause(); }
 				else if (p.state == ST_PAUSE) p.state = ST_PLAY;
 				else if (p.state == ST_FF || p.state == ST_REW) { media_resume(p.ff_time); p.state = ST_PAUSE; }
 				break;
@@ -2727,6 +2730,8 @@ static int media_play(int in_playlist)
 			int video_done = mc.vstream < 0 || (mc.flushed && (!vt.on || vt.drained) && !mc.vq_count);
 			if (vt.on) pthread_mutex_unlock(&vt.lock);
 			int audio_done = mc.astream < 0 || (mc.flushed && !mc.pend_len);
+			// an audio file ends when the sound sent ahead has gone out too
+			if (aui.on && audio_pipe && audio_wr != audio_rd) audio_done = 0;
 			if (mc.eof && mc.flushed && video_done && audio_done)
 			{
 				if (show) draw_video_frame(show);

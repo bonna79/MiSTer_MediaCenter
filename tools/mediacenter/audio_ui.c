@@ -28,14 +28,13 @@ static void menu_fb(void);
 #define AUI_W 720
 #define AUI_HZ 60.0
 #define AUI_FFT 1024
-#define AUI_RING 32768 // stereo frames of the sound sent, for the waves (0.68 s)
+#define AUI_RING 131072 // stereo frames of the sound sent, for the waves (2.7 s: more than MC_AUDIO_LEAD_MUSIC)
 
 static struct
 {
 	int on;               // the screen is in use
 	int h;                // lines of the picture (576 or 480)
 	uint32_t *bg, *img;   // the still part; the picture shown
-	uint8_t *glow[2];     // brightness of the two waves in the band
 	unsigned bg_gen;      // counts the changes of bg
 	unsigned page_gen[8]; // bg_gen each page of the frame buffer was last copied with
 	int bg_state, bg_flash, bg_eq, bg_confirm;
@@ -43,14 +42,20 @@ static struct
 	float lvl[2][6], peak[2][6];
 	double phase[12];
 	int eq_open, band;
+	int saver, sv_min, sv_max, pg_min[8], pg_max[8]; // screen saver: rows drawn now and in each page
 	double eq_until;
 	int flash;
 	double flash_until;
 	char folder[256], fmt[96], title[256], file[256];
 	// the log
 	int frames;
-	double draw_sum, draw_max;
+	double draw_sum, draw_max, copy_sum;
 } aui;
+
+// The screen saver stays on for the next tracks (A turns it off).
+static int aui_saver;
+// Sound sent ahead of time for the audio files (seconds), in mediacenter.c.
+#define MC_AUDIO_LEAD_MUSIC 2.0
 
 // Position of the file in its folder (1-based, 0 not known) and audio files
 // in the folder; set by the browser before each file.
@@ -676,14 +681,14 @@ static void aui_draw_bg(int state)
 	int ex = E_X, ew = X1 - ex, et = E_TOP, eb = E_BOT;
 	a_round(ex - 8, et - AY(26), ew + 8, eb - et + AY(64), 8, aui.eq_open ? C_EQOPEN : C_PANEL);
 	if (aui.eq_open) a_round_line(ex - 8, et - AY(26), ew + 8, eb - et + AY(64), 8, 2, C_SEL);
-	a_text(&afont_small, ex, et - AY(10), aui.eq_open ? "EQUALIZZATORE   \x83\x84 guadagno   \x81\x82 banda" : "EQUALIZZATORE   (X per regolare)",
+	a_text(&afont_small, ex, et - AY(10), aui.eq_open ? "EQUALIZZATORE   \x83\x84 guadagno   \x81\x82 banda" : "EQUALIZZATORE   (Y per regolare)",
 		aui.eq_open ? C_SEL : C_MUTED);
 
 	// time bar track
 	a_rect(X0 + 62, P_Y - 2, CW - 124, 4, C_LINE);
 
 	// keys
-	a_text_c(&afont_small, AUI_W / 2, AY(556), "Start Play   Select Pausa   B Stop   \x81 \x82 Brano   L / R Veloce   X Equalizzatore   Y Esci", C_DIM);
+	a_text_c(&afont_small, AUI_W / 2, AY(556), "Start Play  Select Pausa  B Stop  \x81 \x82 Brano  L/R Veloce  Y Equalizzatore  A Salvaschermo  X Esci", C_DIM);
 	aui.bg_gen++;
 }
 
@@ -698,34 +703,106 @@ static int aui_dyn(arect_t *r)
 	return 3;
 }
 
-// glow of a wave around its line: full on the line, then a soft halo
-#define BR 6
-static uint8_t brush[2 * BR + 1][2 * BR + 1];
+// The lines of the waves: full on the line, then a soft halo up to LR
+// pixels away, added to what is under them (where two cross they turn
+// white). Each column takes the distance across the line from its slope,
+// so steep parts keep the same thickness.
+#define LR 6
+#define LQ 4
+typedef struct { uint32_t c[LR * LQ + 1]; } aline_t;
+static float glow_i[LR * LQ + 1];
+#define SIN_N 4096
+static float sin_t[SIN_N];
 
-static void aui_brush(void)
+static void aui_tables(void)
 {
-	for (int j = -BR; j <= BR; j++)
-		for (int i = -BR; i <= BR; i++)
+	for (int k = 0; k <= LR * LQ; k++)
+	{
+		float d = (float)k / LQ, v;
+		if (d <= 1.0f) v = 1;
+		else if (d <= 2.0f) v = 1 - (d - 1) * 0.68f;
+		else if (d <= 3.5f) v = 0.32f - (d - 2) * 0.12f;
+		else v = 0.14f * (LR - d) / (LR - 3.5f);
+		glow_i[k] = v < 0 ? 0 : v;
+	}
+	for (int i = 0; i < SIN_N; i++) sin_t[i] = sinf(2 * (float)M_PI * i / SIN_N);
+}
+
+// sin(2 pi x) from the table
+static inline float sin_turn(float x)
+{
+	return sin_t[(int)((x - floorf(x)) * SIN_N) & (SIN_N - 1)];
+}
+
+static void aui_line_lut(aline_t *l, uint32_t col, float gain)
+{
+	for (int k = 0; k <= LR * LQ; k++)
+	{
+		float v = glow_i[k] * gain;
+		uint32_t o = 0;
+		for (int sh = 0; sh < 24; sh += 8)
 		{
-			float d = sqrtf((float)(i * i + j * j)), v;
-			if (d <= 1.0f) v = 1;
-			else if (d <= 2.0f) v = 1 - (d - 1) * 0.68f;
-			else if (d <= 3.5f) v = 0.32f - (d - 2) * 0.12f;
-			else if (d <= 6.0f) v = 0.14f * (6 - d) / 2.5f;
-			else v = 0;
-			brush[j + BR][i + BR] = (uint8_t)(255 * v + 0.5f);
+			int c = (int)(((col >> sh) & 255) * v + 0.5f);
+			o |= (uint32_t)(c > 255 ? 255 : c) << sh;
 		}
+		l->c[k] = o;
+	}
+}
+
+static inline uint32_t sat_add(uint32_t a, uint32_t b)
+{
+#if defined(__arm__)
+	uint32_t r;
+	__asm__("uqadd8 %0, %1, %2" : "=r"(r) : "r"(a), "r"(b));
+	return r;
+#else
+	uint32_t r = 0;
+	for (int sh = 0; sh < 32; sh += 8)
+	{
+		unsigned v = ((a >> sh) & 255) + ((b >> sh) & 255);
+		r |= (v > 255 ? 255u : v) << sh;
+	}
+	return r;
+#endif
+}
+
+// Line through ys[k] (row) at column x0 + k, added to aui.img between rows
+// ylo and yhi; rows touched widen *rmin..*rmax.
+static void aui_line(const float *ys, int x0, int n, const aline_t *l, int ylo, int yhi, int *rmin, int *rmax)
+{
+	for (int k = 0; k < n; k++)
+	{
+		float y = ys[k];
+		float s = k > 0 && k < n - 1 ? (ys[k + 1] - ys[k - 1]) * 0.5f : k ? y - ys[k - 1] : n > 1 ? ys[1] - y : 0;
+		float q = 1 + s * s, inv = 1 / sqrtf(q), r = LR * sqrtf(q);
+		if (r > 60) r = 60;
+		int a = (int)floorf(y - r), b = (int)ceilf(y + r);
+		if (a < ylo) a = ylo;
+		if (b > yhi - 1) b = yhi - 1;
+		if (a > b) continue;
+		if (a < *rmin) *rmin = a;
+		if (b > *rmax) *rmax = b;
+		uint32_t *p = aui.img + (size_t)a * AUI_W + x0 + k;
+		float d = (a + 0.5f - y) * inv * LQ, dd = inv * LQ;
+		for (int row = a; row <= b; row++, p += AUI_W, d += dd)
+		{
+			int i = (int)fabsf(d);
+			if (i <= LR * LQ) *p = sat_add(*p, l->c[i]);
+		}
+	}
 }
 
 static void aui_waves(int live, double dt)
 {
 	static const float NK[6] = { 1.5f, 3, 5, 8, 13, 21 }, SP[6] = { 1.6f, 2.4f, 3.4f, 4.8f, 6.6f, 9.0f };
 	static const float WT[6] = { 1.3f, 1.1f, 1, .9f, .8f, .6f };
-	int bw = CW, bh = B_BOT - B_TOP;
-	float mid = bh / 2.0f, half = bh / 2.0f - 6;
+	int bh = B_BOT - B_TOP;
+	float mid = B_TOP + bh / 2.0f, half = bh / 2.0f - 6;
 	int n = CW - 16;
-	static float env[AUI_W];
+	static float env[AUI_W], ys[AUI_W];
 	static int env_n;
+	static aline_t lut[2];
+	static uint32_t lut_col[2];
 	if (env_n != n)
 	{
 		for (int x = 0; x <= n; x++) env[x] = powf(fmaxf(0, sinf((float)M_PI * x / n)), 1.4f);
@@ -733,10 +810,11 @@ static void aui_waves(int live, double dt)
 	}
 	for (int i = 0; i < 12; i++)
 		if (live) aui.phase[i] = fmod(aui.phase[i] + dt * SP[i % 6] * (i >= 6 ? 1.07 : 1), 2 * M_PI * 1000);
+	int rmin = 1 << 30, rmax = -1;
 	for (int ch = 0; ch < 2; ch++)
 	{
-		uint8_t *g = aui.glow[ch];
-		memset(g, 0, (size_t)bw * bh);
+		uint32_t col = ch ? C_R : C_L;
+		if (lut_col[ch] != col) { aui_line_lut(&lut[ch], col, 1); lut_col[ch] = col; }
 		float vol = 0;
 		for (int b = 0; b < 6; b++) vol += aui.lvl[ch][b] * WT[b];
 		vol = vol / 4.2f > 1 ? 1 : vol / 4.2f;
@@ -745,60 +823,67 @@ static void aui_waves(int live, double dt)
 		for (int b = 0; b < 6; b++)
 		{
 			k[b] = aui.lvl[ch][b] / (1 + b * 0.35f);
-			ph[b] = (float)(-aui.phase[ch * 6 + b] + (ch ? 0.6 * b : 0));
+			ph[b] = (float)((-aui.phase[ch * 6 + b] + (ch ? 0.6 * b : 0)) / (2 * M_PI));
 		}
-		int prev = -1;
 		for (int x = 0; x <= n; x++)
 		{
 			float u = (float)x / n, s = 0;
 			for (int b = 0; b < 6; b++)
-				if (k[b] > 0.001f) s += k[b] * sinf(2 * (float)M_PI * NK[b] * u + ph[b]);
-			int y = (int)lrintf(mid - env[x] * s * amp);
-			int gx = 8 + x;
-			if (y < -BR) y = -BR;
-			if (y > bh + BR) y = bh + BR;
-			int step = prev < 0 || y == prev ? 0 : y > prev ? 1 : -1;
-			// a steep part: stamps all the way down the column
-			for (int yy = step ? prev + step : y;; yy += step)
-			{
-				{
-					for (int j = -BR; j <= BR; j++)
-					{
-						int ry = yy + j;
-						if ((unsigned)ry >= (unsigned)bh) continue;
-						uint8_t *row = g + (size_t)ry * bw;
-						const uint8_t *br = brush[j + BR];
-						for (int i = -BR; i <= BR; i++)
-						{
-							int rx = gx + i;
-							if ((unsigned)rx < (unsigned)bw && br[i + BR] > row[rx]) row[rx] = br[i + BR];
-						}
-					}
-				}
-				if (yy == y || !step) break;
-			}
-			prev = y;
+				if (k[b] > 0.001f) s += k[b] * sin_turn(NK[b] * u + ph[b]);
+			ys[x] = mid - env[x] * s * amp;
 		}
+		aui_line(ys, X0 + 8, n + 1, &lut[ch], B_TOP + 1, B_BOT - 1, &rmin, &rmax);
 	}
-	// the two waves added to the band: where they cross they turn white
-	uint32_t cl = C_L, cr = C_R;
-	for (int y = 0; y < bh; y++)
+}
+
+// Screen saver: only bright lines on black, over the whole screen, always
+// moving and following the music; nothing stays in place (no marks left on
+// a CRT or an LCD). Only the rows with lines are cleared and copied.
+#define SV_LINES 5
+static void aui_saver_draw(double t, double dt)
+{
+	static const float NK[6] = { 0.7f, 1.3f, 2.1f, 3.4f, 5.5f, 8.9f }, SP[6] = { 0.9f, 1.3f, 1.9f, 2.6f, 3.5f, 4.6f };
+	static aline_t lut[SV_LINES];
+	static uint32_t lut_col[SV_LINES];
+	static float ys[AUI_W];
+	static double ph[SV_LINES][6];
+	uint32_t cols[SV_LINES] = { C_L, C_R, fb_rgb(0xa7, 0x7b, 0xff), C_SEL, fb_rgb(0x5a, 0xff, 0xb4) };
+	int H = aui.h;
+
+	// clear what the last picture drew
+	if (aui.sv_max >= aui.sv_min) memset(aui.img + (size_t)aui.sv_min * AUI_W, 0, (size_t)(aui.sv_max - aui.sv_min + 1) * AUI_W * 4);
+	int rmin = 1 << 30, rmax = -1;
+	for (int i = 0; i < SV_LINES; i++)
 	{
-		const uint8_t *gl = aui.glow[0] + (size_t)y * bw, *gr = aui.glow[1] + (size_t)y * bw;
-		uint32_t *p = aui.img + (size_t)(B_TOP + y) * AUI_W + X0;
-		for (int x = 0; x < bw; x++)
+		int ch = i & 1;
+		if (lut_col[i] != cols[i]) { aui_line_lut(&lut[i], cols[i], 1); lut_col[i] = cols[i]; }
+		// each line follows mostly its own bands: the first the bass, the last the treble
+		float w[6], wsum = 0, mix = 0;
+		for (int b = 0; b < 6; b++)
 		{
-			int a = gl[x], b = gr[x];
-			if (!(a | b)) continue;
-			uint32_t d = p[x], o = 0xFF000000u;
-			for (int sh = 0; sh < 24; sh += 8)
-			{
-				int v = ((d >> sh) & 255) + ((((cl >> sh) & 255) * a + ((cr >> sh) & 255) * b) >> 8);
-				o |= (uint32_t)(v > 255 ? 255 : v) << sh;
-			}
-			p[x] = o;
+			float c = b - i * 1.25f;
+			w[b] = expf(-c * c / 2.5f);
+			wsum += w[b];
+			mix += w[b] * aui.lvl[ch][b];
 		}
+		mix /= wsum;
+		// always moving, faster with the music
+		for (int b = 0; b < 6; b++)
+			ph[i][b] = fmod(ph[i][b] + dt * SP[b] * (0.8 + 0.12 * i) * (0.35 + 1.4 * mix), 1000.0);
+		float yc = H / 2.0f + H * 0.26f * (float)sin(t * 0.05 * (1 + 0.17 * i) + i * 1.7);
+		float amp = H * 0.32f * (0.3f + 1.2f * mix);
+		float k[6];
+		for (int b = 0; b < 6; b++) k[b] = w[b] * (0.12f + aui.lvl[ch][b]) / wsum;
+		for (int x = 0; x < AUI_W; x++)
+		{
+			float u = (float)x / AUI_W, s = 0;
+			for (int b = 0; b < 6; b++) s += k[b] * sin_turn(NK[b] * (1 + 0.1f * i) * u - (float)ph[i][b]);
+			ys[x] = yc - s * amp * (0.55f + 0.45f * sin_turn(0.5f * u));
+		}
+		aui_line(ys, 0, AUI_W, &lut[i], 0, H, &rmin, &rmax);
 	}
+	aui.sv_min = rmin;
+	aui.sv_max = rmax;
 }
 
 static void aui_mmss(char *s, size_t len, double t)
@@ -822,6 +907,7 @@ static void aui_draw_dyn(int state, int confirm, double time, double dur, int li
 
 	// time and bar
 	char s[32];
+	if (dur > 0 && time > dur) time = dur;
 	aui_mmss(s, sizeof(s), time);
 	a_text(&afont_text, X0, P_Y + 6, s, C_TEXT);
 	if (dur > 0) aui_mmss(s, sizeof(s), dur);
@@ -897,12 +983,24 @@ static void aui_copy(void)
 	int w = fb_w < AUI_W ? fb_w : AUI_W, h = fb_h < aui.h ? fb_h : aui.h;
 	arect_t r[4];
 	int n;
+	int pg = fb_page & 7;
 	if (full)
 	{
 		r[0] = (arect_t){ 0, 0, w, h };
 		n = 1;
 	}
+	else if (aui.saver)
+	{
+		// the rows with lines now and those this page still shows from before
+		int a = aui.sv_min < aui.pg_min[pg] ? aui.sv_min : aui.pg_min[pg];
+		int b = aui.sv_max > aui.pg_max[pg] ? aui.sv_max : aui.pg_max[pg];
+		r[0] = (arect_t){ 0, a, w, b - a + 1 };
+		n = b >= a ? 1 : 0;
+	}
 	else n = aui_dyn(r);
+	aui.pg_min[pg] = aui.saver ? aui.sv_min : 1 << 30;
+	aui.pg_max[pg] = aui.saver ? aui.sv_max : -1;
+	if (full && aui.saver) { aui.pg_min[pg] = aui.sv_min; aui.pg_max[pg] = aui.sv_max; }
 	for (int i = 0; i < n; i++)
 	{
 		int x0 = r[i].x, x1 = r[i].x + r[i].w;
@@ -926,9 +1024,7 @@ static int aui_begin(void)
 	size_t px = (size_t)AUI_W * aui.h;
 	aui.bg = (uint32_t *)malloc(px * 4);
 	aui.img = (uint32_t *)malloc(px * 4);
-	aui.glow[0] = (uint8_t *)malloc(px);
-	aui.glow[1] = (uint8_t *)malloc(px);
-	if (!aui.bg || !aui.img || !aui.glow[0] || !aui.glow[1])
+	if (!aui.bg || !aui.img)
 	{
 		aui_end();
 		return 0;
@@ -941,7 +1037,7 @@ static int aui_begin(void)
 			fft_cos[i] = cosf(2 * (float)M_PI * i / AUI_FFT);
 			fft_sin[i] = sinf(2 * (float)M_PI * i / AUI_FFT);
 		}
-		aui_brush();
+		aui_tables();
 	}
 	eq_load();
 	memset(eq_s, 0, sizeof(eq_s));
@@ -955,8 +1051,15 @@ static int aui_begin(void)
 	aui.eq_open = 0;
 	aui.flash = 0;
 	aui.bg_state = -1;
+	aui.saver = -1; // set at the first picture
+	aui.sv_min = 1 << 30;
+	aui.sv_max = -1;
+	for (int i = 0; i < 8; i++) { aui.pg_min[i] = 1 << 30; aui.pg_max[i] = -1; }
 	aui.frames = 0;
-	aui.draw_sum = aui.draw_max = 0;
+	aui.draw_sum = aui.draw_max = aui.copy_sum = 0;
+	audio_lead = MC_AUDIO_LEAD_MUSIC;
+	// a short pipe to aplay: the pause stops the sound sooner
+	if (audio_pipe && fcntl(fileno(audio_pipe), F_SETPIPE_SZ, 16384) < 0) fprintf(stderr, "mediacenter: pipe size not set\n");
 	aui.t0 = aui.last_t = aui.next_t = now_seconds();
 	aui.on = 1;
 	fb_present_hook = aui_copy;
@@ -969,26 +1072,36 @@ static void aui_end(void)
 	if (aui.on && aui.frames)
 	{
 		double s = aui.last_t - aui.t0;
-		printf("mediacenter: schermata audio: %d immagini in %.0f s (%.1f al secondo), disegno medio %.1f ms, peggiore %.1f ms\n",
-			aui.frames, s, s > 0 ? aui.frames / s : 0, 1000 * aui.draw_sum / aui.frames, 1000 * aui.draw_max);
+		printf("mediacenter: schermata audio: %d immagini in %.0f s (%.1f al secondo), disegno e copia medio %.1f ms (copia %.1f), peggiore %.1f ms%s\n",
+			aui.frames, s, s > 0 ? aui.frames / s : 0, 1000 * aui.draw_sum / aui.frames, 1000 * aui.copy_sum / aui.frames,
+			1000 * aui.draw_max, aui_saver ? ", salvaschermo" : "");
 	}
 	if (aui.on && aui.eq_open) eq_save();
 	aui.on = 0;
 	fb_present_hook = NULL;
 	free(aui.bg);
 	free(aui.img);
-	free(aui.glow[0]);
-	free(aui.glow[1]);
 	aui.bg = aui.img = NULL;
-	aui.glow[0] = aui.glow[1] = NULL;
+	audio_lead = MC_AUDIO_LEAD;
 }
 
 // A key during an audio file: 1 when the screen used it (the equalizer).
 static int aui_key(int code, double t)
 {
 	if (!aui.on) return 0;
+	// A: the screen saver on or off
+	if (code == KEY_ENTER)
+	{
+		if (aui.eq_open) { aui.eq_open = 0; eq_save(); }
+		aui_saver = !aui_saver;
+		printf("mediacenter: salvaschermo %s\n", aui_saver ? "acceso" : "spento");
+		return 1;
+	}
+	// X (the exit question) shows the normal screen
+	if (code == KEY_TAB && aui_saver) aui_saver = 0;
 	if (code == KEY_SPACE || code == KEY_E)
 	{
+		aui_saver = 0;
 		aui.eq_open = !aui.eq_open;
 		aui.eq_until = t + 10;
 		if (!aui.eq_open) eq_save();
@@ -1018,6 +1131,17 @@ pass:
 		}
 	}
 	return 0;
+}
+
+// Pause of an audio file: the sound sent ahead (MC_AUDIO_LEAD_MUSIC) is
+// thrown away and the file goes back to the moment heard, so the sound
+// stops at once and starts again from there.
+static void aui_pause(void)
+{
+	if (!aui.on) return;
+	double h = mc.clock;
+	if (audio_pipe && !isnan(sent_end)) h = sent_end - audio_queued();
+	media_seek(h);
 }
 
 // Called at every round of the player: draws and shows the next picture
@@ -1050,6 +1174,27 @@ static void aui_tick(double t, int state, int confirm, double time, double dur, 
 			aui.peak[ch][b] = *l > p ? *l : p;
 		}
 
+	if (aui_saver != aui.saver)
+	{
+		// every page is copied whole once after the switch
+		aui.saver = aui_saver;
+		aui.bg_gen++;
+		aui.bg_state = -1;
+		if (aui.saver)
+		{
+			memset(aui.img, 0, (size_t)AUI_W * aui.h * 4);
+			aui.sv_min = 1 << 30;
+			aui.sv_max = -1;
+		}
+	}
+	double tc;
+	if (aui.saver)
+	{
+		aui_saver_draw(t, dt);
+		tc = now_seconds();
+		fb_present_paged();
+		goto done;
+	}
 	if (state != aui.bg_state || aui.flash != aui.bg_flash || aui.eq_open != aui.bg_eq)
 	{
 		aui.bg_state = state;
@@ -1059,9 +1204,12 @@ static void aui_tick(double t, int state, int confirm, double time, double dur, 
 		memcpy(aui.img, aui.bg, (size_t)AUI_W * aui.h * 4);
 	}
 	aui_draw_dyn(state, confirm, time, dur, live, dt);
+	tc = now_seconds();
 	fb_present_paged();
 
+done:;
 	double d = now_seconds() - t0;
+	aui.copy_sum += now_seconds() - tc;
 	aui.frames++;
 	aui.draw_sum += d;
 	if (d > aui.draw_max) aui.draw_max = d;
@@ -1076,4 +1224,5 @@ static void aui_tick(double t, int state, int confirm, double time, double dur, 
 #undef E_X
 #undef E_TOP
 #undef E_BOT
-#undef BR
+#undef LR
+#undef LQ
