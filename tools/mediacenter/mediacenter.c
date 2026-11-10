@@ -503,6 +503,9 @@ static int vq_full(void)
 static int preroll;
 static double preroll_t0;
 
+// The audio player screen (audio_ui.c): equalizer and the sound for the waves.
+static void aui_audio(int16_t *s, int n, double pts);
+
 static void feed_audio_output(void)
 {
 	if (!mc.pend_len || preroll) return;
@@ -521,6 +524,7 @@ static void feed_audio_output(void)
 	int due = (int)((mc.clock + MC_AUDIO_LEAD - mc.pend_pts) * MC_AUDIO_RATE);
 	if (due <= 0) return;
 	if (due > mc.pend_len) due = mc.pend_len;
+	aui_audio(mc.pend, due, mc.pend_pts);
 
 	if (audio_pipe)
 	{
@@ -1174,13 +1178,22 @@ static int fb_redraw;
 // When a video picture was last drawn (draw_video_frame).
 static double video_drawn_t;
 
+// Draws the page instead of fb_present (the audio player screen).
+static void (*fb_present_hook)(void);
+
+static void fb_present_page(void)
+{
+	if (fb_present_hook) fb_present_hook();
+	else fb_present();
+}
+
 static void fb_present_paged(void)
 {
 	fb_page_waited = 0;
 	if (fb_pages < 2)
 	{
 		fb_wait_vsync();
-		fb_present();
+		fb_present_page();
 		return;
 	}
 	// The CRT output keeps showing a page for up to a frame and a half after
@@ -1208,7 +1221,7 @@ static void fb_present_paged(void)
 	}
 	fb_page = next;
 	fb_mem = fb_map + (size_t)fb_page * fb_len;
-	fb_present();
+	fb_present_page();
 	if (fb_cmd_fd < 0) fb_cmd_fd = open("/dev/MiSTer_cmd", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
 	char cmd[32];
 	int n = snprintf(cmd, sizeof(cmd), "fb_cmd3 page %d %d\n", fb_page, pic_fields);
@@ -1231,7 +1244,7 @@ static void fb_present_paged(void)
 		fb_page = 0;
 		fb_mem = fb_map;
 		fb_pages = 1;
-		fb_present();
+		fb_present_page();
 	}
 }
 
@@ -2494,6 +2507,8 @@ static void draw_audio_screen(void)
 
 enum { END_DONE, END_NEXT, END_PREV, END_BACK, END_QUIT, END_GOTO };
 
+#include "audio_ui.c"
+
 // The format box during the film (format_key, after Regola CRT).
 static int format_key(int code, double t, int state, int menu);
 static int format_tick(double t);
@@ -2520,8 +2535,11 @@ static int media_play(int in_playlist)
 	exit_question = svcd_on ? svcd_question : "Tornare all'elenco?";
 
 	if (mc.astream >= 0 && audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
-	fb_clear();
-	if (mc.audio_only) draw_audio_screen();
+	if (!(mc.audio_only && aui_begin()))
+	{
+		fb_clear();
+		if (mc.audio_only) draw_audio_screen();
+	}
 	dec_diag_reset();
 	loop_diag_reset();
 	main_idle(1);
@@ -2566,6 +2584,7 @@ static int media_play(int in_playlist)
 				if (code == KEY_ENTER) result = END_BACK;
 				continue;
 			}
+			if (aui_key(code, t)) continue;
 			if (format_key(code, t, p.state, mc.audio_only || play_osd_keep)) continue;
 			if (play_key_hook)
 			{
@@ -2739,7 +2758,15 @@ static int media_play(int in_playlist)
 
 		if (p.confirm_exit && t >= p.osd_until) p.confirm_exit = 0;
 		if (format_tick(t)) p.dirty = 1;
-		int show_osd = p.state == ST_STOP || t < p.osd_until || mc.audio_only || play_osd_keep;
+		if (aui.on)
+		{
+			// the audio player screen, 60 pictures a second
+			double heard = mc.clock;
+			if (audio_pipe && !isnan(sent_end)) heard = sent_end - audio_queued();
+			aui_tick(t, p.state, p.confirm_exit, (p.state == ST_FF || p.state == ST_REW) ? p.ff_time : mc.clock, mc.duration, heard);
+			p.dirty = 0;
+		}
+		int show_osd = !aui.on && (p.state == ST_STOP || t < p.osd_until || mc.audio_only || play_osd_keep);
 		if (show_osd && (p.dirty || t - osd_built >= 0.25))
 		{
 			osd_info_t info;
@@ -2759,7 +2786,7 @@ static int media_play(int in_playlist)
 			osd_built = t;
 			p.dirty = 1;
 		}
-		if (show_osd != ovl_shown)
+		if (show_osd != ovl_shown && !aui.on)
 		{
 			ovl_shown = show_osd;
 			p.dirty = 1;
@@ -2788,9 +2815,10 @@ static int media_play(int in_playlist)
 		}
 		p.dirty = 0;
 
-		usleep(p.state == ST_PLAY ? 2000 : 10000);
+		usleep(p.state == ST_PLAY || aui.on ? 2000 : 10000);
 	}
 
+	aui_end();
 	vt_end();
 	fmt_close();
 	main_idle(0);
@@ -3411,9 +3439,13 @@ static int play_file(const char *path, int in_playlist)
 	if (media_open(path)) return END_DONE;
 	native_retry();
 	native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");
+	aui_path = path;
 	int r = media_play(in_playlist);
+	aui_path = NULL;
 	native_fb = 0;
-	fb_native(0, 0, 0);
+	// an audio file keeps the lists' frame buffer: the next track and the
+	// list come back without changing mode
+	if (!(mc.audio_only && fb_menu)) fb_native(0, 0, 0);
 	media_close();
 	return r;
 }
@@ -3862,7 +3894,16 @@ static int browse(const char *root)
 				char path[1280];
 				snprintf(path, sizeof(path), "%s/%s", cwd, items[i].name);
 				int audio = is_audio_file(items[i].name);
+				aui_track = aui_tracks = 0;
+				if (audio)
+					for (int k = 0; k < num_items; k++)
+						if (!items[k].dir && is_audio_file(items[k].name))
+						{
+							aui_tracks++;
+							if (k == i) aui_track = aui_tracks;
+						}
 				int r = play_file(path, audio);
+				aui_track = aui_tracks = 0;
 				if (r == END_QUIT) return 1;
 				sel = i;
 				if (!audio || r == END_BACK || r == END_DONE) break;
