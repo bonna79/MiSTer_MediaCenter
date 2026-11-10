@@ -1166,6 +1166,20 @@ static void aui_cut_sound(void)
 	printf("mediacenter: suono del brano fermato subito (%d)\n", n);
 }
 
+// Back to the list from an audio file: after aplay was stopped, the MiSTer
+// sound output still played about a second of the track (seen 11-10). A
+// new short stream of silence restarts the output, which drops that rest
+// (when the next track starts, its own stream does the same).
+static void aui_silence(void)
+{
+	FILE *f = popen("aplay -q -t raw -f S16_LE -c 2 -r 48000 --buffer-time=200000 --period-time=50000 - 2>/dev/null", "w");
+	if (!f) return;
+	static const int16_t zero[2400 * 2];
+	for (int i = 0; i < 5; i++) fwrite(zero, 4, 2400, f); // 0.25 s
+	pclose(f);
+	printf("mediacenter: uscita audio azzerata con silenzio\n");
+}
+
 // Called at every round of the player: draws and shows the next picture
 // when it is due (AUI_HZ a second).
 static void aui_tick(double t, int state, int confirm, double time, double dur, double heard)

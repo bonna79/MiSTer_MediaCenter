@@ -2825,7 +2825,8 @@ static int media_play(int in_playlist)
 	}
 
 	// an audio file left with a key: its sound stops at once
-	if (aui.on && !natural_end) aui_cut_sound();
+	int music_cut = aui.on && !natural_end;
+	if (music_cut) aui_cut_sound();
 	aui_end();
 	vt_end();
 	fmt_close();
@@ -2859,6 +2860,8 @@ static int media_play(int in_playlist)
 	prio_apply(0);
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 0);
 	audio_close();
+	// back to the list (not another track): the rest of the sound in the output goes too
+	if (music_cut && result != END_NEXT && result != END_PREV) aui_silence();
 	exit_question = "Uscire dal Video CD?";
 	return quit_requested ? END_QUIT : result;
 }
