@@ -519,6 +519,8 @@ PHYSICAL_DISC_BOOT=1
 main=MiSTer_Physical-CD
 ```
 
+> ⚠️ **Non mettere `main=MiSTer_MediaCenter` nella sezione `[MiSTer]` in cima al file: va solo in `[menu]`.**
+
 - **`[menu]`** fa usare MiSTer MediaCenter nel menu del MiSTer, che è dove vengono riconosciuti i dischi.
 - **`[A0CD-*]`** fa usare il Main di Physical Disc dentro i core di `_Physical Disc Cores` (PSX, Saturn, Mega CD…). Senza questa riga i giochi partono ma il disco non viene letto, e sullo schermo compare un avviso. Se il file del Main di Physical Disc nella SD ha un altro nome, scrivi quello.
 - **Ogni sezione accetta una sola riga `main=`:** se ce ne sono due, vale solo l'ultima. Non mettere tutti e due i Main nella stessa sezione.
