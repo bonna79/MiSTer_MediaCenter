@@ -15,7 +15,7 @@ PREFIX=$(cd "$PREFIX" && pwd)
 VIDEO_DECODERS=mpeg1video,mpeg2video,mpeg4,msmpeg4v1,msmpeg4v2,msmpeg4v3,h263,h264,mjpeg,wmv1,wmv2,wmv3,vc1
 AUDIO_DECODERS=opus,mp1,mp1float,mp2,mp2float,mp3,mp3float,ac3,ac3_fixed,eac3,dca,aac,aac_latm,vorbis,flac,alac,wmav1,wmav2,pcm_s16le,pcm_s16be,pcm_s24le,pcm_u8,pcm_dvd,pcm_bluray
 SUB_DECODERS=dvdsub,srt,subrip,ass,ssa,text
-DEMUXERS=mpegps,mpegts,mpegvideo,avi,matroska,mov,ogg,asf,mp3,flac,wav,aac,ac3,dts,srt,ass
+DEMUXERS=mpegps,mpegts,mpegvideo,avi,matroska,mov,ogg,asf,mp3,flac,wav,aac,ac3,dts,srt,ass,hls
 PARSERS=mpegvideo,mpeg4video,h264,mpegaudio,ac3,dca,aac,vorbis,flac,opus,dvdsub
 
 # Our changes to FFmpeg (ffmpeg-mediacenter.patch): off unless the player asks.
@@ -39,14 +39,14 @@ cd "$BUILD"
 	--extra-cflags="-mfpu=neon -mfloat-abi=hard -O2" \
 	--enable-static --disable-shared --enable-pic \
 	--disable-programs --disable-doc --disable-debug \
-	--disable-network --disable-autodetect --disable-iconv \
+	--enable-network --disable-autodetect --disable-iconv \
 	--disable-everything \
 	--disable-avdevice --disable-avfilter --disable-postproc \
 	--enable-avcodec --enable-avformat --enable-swscale --enable-swresample \
 	--enable-decoder=$VIDEO_DECODERS,$AUDIO_DECODERS,$SUB_DECODERS \
 	--enable-demuxer=$DEMUXERS \
 	--enable-parser=$PARSERS \
-	--enable-protocol=file \
+	--enable-protocol=file,http,tcp \
 	--enable-neon
 make -j"$(nproc)"
 make install
