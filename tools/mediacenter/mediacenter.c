@@ -327,6 +327,10 @@ static int open_audio_track(int index)
 // Super Video CD: the track being played is read from the disc through
 // media_io instead of a file, and its chapters come from ENTRIES.SVD.
 static AVIOContext *media_io = NULL;
+// Options for opening a stream over the network (Jellyfin: its headers).
+static AVDictionary *media_opts = NULL;
+// Where the last video was when Stop took it back to the start (-1: not stopped).
+static double stop_pos = -1;
 static int svcd_on = 0;
 // An audio CD playing (cdda.c): its tracks are the chapters.
 static int cdda_on = 0;
@@ -393,7 +397,11 @@ static int media_open(const char *path)
 		mc.fmt = avformat_alloc_context();
 		if (mc.fmt) mc.fmt->pb = media_io;
 	}
-	if (avformat_open_input(&mc.fmt, path, NULL, NULL) < 0)
+	AVDictionary *opts = NULL;
+	if (media_opts) av_dict_copy(&opts, media_opts, 0);
+	int open_err = avformat_open_input(&mc.fmt, path, NULL, &opts);
+	av_dict_free(&opts);
+	if (open_err < 0)
 	{
 		fprintf(stderr, "mediacenter: cannot open %s\n", path);
 		return -1;
@@ -2554,6 +2562,7 @@ static int media_play(int in_playlist)
 	p.state = ST_PLAY;
 	p.osd_until = now_seconds() + 3.0;
 	have_frame = 0;
+	stop_pos = -1;
 	static char svcd_question[48];
 	snprintf(svcd_question, sizeof(svcd_question), "Uscire dal %s?", svcd_kind);
 	exit_question = svcd_on ? svcd_question : "Tornare all'elenco?";
@@ -2640,6 +2649,7 @@ static int media_play(int in_playlist)
 			case KEY_STOPCD:
 			{
 				int was_stopped = p.state == ST_STOP;
+				if (!was_stopped) stop_pos = mc.clock;
 				p.state = ST_STOP;
 				media_seek(0);
 				audio_flush();
@@ -2976,6 +2986,8 @@ static void add_source(const char *label, const char *path)
 	num_sources++;
 }
 
+static int jf_enabled(void);
+
 static void scan_sources(void)
 {
 	num_sources = 0;
@@ -3009,6 +3021,7 @@ static void scan_sources(void)
 		add_source(label, path);
 	}
 	if (dir_has_entries("/media/fat/cifs")) add_source("Rete (CIFS)", "/media/fat/cifs");
+	if (jf_enabled()) add_source("Jellyfin", "jellyfin:");
 	add_source("Regola CRT (dimensioni e posizione)", "crt:");
 }
 
@@ -4540,6 +4553,8 @@ static void show_splash(void)
 	wait_key_for(3.0);
 }
 
+#include "jellyfin.c"
+
 static int run_browser(void)
 {
 	int sel = 0;
@@ -4561,6 +4576,11 @@ static int run_browser(void)
 		if (!strcmp(sources[sel].path, "crt:"))
 		{
 			crt_adjust_screen();
+			continue;
+		}
+		if (!strcmp(sources[sel].path, "jellyfin:"))
+		{
+			if (jf_browse()) break;
 			continue;
 		}
 		if (!sources[sel].path[0])

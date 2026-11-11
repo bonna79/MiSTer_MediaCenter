@@ -348,9 +348,19 @@ Serve solo questo secondo avvio, nient'altro: niente riavvii del MiSTer e niente
 | Immagini DVD `.iso` e cartelle `VIDEO_TS` | Da **Scripts → mediacenter** | Come un DVD |
 | Musica MP1, MP2, MP3, Ogg, Opus, FLAC, WAV e AAC; moduli tracker MOD, XM, S3M, IT (e MED, MTM, 669, OKT, STM...) | Da **Scripts → mediacenter** | I brani di una cartella si ascoltano di seguito, come un album |
 | CD audio (anche CD Extra) e immagini `.bin`/`.cue` audio | Parte da solo nella schermata audio di `mediacenter` (oppure con il core indicato in `AUDIOCD=` o con [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi)) | Brani di seguito senza pause, nomi dal CD-Text, ◄► brano, L/R veloce |
+| Film, serie e musica di un server [Jellyfin](https://jellyfin.org) (per esempio sul Mac o sul PC) | Da **Scripts → mediacenter → Jellyfin** | Il file originale arriva così com'è: acceleratore FPGA, CRT, schermata audio, sottotitoli e tracce audio come per un file sulla SD; riprende dal punto lasciato |
 | Giochi PSX, Saturn, Mega CD, PC Engine CD… | Partono da soli, con i core di `_Physical Disc Cores` | Gestiti dal Main di Physical Disc |
 
 I CD-R con file DivX o MP3 non partono da soli: si aprono da **Scripts → mediacenter → Disco nel lettore**.
+
+### Jellyfin
+
+MMC si collega a un server [Jellyfin](https://jellyfin.org) della rete di casa, quello ufficiale, installato per esempio sul Mac o sul PC dove tieni film e musica. La voce **Jellyfin** è nell'elenco delle sorgenti.
+
+- **Il server:** MMC lo cerca da solo nella rete. Se non lo trova, scrivi il suo indirizzo in `mediacenter.ini`, per esempio `MC_JELLYFIN=http://192.168.0.10:8096`.
+- **L'accesso, la prima volta:** MMC mostra un codice di 6 cifre. In Jellyfin sul computer apri **Profilo → Quick Connect** e scrivi il codice. Quick Connect si accende in **Pannello di controllo → Generale**. In alternativa scrivi utente e password in `mediacenter.ini` (`MC_JELLYFIN_USER`, `MC_JELLYFIN_PASS`). La chiave che Jellyfin dà a MMC resta in `/media/fat/linux/mediacenter_jellyfin.cfg`: cancellalo per scollegare la MiSTer.
+- **Cosa arriva:** il file originale, se MMC lo legge (H.264 fino a 1920x1080 a 8 bit, MPEG-2, DivX/Xvid, VC-1, con audio AC3, DTS, AAC, MP3, FLAC…). Solo i formati che MMC non legge (HEVC/H.265, AV1, VP9, H.264 a 10 bit, 4K, audio TrueHD) li converte il server in H.264 1080p con audio AC3: serve un computer abbastanza potente.
+- **Continua a guardare:** MMC dice a Jellyfin dove ti sei fermato. Riaprendo il titolo chiede se riprendere da lì, e la stessa posizione la vedi anche in Jellyfin sul computer.
 
 ## Formati e risoluzioni consigliate
 
@@ -562,6 +572,8 @@ MC_CRT_VPOS=2
 | `MC_MENU_HD=1` | Elenchi a 1280x720 come nella versione 2.1, invece che disegnati per il CRT |
 | `MC_DIAG=0` | Spegne le righe di diagnosi `mediacenter: diag` nel log |
 | `MC_SPLASH=0` | Spegne l'immagine di MMC all'avvio dello script |
+| `MC_JELLYFIN=http://192.168.0.10:8096` | Indirizzo del server Jellyfin, se MMC non lo trova da solo. `MC_JELLYFIN=0` toglie la voce Jellyfin |
+| `MC_JELLYFIN_USER=nome`, `MC_JELLYFIN_PASS=password` | Accesso a Jellyfin con utente e password invece del codice Quick Connect |
 
 Le stesse impostazioni si possono dare anche come variabili d'ambiente, come quelle per i test qui sotto.
 

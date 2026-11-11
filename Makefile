@@ -145,7 +145,7 @@ MEDIACENTER = $(BUILDDIR)/mediacenter
 .PHONY: mediacenter
 mediacenter: $(MEDIACENTER)
 
-$(MEDIACENTER): tools/mediacenter/mediacenter.c tools/mediacenter/dvd.c tools/mediacenter/zctest.c tools/mediacenter/zerocopy.c tools/mediacenter/accel.c tools/mediacenter/accel_link.c tools/mediacenter/audio_ui.c tools/mediacenter/cdda.c tools/mediacenter/modplay.c tools/mediacenter/audio_font.h tools/mediacenter/splash.h tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h tools/vcd_player/vcd_font.h
+$(MEDIACENTER): tools/mediacenter/mediacenter.c tools/mediacenter/dvd.c tools/mediacenter/zctest.c tools/mediacenter/zerocopy.c tools/mediacenter/accel.c tools/mediacenter/accel_link.c tools/mediacenter/audio_ui.c tools/mediacenter/cdda.c tools/mediacenter/modplay.c tools/mediacenter/jellyfin.c tools/mediacenter/audio_font.h tools/mediacenter/splash.h tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h tools/vcd_player/vcd_font.h
 	@mkdir -p $(BUILDDIR)
 	$(Q)$(info $@)
 	$(Q)$(CC) -O2 -fno-tree-vectorize -g -Wall -std=gnu99 -DMC_BUILD='"$(MC_BUILD)"' -I$(FFMPEG)/include -I$(DVDNAV)/include -I$(XMP)/include -o $@ $< \
