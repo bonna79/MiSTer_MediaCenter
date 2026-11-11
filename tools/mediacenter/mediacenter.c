@@ -2617,10 +2617,14 @@ static int media_play(int in_playlist)
 			case KEY_ESC:
 			case KEY_STOP:
 			case KEY_STOPCD:
+			{
+				int was_stopped = p.state == ST_STOP;
 				p.state = ST_STOP;
 				media_seek(0);
 				audio_flush();
+				if (!was_stopped) aui_stop_sound(); // after the flush: its silence stays queued
 				break;
+			}
 			case KEY_RIGHT:
 			case KEY_NEXTSONG:
 				if (in_playlist && mc.audio_only) result = END_NEXT;

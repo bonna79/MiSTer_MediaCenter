@@ -25,7 +25,12 @@
 
 static void menu_fb(void);
 
-#define AUI_W 720
+// Width of the picture: 640 by default, so on the CRT it stays inside the
+// tube (user 11-11); MC_AUDIO_W=720 brings back the full width. HDMI and
+// CRT show the same frame buffer, so HDMI gets thin black sides too.
+#define AUI_WMAX 720
+static int aui_w = 640;
+#define AUI_W aui_w
 #define AUI_HZ 60.0
 #define AUI_FFT 1024
 #define AUI_RING 131072 // stereo frames of the sound sent, for the waves (2.7 s: more than MC_AUDIO_LEAD_MUSIC)
@@ -69,6 +74,7 @@ static const char *aui_path;
 static const float eq_freq[6] = { 60, 170, 470, 1300, 3600, 10000 };
 static const char *const eq_label[6] = { "60", "170", "470", "1,3k", "3,6k", "10k" };
 static int eq_gain[6];      // dB, -12..+12
+static int eq_vol;          // dB, -5..0: lower volume, so loud tracks do not distort (CRT speakers)
 static int eq_loaded;
 static float eq_c[6][5];    // b0 b1 b2 a1 a2
 static float eq_s[2][6][4]; // x1 x2 y1 y2 per channel and band
@@ -130,10 +136,12 @@ static void eq_load(void)
 		int g[6];
 		if (fscanf(f, "MC_EQ=%d,%d,%d,%d,%d,%d", &g[0], &g[1], &g[2], &g[3], &g[4], &g[5]) == 6)
 			for (int b = 0; b < 6; b++) eq_gain[b] = g[b] < -12 ? -12 : g[b] > 12 ? 12 : g[b];
+		int v;
+		if (fscanf(f, " MC_VOL=%d", &v) == 1) eq_vol = v < -5 ? -5 : v > 0 ? 0 : v;
 		fclose(f);
 	}
 	for (int b = 0; b < 6; b++) eq_design(b);
-	printf("mediacenter: equalizzatore %d %d %d %d %d %d dB\n", eq_gain[0], eq_gain[1], eq_gain[2], eq_gain[3], eq_gain[4], eq_gain[5]);
+	printf("mediacenter: equalizzatore %d %d %d %d %d %d dB, volume %d dB\n", eq_gain[0], eq_gain[1], eq_gain[2], eq_gain[3], eq_gain[4], eq_gain[5], eq_vol);
 }
 
 static void eq_save(void)
@@ -141,13 +149,18 @@ static void eq_save(void)
 	if (fb_fake) return;
 	FILE *f = fopen(EQ_FILE, "w");
 	if (!f) return;
-	fprintf(f, "MC_EQ=%d,%d,%d,%d,%d,%d\n", eq_gain[0], eq_gain[1], eq_gain[2], eq_gain[3], eq_gain[4], eq_gain[5]);
+	fprintf(f, "MC_EQ=%d,%d,%d,%d,%d,%d\nMC_VOL=%d\n", eq_gain[0], eq_gain[1], eq_gain[2], eq_gain[3], eq_gain[4], eq_gain[5], eq_vol);
 	fclose(f);
-	printf("mediacenter: equalizzatore salvato %d %d %d %d %d %d dB\n", eq_gain[0], eq_gain[1], eq_gain[2], eq_gain[3], eq_gain[4], eq_gain[5]);
+	printf("mediacenter: equalizzatore salvato %d %d %d %d %d %d dB, volume %d dB\n", eq_gain[0], eq_gain[1], eq_gain[2], eq_gain[3], eq_gain[4], eq_gain[5], eq_vol);
 }
 
 static void eq_set(int b, int g)
 {
+	if (b == 6)
+	{
+		eq_vol = g < -5 ? -5 : g > 0 ? 0 : g;
+		return;
+	}
 	if (g < -12) g = -12;
 	if (g > 12) g = 12;
 	if (g == eq_gain[b]) return;
@@ -159,6 +172,11 @@ static void eq_set(int b, int g)
 // The sound about to be sent (n stereo frames), through the bands not at 0.
 static void eq_apply(int16_t *s, int n)
 {
+	if (eq_vol)
+	{
+		int m = (int)lrintf(32768 * powf(10, eq_vol / 20.0f));
+		for (int i = 0; i < n * 2; i++) s[i] = (int16_t)((s[i] * m) >> 15);
+	}
 	int any = 0;
 	for (int b = 0; b < 6; b++) any |= eq_gain[b];
 	if (!any) return;
@@ -493,14 +511,14 @@ static void a_fit(const afont_t *f, char *s, int w)
 // The screen
 // ---------------------------------------------------------------------------
 
-#define X0 40
-#define X1 (AUI_W - 40)
+#define X0 (AUI_W < 720 ? 24 : 40)
+#define X1 (AUI_W - X0)
 #define CW (X1 - X0)
 // band, time bar, equalizer (in lines of the 576-line picture: AY())
 #define B_TOP AY(142)
 #define B_BOT AY(334)
 #define P_Y AY(358)
-#define E_X (X0 + 340)
+#define E_X (X0 + (AUI_W < 720 ? 322 : 340))
 #define E_TOP AY(408)
 #define E_BOT AY(490)
 
@@ -799,7 +817,7 @@ static void aui_waves(int live, double dt)
 	int bh = B_BOT - B_TOP;
 	float mid = B_TOP + bh / 2.0f, half = bh / 2.0f - 6;
 	int n = CW - 16;
-	static float env[AUI_W], ys[AUI_W];
+	static float env[AUI_WMAX], ys[AUI_WMAX];
 	static int env_n;
 	static aline_t lut[2];
 	static uint32_t lut_col[2];
@@ -845,7 +863,7 @@ static void aui_saver_draw(double t, double dt)
 	static const float NK[6] = { 0.7f, 1.3f, 2.1f, 3.4f, 5.5f, 8.9f }, SP[6] = { 0.9f, 1.3f, 1.9f, 2.6f, 3.5f, 4.6f };
 	static aline_t lut[SV_LINES];
 	static uint32_t lut_col[SV_LINES];
-	static float ys[AUI_W];
+	static float ys[AUI_WMAX];
 	static double ph[SV_LINES][6];
 	uint32_t cols[SV_LINES] = { C_L, C_R, fb_rgb(0xa7, 0x7b, 0xff), C_SEL, fb_rgb(0x5a, 0xff, 0xb4) };
 	int H = aui.h;
@@ -921,7 +939,7 @@ static void aui_draw_dyn(int state, int confirm, double time, double dur, int li
 
 	// equalizer: level of each band and channel, peak, gain
 	int ex = E_X, ew = X1 - ex, et = E_TOP, eb = E_BOT, h = eb - et;
-	float cw = ew / 6.0f, zero = (et + eb) / 2.0f;
+	float cw = ew / 7.0f, zero = (et + eb) / 2.0f;
 	for (int b = 0; b < 6; b++)
 	{
 		int cx = (int)(ex + b * cw + cw / 2), sel = aui.eq_open && aui.band == b;
@@ -941,7 +959,20 @@ static void aui_draw_dyn(int state, int confirm, double time, double dur, int li
 			a_text_c(&afont_small, cx, eb + AY(30), s, sel ? C_SEL : C_DIM);
 		}
 	}
-	a_rect_a(ex, (int)zero, ew - 2, 1, C_TEXT, 31);
+	a_rect_a(ex, (int)zero, (int)(6 * cw) - 2, 1, C_TEXT, 31);
+	{
+		// 7th column: volume, 0 dB at the top, -5 dB at the bottom
+		int cx = (int)(ex + 6 * cw + cw / 2), sel = aui.eq_open && aui.band == 6;
+		a_rect(cx - 4, et, 8, h, C_EQBG);
+		int gy = et + (int)lrintf(-eq_vol * h / 5.0f);
+		a_rect(cx - 14, gy - 1, 28, 3, sel ? C_SEL : C_TEXT);
+		a_text_c(&afont_small, cx, eb + AY(16), "Vol", sel ? C_SEL : C_MUTED);
+		if (aui.eq_open || eq_vol)
+		{
+			snprintf(s, sizeof(s), "%d", eq_vol);
+			a_text_c(&afont_small, cx, eb + AY(30), s, sel ? C_SEL : C_DIM);
+		}
+	}
 
 	// the exit question over the band
 	if (confirm)
@@ -967,6 +998,9 @@ static void aui_copy(void)
 	if (!fb_mem || !aui.img) return;
 	int full = aui.page_gen[fb_page & 7] != aui.bg_gen;
 	aui.page_gen[fb_page & 7] = aui.bg_gen;
+	// the picture narrower than the frame buffer: black around it
+	if (full && (fb_w > AUI_W || fb_h != aui.h))
+		for (int y = 0; y < fb_h; y++) memset(fb_mem + (size_t)y * fb_stride, 0, (size_t)fb_w * 4);
 	if (fb_h * 2 == aui.h)
 	{
 		// 288p / 240p: two lines of the picture into one
@@ -975,6 +1009,7 @@ static void aui_copy(void)
 			uint32_t *d = (uint32_t *)(fb_mem + (size_t)y * fb_stride);
 			const uint32_t *a = aui.img + (size_t)(2 * y) * AUI_W, *b = a + AUI_W;
 			int w = fb_w < AUI_W ? fb_w : AUI_W;
+			if (fb_w > AUI_W) d += (fb_w - AUI_W) / 2;
 			for (int x = 0; x < w; x++) d[x] = ((a[x] >> 1) & 0x7F7F7F7Fu) + ((b[x] >> 1) & 0x7F7F7F7Fu) + (a[x] & b[x] & 0x01010101u);
 		}
 		return;
@@ -1021,6 +1056,8 @@ static int aui_begin(void)
 	menu_fb();
 	if (!fb_mem) return 0;
 	aui.h = (fb_h == 480 || fb_h == 240) ? 480 : 576;
+	const char *we = getenv("MC_AUDIO_W");
+	aui_w = we && atoi(we) >= 720 ? 720 : 640;
 	size_t px = (size_t)AUI_W * aui.h;
 	aui.bg = (uint32_t *)malloc(px * 4);
 	aui.img = (uint32_t *)malloc(px * 4);
@@ -1111,10 +1148,10 @@ static int aui_key(int code, double t)
 	{
 		switch (code)
 		{
-		case KEY_LEFT: aui.band = (aui.band + 5) % 6; break;
-		case KEY_RIGHT: aui.band = (aui.band + 1) % 6; break;
-		case KEY_UP: eq_set(aui.band, eq_gain[aui.band] + 1); break;
-		case KEY_DOWN: eq_set(aui.band, eq_gain[aui.band] - 1); break;
+		case KEY_LEFT: aui.band = (aui.band + 6) % 7; break;
+		case KEY_RIGHT: aui.band = (aui.band + 1) % 7; break;
+		case KEY_UP: eq_set(aui.band, (aui.band == 6 ? eq_vol : eq_gain[aui.band]) + 1); break;
+		case KEY_DOWN: eq_set(aui.band, (aui.band == 6 ? eq_vol : eq_gain[aui.band]) - 1); break;
 		case KEY_ESC: aui.eq_open = 0; eq_save(); break;
 		default: aui.eq_open = 0; eq_save(); goto pass; // another key closes it and does its job
 		}
@@ -1164,6 +1201,29 @@ static void aui_cut_sound(void)
 	}
 	closedir(d);
 	printf("mediacenter: suono del brano fermato subito (%d)\n", n);
+}
+
+// B (stop) on an audio file: the sound already sent (pipe, aplay and the
+// MiSTer output, about half a second) is dropped at once. aplay is stopped
+// and started again with a quarter second of silence, which restarts the
+// output like a new track does.
+static void aui_stop_sound(void)
+{
+	if (!aui.on || !audio_pipe) return;
+	aui_cut_sound();
+	audio_close();
+	if (audio_open(MC_AUDIO_RATE)) return;
+	if (fcntl(fileno(audio_pipe), F_SETPIPE_SZ, 16384) < 0) fprintf(stderr, "mediacenter: pipe size not set\n");
+	pthread_mutex_lock(&audio_lock);
+	for (int i = 0; i < MC_AUDIO_RATE / 4; i++)
+	{
+		unsigned j = audio_wr % AUDIO_RING;
+		audio_ring[j * 2] = audio_ring[j * 2 + 1] = 0;
+		audio_wr++;
+	}
+	pthread_cond_signal(&audio_cond);
+	pthread_mutex_unlock(&audio_lock);
+	printf("mediacenter: stop, uscita audio azzerata con silenzio\n");
 }
 
 // Back to the list from an audio file: after aplay was stopped, the MiSTer
