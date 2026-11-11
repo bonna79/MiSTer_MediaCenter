@@ -1179,6 +1179,7 @@ int arcade_send_rom(const char *xml)
 	arcade_sw_load();
 	switches.dip_saved = switches.dip_cur;
 	arcade_sw_send();
+	ProgressMessage(0, 0, 0, 0);
 	return 0;
 }
 
@@ -1327,6 +1328,17 @@ int xml_load(const char *xml)
 }
 
 static mgl_struct mgl = {};
+static int mgl_from_mra = 0;
+
+static void mgl_games_path(char *path, size_t len)
+{
+	char dir[1024], rest[1024] = {};
+	snprintf(dir, sizeof(dir), "%s", path + strspn(path, "/"));
+	char *p = strchr(dir, '/');
+	if (p) { strcpy(rest, p); *p = 0; }
+	prefixGameDir(dir, sizeof(dir));
+	snprintf(path, len, "%s%s", getFullPath(dir), rest);
+}
 
 static int scan_mgl(XMLEvent evt, const XMLNode* node, SXML_CHAR* text, const int n, SAX_Data* sd)
 {
@@ -1336,16 +1348,35 @@ static int scan_mgl(XMLEvent evt, const XMLNode* node, SXML_CHAR* text, const in
 	switch (evt)
 	{
 	case XML_EVENT_START_DOC:
-		inside_mgl = 0;
+		inside_mgl = mgl_from_mra;
 		break;
 
 	case XML_EVENT_START_NODE:
 		if (!strcasecmp(node->tag, "mistergamedescription")) inside_mgl = 1;
-		else if (inside_mgl && mgl.count < (int)(sizeof(mgl.item) / sizeof(mgl.item[0])))
+		else if (inside_mgl && !mgl_from_mra && !strcasecmp(node->tag, "option"))
+		{
+			if (mgl.opt_count < MGL_MAX_OPTIONS)
+			{
+				mgl_option_struct *o = &mgl.opt[mgl.opt_count];
+				memset(o, 0, sizeof(*o));
+				for (int i = 0; i < node->n_attributes; i++)
+				{
+					const char *n = node->attributes[i].name, *v = node->attributes[i].value;
+					if (!strcasecmp(n, "name")) snprintf(o->name, sizeof(o->name), "%s", v);
+					else if (!strcasecmp(n, "page")) snprintf(o->page, sizeof(o->page), "%s", v);
+					else if (!strcasecmp(n, "value")) snprintf(o->value, sizeof(o->value), "%s", v);
+					else if (!strcasecmp(n, "default")) o->is_default = !strcmp(v, "1");
+				}
+				printf("  action=option\n  name=%s\n  page=%s\n  value=%s\n  default=%d\n\n", o->name, o->page, o->value, o->is_default);
+				if (o->name[0] && o->value[0]) mgl.opt_count++;
+			}
+		}
+		else if (inside_mgl && mgl.count < (int)(sizeof(mgl.item) / sizeof(mgl.item[0])) - 1)
 		{
 			if (!strcasecmp(node->tag, "file"))
 			{
 				mgl.item[mgl.count].action = MGL_ACTION_LOAD;
+				int root = 0;
 
 				for (int i = 0; i < node->n_attributes; i++)
 				{
@@ -1377,11 +1408,18 @@ static int scan_mgl(XMLEvent evt, const XMLNode* node, SXML_CHAR* text, const in
 						snprintf(mgl.item[mgl.count].path, sizeof(mgl.item[mgl.count].path), "%s", node->attributes[i].value);
 						mgl.item[mgl.count].valid |= 0x8;
 					}
+					else if (!strcasecmp(node->attributes[i].name, "root"))
+					{
+						root = strcasecmp(node->attributes[i].value, "games") ? -1 : 1;
+					}
 				}
+
+				if (root < 0) mgl.item[mgl.count].valid &= ~0x8;
+				else if (root) mgl_games_path(mgl.item[mgl.count].path, sizeof(mgl.item[mgl.count].path));
 
 				printf("  action=load\n  delay=%d\n  type=%c\n  index=%d\n  path=%s\n  valid=%X\n\n", mgl.item[mgl.count].delay, mgl.item[mgl.count].type, mgl.item[mgl.count].index, mgl.item[mgl.count].path, mgl.item[mgl.count].valid);
 
-				if (mgl.item[mgl.count].valid == 0xF)
+				if (mgl.item[mgl.count].valid == 0xF && (!mgl_from_mra || mgl.item[mgl.count].type == 'S'))
 				{
 					mgl.item[mgl.count].valid = 1;
 					mgl.count++;
@@ -1391,7 +1429,7 @@ static int scan_mgl(XMLEvent evt, const XMLNode* node, SXML_CHAR* text, const in
 					mgl.item[mgl.count].valid = 0;
 				}
 			}
-			else if (!strcasecmp(node->tag, "reset"))
+			else if (!mgl_from_mra && !strcasecmp(node->tag, "reset"))
 			{
 				mgl.item[mgl.count].action = MGL_ACTION_RESET;
 
@@ -1434,6 +1472,8 @@ static int scan_mgl(XMLEvent evt, const XMLNode* node, SXML_CHAR* text, const in
 mgl_struct* mgl_parse(const char *xml)
 {
 	memset(&mgl, 0, sizeof(mgl));
+	mgl_from_mra = (isXmlName(xml) == 1);
+	mgl.from_mra = mgl_from_mra;
 
 	printf("MGL %s\n", xml);
 
@@ -1448,4 +1488,135 @@ mgl_struct* mgl_parse(const char *xml)
 mgl_struct* mgl_get()
 {
 	return &mgl;
+}
+
+// ---- MGL options ---------------------------------------------------------------------------------------------
+
+static char mgl_msg[512];
+
+static void mgl_option_error(const char *fmt, const char *a, const char *b)
+{
+	char line[160];
+	snprintf(line, sizeof(line), fmt, a, b);
+	printf("MGL option: %s\n", line);
+	if (!mgl_msg[0]) strcpy(mgl_msg, "MGL options:");
+	if (strlen(mgl_msg) + strlen(line) + 2 < sizeof(mgl_msg))
+	{
+		strcat(mgl_msg, "\n");
+		strcat(mgl_msg, line);
+	}
+}
+
+// Copy field n (0 = the first) of a comma separated CONF_STR item, without leading/trailing spaces.
+static int mgl_field(const char *p, int n, char *out, int size)
+{
+	while (n && *p) if (*p++ == ',') n--;
+	if (n) return 0;
+	while (*p == ' ') p++;
+	int len = 0;
+	while (p[len] && p[len] != ',') len++;
+	while (len && p[len - 1] == ' ') len--;
+	if (len >= size) len = size - 1;
+	memcpy(out, p, len);
+	out[len] = 0;
+	return 1;
+}
+
+static int mgl_same(const char *a, const char *b)
+{
+	while (*a == ' ') a++;
+	while (*b == ' ') b++;
+	int la = strlen(a), lb = strlen(b);
+	while (la && a[la - 1] == ' ') la--;
+	while (lb && b[lb - 1] == ' ') lb--;
+	return la == lb && !strncasecmp(a, b, la);
+}
+
+// One CONF_STR line: skips the H/h/D/d prefixes, returns the page (0 = main) and points opt at the item, or returns
+// -1 and fills title for a page definition (Pn,Title).
+static int mgl_line(char *p, char **opt, char *title, int title_size)
+{
+	while ((p[0] == 'H' || p[0] == 'D' || p[0] == 'h' || p[0] == 'd') && strlen(p) > 2) p += 2;
+	int pg = 0;
+	if (p[0] == 'P' && p[1] >= '0' && p[1] <= '9')
+	{
+		if (p[2] == ',')
+		{
+			mgl_field(p, 1, title, title_size);
+			return -(p[1] - '0') - 1;
+		}
+		pg = p[1] - '0';
+		p += 2;
+	}
+	*opt = p;
+	return pg;
+}
+
+void mgl_apply_options(int config_found)
+{
+	char titles[10][64] = {};
+	char s[256], spec[16], title[64];
+	mgl_msg[0] = 0;
+
+	for (int i = 2; ; i++)                         // page titles first: a page may be defined after its options
+	{
+		char *p = user_io_get_confstr(i);
+		if (!p) break;
+		char *opt = NULL;
+		int pg = mgl_line(p, &opt, title, sizeof(title));
+		if (pg < 0) snprintf(titles[-pg - 1], sizeof(titles[0]), "%s", title);
+	}
+
+	for (int k = 0; k < mgl.opt_count; k++)
+	{
+		mgl_option_struct *o = &mgl.opt[k];
+		if (o->is_default && config_found) continue;   // a default only for a setname without saved settings
+
+		int matches = 0, value = -1, ex = 0;
+		spec[0] = 0;
+		for (int i = 2; ; i++)
+		{
+			char *p = user_io_get_confstr(i);
+			if (!p) break;
+			char *opt = NULL;
+			int pg = mgl_line(p, &opt, title, sizeof(title));
+			if (pg < 0 || (opt[0] != 'O' && opt[0] != 'o')) continue;
+			if (!mgl_field(opt, 1, s, sizeof(s)) || !mgl_same(s, o->name)) continue;
+			if (o->page[0] && !(pg && mgl_same(titles[pg], o->page))) continue;
+
+			matches++;
+			// the bits: O[38:35] / o[..] or the letters (OAB; o = +32)
+			const char *b = opt + 1;
+			int n = 0;
+			while (b[n] && b[n] != ',' && n < (int)sizeof(spec) - 1) { spec[n] = b[n]; n++; }
+			spec[n] = 0;
+			ex = (opt[0] == 'o');
+
+			value = -1;
+			for (int v = 0; mgl_field(opt, v + 2, s, sizeof(s)); v++)
+			{
+				if (mgl_same(s, o->value)) { value = v; break; }
+			}
+		}
+
+		if (!matches) mgl_option_error("No option %s%s", o->name, "");
+		else if (matches > 1) mgl_option_error("%s: ambiguous%s", o->name, o->page[0] ? "" : ", add page");
+		else if (value < 0 || value >= (1 << user_io_status_bits(spec, 0, 0, ex))) mgl_option_error("%s: no %s", o->name, o->value);
+		else
+		{
+			printf("MGL option: %s = %s (%s%s, %d)\n", o->name, o->value, ex ? "o" : "O", spec, value);
+			user_io_status_set(spec, value, ex);
+		}
+	}
+
+	// the errors are shown by the MGL sequence, after its loads and resets, once the core's video is up
+	if (mgl_msg[0])
+	{
+		mgl_item_struct *it = &mgl.item[mgl.count++];
+		memset(it, 0, sizeof(*it));
+		it->action = MGL_ACTION_INFO;
+		it->delay = 2;
+		it->valid = 1;
+		snprintf(it->path, sizeof(it->path), "%s", mgl_msg);
+	}
 }

@@ -2143,13 +2143,11 @@ static int get_edid_vmode(vmode_custom_t *v)
 	return 1;
 }
 
-static void set_vrr_mode()
+static void set_vrr_infoframes()
 {
-	PROFILE_FUNCTION();
-
 	float vrateh = 100000000;
 
-	if (cfg.vrr_mode == 0 || is_menu() || video_is_direct() || minimig_rtg_hdmi)
+	if (cfg.vrr_mode == 0 || video_is_direct() || minimig_rtg_hdmi)
 	{
 		if (last_vrr_mode != 0)
 		{
@@ -2279,6 +2277,14 @@ static void set_vrr_mode()
 	last_vrr_vfp = v_cur.param.vfp;
 
 	if (!supports_vrr() || video_vsync_adjust()) use_vrr = 0;
+}
+
+static void set_vrr_mode()
+{
+	PROFILE_FUNCTION();
+
+	set_vrr_infoframes();
+	if (is_menu()) use_vrr = 0;
 }
 
 static void video_set_mode(vmode_custom_t *v, double Fpix)
@@ -2764,6 +2770,8 @@ void video_cfg_reset()
 	setShadowMask();
 }
 
+static void spd_config_update();
+
 void video_init()
 {
 	minimig_rtg_hdmi = false;
@@ -2781,6 +2789,9 @@ void video_init()
 	video_cfg_init();
 
 	video_set_mode(&v_def, 0);
+
+	// Early DV1 SPD before ROM load
+	if (video_is_direct() && cfg.spd_quirk < 2) spd_config_update();
 }
 
 void video_reinit()
@@ -3405,7 +3416,6 @@ static void spd_config_update()
 			output_info.rotated = false;
 		}
 		const VideoInfo *vi = &output_info;
-		if (!vi->width) return;
 
 		uint8_t data[31] = {
 			0x83, 0x01, 25, 0,
@@ -3413,7 +3423,7 @@ static void spd_config_update()
 			'V',
 			'1', // version
 			(uint8_t)((vi->interlaced ? 1 : 0) | ((menu_present() && (cfg.spd_quirk < 2)) ? 4 : 0) | (vi->rotated ? 8 : 0) | (minimig_rtg_hdmi ? 0 : (arcade_get_direction() << 4))),
-			(uint8_t)(vi->pixrep ? vi->pixrep : (vi->ctime / vi->width)),
+			(uint8_t)(vi->pixrep ? vi->pixrep : vi->width ? (vi->ctime / vi->width) : 0),
 			(uint8_t)vi->de_h,
 			(uint8_t)(vi->de_h >> 8),
 			(uint8_t)vi->de_v,

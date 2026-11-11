@@ -31,6 +31,8 @@
 #define IDE_STATE_WAIT_PKT_RD   4
 #define IDE_STATE_WAIT_PKT_END  5
 #define IDE_STATE_WAIT_PKT_MODE 6
+#define IDE_STATE_WAIT_RD       7
+#define IDE_STATE_WAIT_WR       8
 
 struct regs_t
 {
@@ -92,7 +94,7 @@ struct drive_t
 	uint8_t  last_load_state;
 	uint8_t  track_cnt;
 	uint8_t  data_num;
-	track_t  track[50];
+	track_t  track[100];
 
 	uint8_t  playing;
 	uint8_t  paused;
@@ -122,6 +124,11 @@ struct ide_config
 	uint32_t null;
 	uint32_t prepcnt;
 	regs_t   regs;
+
+	uint32_t xfer_lba;
+	uint16_t xfer_cnt;
+	uint8_t  xfer_multi;
+	uint8_t  xfer_irq;
 
 	drive_t drive[2];
 };

@@ -76,6 +76,8 @@
 #define UIO_GET_FR_CNT  0x42  // get frame counter
 #define UIO_GET_F12_MOD 0x43  // get framework menu key modifier
 #define UIO_HDMI_INT    0x44
+#define UIO_GET_FFB     0x45  // get force feedback request from core (player in bits 15:8)
+#define UIO_ATRIG       0x46
 
 // codes as used by 8bit for file loading from OSD
 #define FIO_FILE_TX     0x53
@@ -192,7 +194,7 @@ void user_io_status_reset();
 
 uint32_t user_io_get_file_crc();
 void user_io_write_gameid(const char *filename, uint32_t crc32_val = 0, const char *product_code = NULL);
-int  user_io_file_mount(const char *name, unsigned char index = 0, char pre = 0, int pre_size = 0);
+int  user_io_file_mount(const char *name, unsigned char index = 0, char pre = 0, int pre_size = 0, int image = 0);
 void user_io_bufferinvalidate(unsigned char index);
 char *user_io_make_filepath(const char *path, const char *filename);
 char *user_io_get_core_name(int orig = 0);
@@ -215,6 +217,7 @@ int user_io_get_joy_transl();
 void user_io_digital_joystick(unsigned char, uint32_t, int);
 void user_io_l_analog_joystick(unsigned char, char, char);
 void user_io_r_analog_joystick(unsigned char, char, char);
+void user_io_analog_triggers(unsigned char, uint8_t, uint8_t);
 void user_io_set_joyswap(int swap);
 int user_io_get_joyswap();
 char user_io_osd_is_visible();
@@ -296,12 +299,15 @@ char is_cdi();
 char is_arcade();
 char is_saturn();
 char is_pcxt();
+char is_pcat286();
 char is_n64();
 char is_uneon();
 char is_atari800();
 char is_atari5200();
 char is_3do();
 char is_marty();
+char is_videobrain();
+char is_pcfx();
 
 #define HomeDir(x) user_io_get_core_path(x)
 #define CoreName user_io_get_core_name()

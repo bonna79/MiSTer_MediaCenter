@@ -1,6 +1,7 @@
 // config.c
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
 #include <sys/stat.h>
@@ -13,6 +14,7 @@
 #include "../../input.h"
 #include "../../cfg.h"
 #include "../../ide.h"
+#include "../../shmem.h"
 #include "minimig_boot.h"
 #include "minimig_fdd.h"
 #include "minimig_config.h"
@@ -26,7 +28,7 @@ const char *config_memory_chip_msg[] = { "512K", "1M",   "1.5M", "2M" };
 const char *config_memory_slow_msg[] = { "none", "512K", "1M",   "1.5M" };
 const char *config_memory_fast_msg[][8] = { { "none", "2M", "4M", "8M", "8M",    "8M",    "8M",   "8M" } ,
 											{ "none", "2M", "4M", "8M", "256M", "384M", "256M", "256M" } };
-const char *config_cpu_msg[] = { "68000", "68010", "-----","68020" };
+const char *config_cpu_msg[] = { "68000", "68010", "68030", "68020" };
 const char *config_chipset_msg[] = { "OCS-A500", "OCS-A1000", "ECS", "---", "---", "---", "AGA", "---" };
 
 typedef struct
@@ -292,6 +294,26 @@ static char UploadKickstart(char *name)
 static char UploadActionReplay()
 {
 	fileTYPE file = {};
+	if (minimig_get_extcfg() & MINIMIG_EXTCFG_AR)
+	{
+		// the Action Replay: AR5's DeMoN v2 build, its ROM ($A80000) and RAM
+		// ($AC0000) image, 512 KB at most; it takes no configuration
+		if (FileOpen(&file, user_io_make_filepath(HomeDir(), "AR5.ROM")) || FileOpen(&file, "AR5.ROM"))
+		{
+			if (file.size > 0x80000)
+			{
+				printf("\nAR5.ROM is larger than 512 KB!\n");
+				FileClose(&file);
+				return(0);
+			}
+			puts("Uploading Action Replay ROM... ");
+			SendFileV2(&file, NULL, 0, 0xa80000, (file.size + 511) >> 9);
+			FileClose(&file);
+			return(1);
+		}
+		puts("\nAR5.ROM not found!\n");
+		return(0);
+	}
 	if(FileOpen(&file, user_io_make_filepath(HomeDir(), "HRTMON.ROM")) || FileOpen(&file, "HRTMON.ROM"))
 	{
 		int adr, data;
@@ -414,7 +436,7 @@ static void ApplyConfiguration(char reloadkickstart)
 
 	printf("Chip RAM size : %s\n", config_memory_chip_msg[memcfg & 0x03]);
 	printf("Slow RAM size : %s\n", config_memory_slow_msg[memcfg >> 2 & 0x03]);
-	printf("Fast RAM size : %s\n", config_memory_fast_msg[(minimig_config.cpu >> 1) & 1][((memcfg >> 4) & 0x03) | ((memcfg & 0x80) >> 5)]);
+	printf("Fast RAM size : %s\n", config_memory_fast_msg[((minimig_config.cpu & 0x23) != 0x23 && (minimig_config.cpu & 2)) ? 1 : 0][((memcfg >> 4) & 0x03) | ((memcfg & 0x80) >> 5)]);
 
 	printf("Floppy drives : %u\n", minimig_floppy_requested_count(minimig_config.floppy.drives));
 	printf("Floppy speed  : %s\n", minimig_config.floppy.speed ? "fast" : "normal");
@@ -468,6 +490,8 @@ static void ApplyConfiguration(char reloadkickstart)
 	minimig_ConfigFloppy(minimig_config.floppy.drives, minimig_config.floppy.speed);
 	minimig_ConfigFloppyExt(minimig_config.externalfloppy.exDrives[0], minimig_config.externalfloppy.exDrives[1], minimig_config.externalfloppy.exDrives[2], minimig_config.externalfloppy.exDrives[3]);
 
+	// the cartridge's type before its image goes up, while the CPU is halted
+	minimig_set_extcfg(minimig_get_extcfg() & ~1);
 	if (minimig_config.memory & 0x40) UploadActionReplay();
 
 	if (reloadkickstart)
@@ -576,6 +600,12 @@ int minimig_cfg_load(int num)
 		else printf("Wrong configuration file size: %d (expected: %u)\n", size, sizeof(minimig_config));
 	}
 
+	if (result && (minimig_config.cpu & 0xe3) != 0x42 && (minimig_config.cpu & 0xe3) != 0x82 && (minimig_config.cpu & 0xe3) != 0x62 && (minimig_config.cpu & 0xe3) != 0xa2)
+		minimig_config.cpu &= ~0xc0;
+
+	if (result && (minimig_config.memory & 0xa0) == 0xa0)
+		minimig_config.memory &= ~0x30;
+
 	if (!result) {
 		BootPrint("Can not open configuration file!\n");
 		BootPrint("Setting config defaults\n");
@@ -610,7 +640,6 @@ int minimig_cfg_load(int num)
 		BootPrintEx(">>> No config found. Using defaults. <<<");
 	}
 
-	if ((minimig_config.cpu & 0x03) == 0x02) minimig_config.cpu |= 0x01;
 	RefreshFloppyPopulation();
 	if (minimig_config.floppy.drives == 4 && !floppy_zero_supported)
 	{
@@ -630,7 +659,7 @@ int minimig_cfg_load(int num)
 	char cfg_str[256];
 	sprintf(cfg_str, "CPU: %s, Chipset: %s, ChipRAM: %s, FastRAM: %s, SlowRAM: %s",
 		config_cpu_msg[minimig_config.cpu & 0x03], config_chipset_msg[(minimig_config.chipset >> 2) & 7],
-		config_memory_chip_msg[(minimig_config.memory >> 0) & 0x03], config_memory_fast_msg[(minimig_config.cpu >> 1) & 1][((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5)], config_memory_slow_msg[(minimig_config.memory >> 2) & 0x03]
+		config_memory_chip_msg[(minimig_config.memory >> 0) & 0x03], config_memory_fast_msg[((minimig_config.cpu & 0x23) != 0x23 && (minimig_config.cpu & 2)) ? 1 : 0][((minimig_config.memory >> 4) & 0x03) | ((minimig_config.memory & 0x80) >> 5)], config_memory_slow_msg[(minimig_config.memory >> 2) & 0x03]
 	);
 	BootPrintEx(cfg_str);
 
@@ -861,7 +890,7 @@ void minimig_ConfigMemory(unsigned char memory)
 
 void minimig_ConfigCPU(unsigned char cpu)
 {
-	spi_uio_cmd8(UIO_MM2_CPU, cpu & 0x3f);
+	spi_uio_cmd8(UIO_MM2_CPU, cpu);
 }
 
 void minimig_ConfigChipset(mm_configTYPE *config)
@@ -889,8 +918,12 @@ void minimig_ConfigFloppyExt(unsigned char drive0, unsigned char drive1, unsigne
 }
 
 void minimig_ConfigUserPort(mm_userportMode mode) {
-	printf("User Port: %s\n", mode == mm_userportMode::mmup_mp32pi ? "MT32pi":"MiSTer Floppy");
-	spi_uio_cmd8(UIO_MM2_USRPORT, mode == mm_userportMode::mmup_mp32pi ? 0 : 1);
+	static const char *names[] = { "MT32pi", "MiSTer Floppy", "SNAC joystick 1", "SNAC joystick 2" };
+	printf("User Port: %s\n", names[mode & 3]);
+	if (mode == mm_userportMode::mmup_snac1 || mode == mm_userportMode::mmup_snac2)
+		spi_uio_cmd8(UIO_MM2_USRPORT, ((mode - 1) << 1) | ((minimig_config.snac_autofire % 3) << 3));
+	else
+		spi_uio_cmd8(UIO_MM2_USRPORT, mode == mm_userportMode::mmup_mp32pi ? 0 : 1);
 }
 
 void minimig_ConfigAutofire(unsigned char autofire, unsigned char mask)
@@ -907,13 +940,70 @@ void minimig_set_extcfg(unsigned int ext_cfg)
 
 	spi_uio_cmd_cont(UIO_SET_STATUS2);
 	spi32_w(0);
-	spi32_w(ext_cfg);
+	spi32_w(minimig_core_extcfg());
 	DisableIO();
 }
 
 unsigned int minimig_get_extcfg()
 {
 	return (minimig_config.ext_cfg2 << 16) | minimig_config.ext_cfg;
+}
+
+#define DSND_ADDR 0x27800000
+#define DSND_SLOT 0x40000
+
+static int dsnd_ok = 0;
+
+int minimig_dsnd_loaded()
+{
+	return dsnd_ok;
+}
+
+unsigned int minimig_core_extcfg()
+{
+	return dsnd_ok ? minimig_get_extcfg() : (minimig_get_extcfg() & ~0x180000);
+}
+
+void minimig_dsnd_load()
+{
+	fileTYPE f = {};
+	dsnd_ok = 0;
+	if (!FileOpen(&f, user_io_make_filepath(HomeDir(), "drivesounds.bin"), 1)) return;
+
+	uint32_t size = (uint32_t)f.size;
+	uint8_t *b = (size > 16 && size <= 16 * DSND_SLOT + 0x1000) ? (uint8_t*)malloc(size) : NULL;
+	uint16_t *mem = b ? (uint16_t*)shmem_map(DSND_ADDR, 16 * DSND_SLOT) : NULL;
+	if (mem && FileReadAdv(&f, b, size) == (int)size && !memcmp(b, "DRIVESND", 8))
+	{
+		for (int n = 0; n < 16; n++) mem[n * (DSND_SLOT / 2)] = 0x8000;
+		for (uint32_t o = 8; o + 8 <= size;)
+		{
+			uint32_t n = (b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3];
+			uint32_t len = (b[o + 4] << 24) | (b[o + 5] << 16) | (b[o + 6] << 8) | b[o + 7];
+			o += 8;
+			if (!len) break;
+			if (n < 16)
+			{
+				uint32_t k = len / 2;
+				if (k > (size - o) / 2) k = (size - o) / 2;
+				if (k > DSND_SLOT / 2 - 1) k = DSND_SLOT / 2 - 1;
+				uint16_t *d = mem + n * (DSND_SLOT / 2);
+				for (uint32_t i = 0; i < k; i++)
+				{
+					uint16_t x = (b[o + 2 * i] << 8) | b[o + 2 * i + 1];
+					d[i] = (x == 0x8000) ? 0x8001 : x;
+				}
+				d[k] = 0x8000;
+			}
+			if (len > size - o) break;
+			o += len;
+		}
+		dsnd_ok = 1;
+	}
+	if (mem) shmem_unmap(mem, 16 * DSND_SLOT);
+	free(b);
+	FileClose(&f);
+	printf("Drive sounds: %s\n", dsnd_ok ? "loaded" : "bad file");
 }
 
 #define CD32_MAIN_ROM  "CD32.rom"

@@ -178,7 +178,7 @@ static track_t *get_track_from_lba(drive_t *drive, uint32_t lba, bool &index0)
 		uint32_t start_lba = i ? drive->track[i-1].start + drive->track[i-1].length : 0;
 		uint32_t end_lba = drive->track[i].start + drive->track[i].length;
 
-		if (lba >= start_lba && lba <= end_lba)
+		if (lba >= start_lba && lba < end_lba)
 		{
 			ret = &drive->track[i];
 			//In the "pregap" section
@@ -187,6 +187,32 @@ static track_t *get_track_from_lba(drive_t *drive, uint32_t lba, bool &index0)
 		}
 	}
 	return ret;
+}
+
+static uint32_t wav_data(const char *name, uint32_t *size)
+{
+	uint32_t ofs = 0;
+	uint8_t h[12];
+	fileTYPE f;
+	if (!name[0] || !FileOpenEx(&f, name, O_RDONLY)) return 0;
+	if (FileReadAdv(&f, h, 12) == 12 && !memcmp(h, "RIFF", 4) && !memcmp(h + 8, "WAVE", 4))
+	{
+		uint32_t pos = 12;
+		for (int i = 0; i < 16 && FileSeek(&f, pos, SEEK_SET) && FileReadAdv(&f, h, 8) == 8; i++)
+		{
+			uint32_t len = h[4] | (h[5] << 8) | (h[6] << 16) | ((uint32_t)h[7] << 24);
+			if (!memcmp(h, "data", 4))
+			{
+				ofs = pos + 8;
+				if (size) *size = len;
+				break;
+			}
+			if (len > f.size) break;
+			pos += 8 + len + (len & 1);
+		}
+	}
+	FileClose(&f);
+	return ofs;
 }
 
 static int add_track(drive_t *drv, track_t *curr, uint32_t &shift, const int32_t prestart, uint32_t &totalPregap, uint32_t currPregap)
@@ -213,7 +239,7 @@ static int add_track(drive_t *drv, track_t *curr, uint32_t &shift, const int32_t
 	if (!drv->track_cnt)
 	{
 		//assertm(curr.number == 1, "The first track must be labelled number 1 [BUG!]");
-		curr->skip = skip * curr->sectorSize;
+		curr->skip = wav_data(curr->filename, 0) + skip * curr->sectorSize;
 		curr->start += currPregap;
 		totalPregap = currPregap;
 
@@ -242,14 +268,16 @@ static int add_track(drive_t *drv, track_t *curr, uint32_t &shift, const int32_t
 	}
 	else
 	{
+		uint32_t data = 0, ofs = wav_data(prev->filename, &data);
 		uint32_t size = FileLoad(prev->filename, 0, 0);
+		if (ofs && data < size - ofs) size = ofs + data;
 		const uint32_t tmp = size - prev->skip;
 		prev->length = tmp / prev->sectorSize;
 
 		if (tmp % prev->sectorSize != 0) prev->length++; // padding
 
 		curr->start += prev->start + prev->length + currPregap;
-		curr->skip = skip * curr->sectorSize;
+		curr->skip = wav_data(curr->filename, 0) + skip * curr->sectorSize;
 		shift += prev->start + prev->length;
 		totalPregap = currPregap;
 	}
@@ -1058,7 +1086,12 @@ void cdrom_read(ide_config *ide)
 	}
 
 
-	if (drive->chd_f) {
+	if (!track)
+	{
+		ide->null = 1;
+		memset(ide_buf, 0, cnt * 2048);
+	}
+	else if (drive->chd_f) {
 
 		uint32_t hdr = track->mode2 ? 24 : 16;
 		if (track->sectorSize == 2048)
@@ -1100,6 +1133,57 @@ void cdrom_read(ide_config *ide)
 
 	ide->regs.pkt_cnt -= cnt;
 	pkt_send(ide, ide_buf, cnt * 2048);
+}
+
+static void cdrom_mode1_edc_ecc(uint8_t *s)
+{
+	static uint32_t edc_lut[256];
+	static uint8_t ecc_f_lut[256], ecc_b_lut[256];
+	if (!edc_lut[1])
+	{
+		for (uint32_t i = 0; i < 256; i++)
+		{
+			uint32_t j = (i << 1) ^ ((i & 0x80) ? 0x11D : 0);
+			ecc_f_lut[i] = (uint8_t)j;
+			ecc_b_lut[i ^ j] = (uint8_t)i;
+			uint32_t edc = i;
+			for (int k = 0; k < 8; k++) edc = (edc >> 1) ^ ((edc & 1) ? 0xD8018001 : 0);
+			edc_lut[i] = edc;
+		}
+	}
+
+	uint32_t edc = 0;
+	for (int i = 0; i < 0x810; i++) edc = (edc >> 8) ^ edc_lut[(edc ^ s[i]) & 0xFF];
+	s[0x810] = (uint8_t)edc;
+	s[0x811] = (uint8_t)(edc >> 8);
+	s[0x812] = (uint8_t)(edc >> 16);
+	s[0x813] = (uint8_t)(edc >> 24);
+	memset(s + 0x814, 0, 8);
+
+	for (int pq = 0; pq < 2; pq++)
+	{
+		uint32_t major_count = pq ? 52 : 86, minor_count = pq ? 43 : 24;
+		uint32_t major_mult = pq ? 86 : 2, minor_inc = pq ? 88 : 86;
+		uint32_t size = major_count * minor_count;
+		uint8_t *dest = s + (pq ? 0x8C8 : 0x81C);
+		for (uint32_t major = 0; major < major_count; major++)
+		{
+			uint32_t index = (major >> 1) * major_mult + (major & 1);
+			uint8_t a = 0, b = 0;
+			for (uint32_t minor = 0; minor < minor_count; minor++)
+			{
+				uint8_t t = s[0xC + index];
+				index += minor_inc;
+				if (index >= size) index -= size;
+				a ^= t;
+				b ^= t;
+				a = ecc_f_lut[a];
+			}
+			a = ecc_b_lut[ecc_f_lut[a] ^ b];
+			dest[major] = a;
+			dest[major + major_count] = a ^ b;
+		}
+	}
 }
 
 int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
@@ -1152,6 +1236,7 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 			                           BYTES_PER_COOKED_REDBOOK_FRAME, buf,
 			                           drive->chd_hunkbuf, &drive->chd_hunknum)
 			    != CHDERR_NONE) return -1;
+			cdrom_mode1_edc_ecc(buf);
 			return 0;
 		}
 
@@ -1193,6 +1278,7 @@ int cdrom_read_raw_sector(drive_t *drive, uint32_t lba, uint8_t *buf)
 		buf[14] = (uint8_t)(((ff / 10) << 4) | (ff % 10));
 		buf[15] = 0x01;
 		if (FileReadAdv(&track->f, buf + 16, 2048, -1) <= 0) return -1;
+		cdrom_mode1_edc_ecc(buf);
 		return 0;
 	}
 
@@ -1919,7 +2005,7 @@ void ide_cdda_send_sector()
 	bool needs_swap = false;
 	track_t *track = get_track_from_lba(drv, drv->play_start_lba, is_index0);
 
-	if (!track->attr)
+	if (track && !track->attr)
 	{
 		if (drv->chd_f)
 		{
