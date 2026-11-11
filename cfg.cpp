@@ -624,7 +624,8 @@ void cfg_parse()
 	cfg.physical_disc_mount_delay = 2;	
 	cfg.physical_disc_acoustic = 0;	
 	cfg.physical_disc_boot = 0;
-	strcpy(cfg.physical_disc_audio_cd, "PSX");
+	// empty: MediaCenter when installed, otherwise the PSX core (physical_disc_launch.cpp)
+	cfg.physical_disc_audio_cd[0] = 0;
 	cfg.video_brightness = 50;
 	cfg.video_contrast = 50;
 	cfg.video_saturation = 100;

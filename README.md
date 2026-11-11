@@ -347,7 +347,7 @@ Serve solo questo secondo avvio, nient'altro: niente riavvii del MiSTer e niente
 | Video DivX, Xvid, MP4, MKV, MPEG e VOB | Da **Scripts → mediacenter**, scegliendo SD, USB o rete | Tracce audio, capitoli (o salti di 60 secondi), avanti e indietro veloce |
 | Immagini DVD `.iso` e cartelle `VIDEO_TS` | Da **Scripts → mediacenter** | Come un DVD |
 | Musica MP1, MP2, MP3, Ogg, FLAC, WAV e AAC | Da **Scripts → mediacenter** | I brani di una cartella si ascoltano di seguito, come un album |
-| CD audio | Parte da solo, con il core indicato in `AUDIOCD=` oppure con [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi) | |
+| CD audio (anche CD Extra) e immagini `.bin`/`.cue` audio | Parte da solo nella schermata audio di `mediacenter` (oppure con il core indicato in `AUDIOCD=` o con [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi)) | Brani di seguito senza pause, nomi dal CD-Text, ◄► brano, L/R veloce |
 | Giochi PSX, Saturn, Mega CD, PC Engine CD… | Partono da soli, con i core di `_Physical Disc Cores` | Gestiti dal Main di Physical Disc |
 
 I CD-R con file DivX o MP3 non partono da soli: si aprono da **Scripts → mediacenter → Disco nel lettore**.
@@ -521,7 +521,7 @@ Altre impostazioni facoltative, nella sezione `[menu]`:
 | Impostazione | Valori | Effetto |
 | --- | --- | --- |
 | `DVD=` | `MEDIACENTER`, `HYBRID`, `FPGA` | Sceglie cosa apre i DVD-Video. Se manca, usa `mediacenter`; se `mediacenter` non è installato, apre il core [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) |
-| `AUDIOCD=` | `PSX`, `A0CD-Saturn`, `A0CD-MegaCD`, `MISTERHIFI`, … | Sceglie il programma o il core per i CD audio. Con `A0CD-MegaCD` i CD+G del karaoke si vedono sul Mega CD |
+| `AUDIOCD=` | `MEDIACENTER`, `PSX`, `A0CD-Saturn`, `A0CD-MegaCD`, `MISTERHIFI`, … | Sceglie il programma o il core per i CD audio. Se manca, usa `mediacenter`; se `mediacenter` non è installato, il core PSX. Con `A0CD-MegaCD` i CD+G del karaoke si vedono sul Mega CD |
 | `PHYSICAL_DISC_MGL=` | `0`, `1` | Con `0` il riconoscimento automatico dei dischi è spento |
 
 Dopo le modifiche riavvia il MiSTer.

@@ -287,6 +287,15 @@ static int menu_audio_hifi(void)
 	return name && !strcasecmp(name, "MISTERHIFI");
 }
 
+// Audio CDs go to MiSTer MediaCenter with AUDIOCD=MEDIACENTER, and when
+// AUDIOCD= is not set and MediaCenter is installed (user's choice 11-11).
+static int menu_audio_mediacenter(void)
+{
+	const char *name = cfg.physical_disc_audio_cd;
+	if (name && !strcasecmp(name, "MEDIACENTER")) return 1;
+	return (!name || !*name) && mediacenter_installed();
+}
+
 static const char *menu_audio_mgl(void)
 {
 	const char *name = cfg.physical_disc_audio_cd;
@@ -551,6 +560,23 @@ int physical_disc_launch_menu_tick(void)
 		physical_disc_close();
 		menu_detecting = 0;
 		return menu_launch_vcd_player();
+	}
+
+	if (type == PHYSICAL_DISC_DISC_AUDIO && menu_audio_mediacenter())
+	{
+		char device[64];
+		snprintf(device, sizeof(device), "%s", physical_disc_device());
+		menu_write_handled(fingerprint);
+		physical_disc_close();
+		menu_detecting = 0;
+		if (!mediacenter_installed())
+		{
+			printf("DISC: AUDIOCD=MEDIACENTER but %s is not installed\n", MEDIACENTER_PATH);
+			Info("MediaCenter not installed", 5000);
+			return 0;
+		}
+		printf("DISC: Audio CD, opening MediaCenter\n");
+		return mediacenter_launch_disc(device);
 	}
 
 	const int launch_hifi = type == PHYSICAL_DISC_DISC_AUDIO && menu_audio_hifi();

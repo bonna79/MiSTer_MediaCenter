@@ -316,6 +316,12 @@ static int open_audio_track(int index)
 // media_io instead of a file, and its chapters come from ENTRIES.SVD.
 static AVIOContext *media_io = NULL;
 static int svcd_on = 0;
+// An audio CD playing (cdda.c): its tracks are the chapters.
+static int cdda_on = 0;
+static int cd_chapters(void);
+static int cd_chapter_index(double t);
+static double cd_chapter_start(int c);
+static void cd_screen(double *time, double *dur);
 // The disc in the drive played through FFmpeg: "Super Video CD" or "Video CD".
 static const char *svcd_kind = "Super Video CD";
 static double svcd_chapter[MAX_ENTRIES];
@@ -2466,12 +2472,14 @@ static void media_resume(double t)
 
 static int num_chapters(void)
 {
+	if (cdda_on) return cd_chapters();
 	return svcd_on ? svcd_chapters : (int)mc.fmt->nb_chapters;
 }
 
 static int chapter_index(double t)
 {
 	int c = -1;
+	if (cdda_on) return cd_chapter_index(t);
 	if (svcd_on)
 	{
 		for (int i = 0; i < svcd_chapters; i++) if (svcd_chapter[i] <= t + 0.5) c = i;
@@ -2487,6 +2495,7 @@ static int chapter_index(double t)
 
 static double chapter_start(int c)
 {
+	if (cdda_on) return cd_chapter_start(c);
 	if (svcd_on) return svcd_chapter[c];
 	AVChapter *ch = mc.fmt->chapters[c];
 	return ts_seconds(ch->start, ch->time_base) - mc.start;
@@ -2639,7 +2648,7 @@ static int media_play(int in_playlist)
 			case KEY_LEFT:
 			case KEY_PREVIOUSSONG:
 				if (in_playlist && mc.audio_only && mc.clock < 3.0) result = END_PREV;
-				else if (mc.audio_only) media_seek(0);
+				else if (mc.audio_only && !cdda_on) media_seek(0);
 				else if (num_chapters())
 				{
 					int c = chapter_index(mc.clock);
@@ -2773,7 +2782,9 @@ static int media_play(int in_playlist)
 			// the audio player screen, 60 pictures a second
 			double heard = mc.clock;
 			if (audio_pipe && !isnan(sent_end)) heard = sent_end - audio_queued();
-			aui_tick(t, p.state, p.confirm_exit, (p.state == ST_FF || p.state == ST_REW) ? p.ff_time : mc.clock, mc.duration, heard);
+			double at = (p.state == ST_FF || p.state == ST_REW) ? p.ff_time : mc.clock, dur = mc.duration;
+			if (cdda_on) cd_screen(&at, &dur); // the track's time, number and name
+			aui_tick(t, p.state, p.confirm_exit, at, dur, heard);
 			p.dirty = 0;
 		}
 		int show_osd = !aui.on && (p.state == ST_STOP || t < p.osd_until || mc.audio_only || play_osd_keep);
@@ -3303,6 +3314,8 @@ static int boot_wait(void)
 	return back;
 }
 
+#include "cdda.c"
+
 static int play_disc_in_drive(const char *device)
 {
 	char path[32];
@@ -3320,7 +3333,19 @@ static int play_disc_in_drive(const char *device)
 	int fd = open_drive(device);
 	if (fd < 0) return -1;
 	cd_fd = fd;
-	const char *kind = (read_toc() == 0) ? detect_vcd_kind() : NULL;
+	int toc_ok = read_toc() == 0;
+	const char *kind = toc_ok ? detect_vcd_kind() : NULL;
+
+	// audio CD (also a CD Extra: audio tracks, then data): the audio screen
+	if (!kind && toc_ok && !tracks[track_first].data)
+	{
+		printf("mediacenter: CD audio, %d traccia/e\n", track_last);
+		if (reopen_screen()) return -1;
+		if (!boot_wait()) cdda_play(NULL);
+		close(cd_fd);
+		cd_fd = -1;
+		return 0;
+	}
 
 	// Super Video CD (MPEG-2) and Video CD (MPEG-1): FFmpeg, so the screen
 	// is set up for the CRT as for a DVD (the Video CD player kept the HDMI
@@ -3432,7 +3457,12 @@ static int play_cue_image(const char *cue)
 	const char *kind = detect_vcd_kind();
 	printf("mediacenter: image %s: %s, %d track(s)\n", bin, kind ? kind : "not a Video CD", last);
 	int r = -1;
-	if (kind && strcmp(kind, "Video CD"))
+	if (!kind && tracks[1].data == 0 && tracks[1].start >= 0)
+	{
+		// an audio CD image
+		if (!reopen_screen()) { cdda_play(cue); r = 0; }
+	}
+	else if (kind && strcmp(kind, "Video CD"))
 	{
 		if (!reopen_screen()) { svcd_play(); r = 0; }
 	}

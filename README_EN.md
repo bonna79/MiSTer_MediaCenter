@@ -349,7 +349,7 @@ Only this second start is needed: no MiSTer restart and no change to `MiSTer.ini
 | DivX, Xvid, MP4, MKV, MPEG and VOB video | From **Scripts → mediacenter**, choosing SD, USB or network | Audio tracks, chapters (or 60-second jumps), fast forward and rewind |
 | DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → mediacenter** | As a DVD |
 | MP1, MP2, MP3, Ogg, FLAC, WAV and AAC music | From **Scripts → mediacenter** | The tracks of a folder play one after the other, like an album |
-| Audio CDs | Start by themselves, with the core set in `AUDIOCD=` or with [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi) | |
+| Audio CDs (CD Extra too) and audio `.bin`/`.cue` images | Start by themselves in the `mediacenter` audio screen (or with the core set in `AUDIOCD=` or with [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi)) | Tracks play with no gaps, names from CD-Text, ◄► track, L/R fast |
 | PSX, Saturn, Mega CD, PC Engine CD… games | Start by themselves, with the `_Physical Disc Cores` | Handled by the Physical Disc Main |
 
 CD-Rs with DivX or MP3 files do not start by themselves: open them from **Scripts → mediacenter → Disco nel lettore**.
@@ -523,7 +523,7 @@ Other optional settings, in the `[menu]` section:
 | Setting | Values | Effect |
 | --- | --- | --- |
 | `DVD=` | `MEDIACENTER`, `HYBRID`, `FPGA` | Chooses what opens DVD-Video. When missing, `mediacenter` is used; if `mediacenter` is not installed, the [MiSTer_DVD](https://github.com/owenb321/MiSTer_DVD) core opens |
-| `AUDIOCD=` | `PSX`, `A0CD-Saturn`, `A0CD-MegaCD`, `MISTERHIFI`, … | Chooses the program or core for audio CDs. With `A0CD-MegaCD`, CD+G karaoke discs show on the Mega CD |
+| `AUDIOCD=` | `MEDIACENTER`, `PSX`, `A0CD-Saturn`, `A0CD-MegaCD`, `MISTERHIFI`, … | Chooses the program or core for audio CDs. When missing, `mediacenter` is used; if `mediacenter` is not installed, the PSX core. With `A0CD-MegaCD`, CD+G karaoke discs show on the Mega CD |
 | `PHYSICAL_DISC_MGL=` | `0`, `1` | `0` turns automatic disc detection off |
 
 Restart the MiSTer after the changes.
