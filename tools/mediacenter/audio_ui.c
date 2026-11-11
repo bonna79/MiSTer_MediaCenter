@@ -549,6 +549,7 @@ static const char *aui_codec_name(enum AVCodecID id)
 	case AV_CODEC_ID_MP1: return "MP1";
 	case AV_CODEC_ID_FLAC: return "FLAC";
 	case AV_CODEC_ID_VORBIS: return "OGG Vorbis";
+	case AV_CODEC_ID_OPUS: return "Opus";
 	case AV_CODEC_ID_AAC: return "AAC";
 	case AV_CODEC_ID_ALAC: return "ALAC";
 	case AV_CODEC_ID_AC3: return "AC3";

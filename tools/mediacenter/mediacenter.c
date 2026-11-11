@@ -116,7 +116,7 @@ static void fit_text(char *dst, size_t len, const char *src, int max)
 // ---------------------------------------------------------------------------
 
 static const char *const video_ext[] = { "avi", "divx", "xvid", "mkv", "mp4", "m4v", "mov", "mpg", "mpeg", "vob", "dat", "ts", "m2ts", "mts", "ogm", "ogv", "wmv", "asf", "iso", "cue", NULL };
-static const char *const audio_ext[] = { "mp3", "mp2", "mp1", "mpa", "ogg", "oga", "flac", "wav", "m4a", "aac", "ac3", "dts", "wma", "mka", NULL };
+static const char *const audio_ext[] = { "mp3", "mp2", "mp1", "mpa", "ogg", "oga", "opus", "flac", "wav", "m4a", "aac", "ac3", "dts", "wma", "mka", NULL };
 
 static int has_ext(const char *name, const char *const *list)
 {
