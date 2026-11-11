@@ -348,7 +348,7 @@ Only this second start is needed: no MiSTer restart and no change to `MiSTer.ini
 | Data DVDs (DVD-R or DVD+R) with DivX, MP4, MP3… | The file list opens by itself when you insert the disc | As for files |
 | DivX, Xvid, MP4, MKV, MPEG and VOB video | From **Scripts → mediacenter**, choosing SD, USB or network | Audio tracks, chapters (or 60-second jumps), fast forward and rewind |
 | DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → mediacenter** | As a DVD |
-| MP1, MP2, MP3, Ogg, FLAC, WAV and AAC music | From **Scripts → mediacenter** | The tracks of a folder play one after the other, like an album |
+| MP1, MP2, MP3, Ogg, Opus, FLAC, WAV and AAC music; MOD, XM, S3M, IT tracker modules (and MED, MTM, 669, OKT, STM...) | From **Scripts → mediacenter** | The tracks of a folder play one after the other, like an album |
 | Audio CDs (CD Extra too) and audio `.bin`/`.cue` images | Start by themselves in the `mediacenter` audio screen (or with the core set in `AUDIOCD=` or with [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi)) | Tracks play with no gaps, names from CD-Text, ◄► track, L/R fast |
 | PSX, Saturn, Mega CD, PC Engine CD… games | Start by themselves, with the `_Physical Disc Cores` | Handled by the Physical Disc Main |
 
@@ -626,7 +626,7 @@ During playback `mediacenter` sets the Linux framebuffer to the picture size wit
 
 The `.github/workflows/build.yml` workflow builds the Main and the player on every push with ARM GCC 10.2 (`arm-none-linux-gnueabihf`). A commit with `[release]` in its message, or a `v*` tag, publishes a release with the zip; the version number is in the `VERSION` file. The `.github/workflows/fpga.yml` workflow builds the menu core (`fpga/menu`) with Quartus 17.0.
 
-Locally, `make` builds the Main. `mediacenter` needs FFmpeg 6.1.2, libdvdread 6.1.3 and libdvdnav 6.1.1, built statically for the ARM:
+Locally, `make` builds the Main. `mediacenter` needs FFmpeg 6.1.2, libdvdread 6.1.3, libdvdnav 6.1.1 and libxmp 4.6.3, built statically for the ARM:
 
 ```sh
 git clone --depth 1 -b n6.1.2 https://github.com/FFmpeg/FFmpeg.git ffmpeg-src
@@ -634,7 +634,9 @@ tools/mediacenter/build_ffmpeg.sh ffmpeg-src ffmpeg-arm
 curl -fsSL https://download.videolan.org/pub/videolan/libdvdread/6.1.3/libdvdread-6.1.3.tar.bz2 | tar -xj
 curl -fsSL https://download.videolan.org/pub/videolan/libdvdnav/6.1.1/libdvdnav-6.1.1.tar.bz2 | tar -xj
 tools/mediacenter/build_dvdnav.sh libdvdread-6.1.3 libdvdnav-6.1.1 dvdnav-arm
-make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
+curl -fsSLO http://archive.ubuntu.com/ubuntu/pool/universe/libx/libxmp/libxmp_4.6.3.orig.tar.gz && tar -xzf libxmp_4.6.3.orig.tar.gz
+tools/mediacenter/build_libxmp.sh libxmp-4.6.3 xmp-arm
+make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm XMP=$PWD/xmp-arm
 ```
 
 ## Thanks
@@ -645,4 +647,4 @@ make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm
 
 ## Origin and license
 
-MiSTer MediaCenter derives from [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer), the MiSTer menu core and Anime0t4ku's Physical Disc support for physical discs. It uses FFmpeg, libdvdread and libdvdnav. It is distributed under the GPL-3.0 license, like the projects it derives from: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+MiSTer MediaCenter derives from [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer), the MiSTer menu core and Anime0t4ku's Physical Disc support for physical discs. It uses FFmpeg, libdvdread, libdvdnav and libxmp. It is distributed under the GPL-3.0 license, like the projects it derives from: see [LICENSE](LICENSE) and [NOTICE](NOTICE).

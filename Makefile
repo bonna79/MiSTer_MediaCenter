@@ -136,6 +136,8 @@ $(VCD_PLAYER): tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h
 # loaded at run time.
 FFMPEG ?= ffmpeg-arm
 DVDNAV ?= dvdnav-arm
+# static libxmp (tracker modules), built with tools/mediacenter/build_libxmp.sh
+XMP ?= xmp-arm
 # build number written on the splash (the CI passes its run number)
 MC_BUILD ?= locale
 MEDIACENTER = $(BUILDDIR)/mediacenter
@@ -143,11 +145,11 @@ MEDIACENTER = $(BUILDDIR)/mediacenter
 .PHONY: mediacenter
 mediacenter: $(MEDIACENTER)
 
-$(MEDIACENTER): tools/mediacenter/mediacenter.c tools/mediacenter/dvd.c tools/mediacenter/zctest.c tools/mediacenter/zerocopy.c tools/mediacenter/accel.c tools/mediacenter/accel_link.c tools/mediacenter/audio_ui.c tools/mediacenter/cdda.c tools/mediacenter/audio_font.h tools/mediacenter/splash.h tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h tools/vcd_player/vcd_font.h
+$(MEDIACENTER): tools/mediacenter/mediacenter.c tools/mediacenter/dvd.c tools/mediacenter/zctest.c tools/mediacenter/zerocopy.c tools/mediacenter/accel.c tools/mediacenter/accel_link.c tools/mediacenter/audio_ui.c tools/mediacenter/cdda.c tools/mediacenter/modplay.c tools/mediacenter/audio_font.h tools/mediacenter/splash.h tools/vcd_player/vcd_player.c tools/vcd_player/pl_mpeg.h tools/vcd_player/vcd_font.h
 	@mkdir -p $(BUILDDIR)
 	$(Q)$(info $@)
-	$(Q)$(CC) -O2 -fno-tree-vectorize -g -Wall -std=gnu99 -DMC_BUILD='"$(MC_BUILD)"' -I$(FFMPEG)/include -I$(DVDNAV)/include -o $@ $< \
-		-L$(FFMPEG)/lib -L$(DVDNAV)/lib -Wl,-Bstatic -ldvdnav -ldvdread -lavformat -lavcodec -lswscale -lswresample -lavutil \
+	$(Q)$(CC) -O2 -fno-tree-vectorize -g -Wall -std=gnu99 -DMC_BUILD='"$(MC_BUILD)"' -I$(FFMPEG)/include -I$(DVDNAV)/include -I$(XMP)/include -o $@ $< \
+		-L$(FFMPEG)/lib -L$(DVDNAV)/lib -L$(XMP)/lib -Wl,-Bstatic -lxmp -ldvdnav -ldvdread -lavformat -lavcodec -lswscale -lswresample -lavutil \
 		-Wl,-Bdynamic -ldl -lm -lpthread
 	$(Q)cp $@ $@.elf
 	$(Q)$(STRIP) $@

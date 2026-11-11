@@ -127,14 +127,26 @@ static int has_ext(const char *name, const char *const *list)
 	return 0;
 }
 
+// Tracker modules, played by libxmp (modplay.c).
+static const char *const mod_ext[] = { "mod", "xm", "s3m", "it", "mtm", "669", "med", "mmd0", "mmd1", "mmd2", "mmd3",
+	"okt", "okta", "stm", "far", "ult", "ptm", "amf", "dbm", "mdl", "imf", "gdm", "rtm", "umx", "dsm", "mgt", NULL };
+
+// Amiga modules are often named "mod.title" instead of "title.mod".
+static int is_module_file(const char *name)
+{
+	const char *base = strrchr(name, '/');
+	base = base ? base + 1 : name;
+	return has_ext(name, mod_ext) || !strncasecmp(base, "mod.", 4);
+}
+
 static int is_media(const char *name)
 {
-	return has_ext(name, video_ext) || has_ext(name, audio_ext);
+	return has_ext(name, video_ext) || has_ext(name, audio_ext) || is_module_file(name);
 }
 
 static int is_audio_file(const char *name)
 {
-	return has_ext(name, audio_ext);
+	return has_ext(name, audio_ext) || is_module_file(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -3315,6 +3327,7 @@ static int boot_wait(void)
 }
 
 #include "cdda.c"
+#include "modplay.c"
 
 static int play_disc_in_drive(const char *device)
 {
@@ -3481,6 +3494,7 @@ static int play_file(const char *path, int in_playlist)
 		play_cue_image(path);
 		return END_DONE;
 	}
+	if (is_module_file(path)) return mod_play(path, in_playlist);
 	if (media_open(path)) return END_DONE;
 	native_retry();
 	native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");

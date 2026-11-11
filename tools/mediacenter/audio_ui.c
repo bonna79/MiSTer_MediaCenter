@@ -66,6 +66,8 @@ static int aui_saver;
 // in the folder; set by the browser before each file.
 static int aui_track, aui_tracks;
 static const char *aui_path;
+// The format shown instead of the codec's (tracker modules, modplay.c).
+static const char *(*aui_fmt_label)(void);
 
 // ---------------------------------------------------------------------------
 // Equalizer
@@ -615,6 +617,7 @@ static void aui_info(const char *path)
 			ch == 1 ? "Mono" : ch == 2 ? "Stereo" : "Multicanale");
 		aui_latin1(aui.fmt, sizeof(aui.fmt), tmp);
 	}
+	if (aui_fmt_label && aui_fmt_label()) aui_latin1(aui.fmt, sizeof(aui.fmt), aui_fmt_label());
 
 	// file name; the title from the tags, otherwise the name without extension
 	const char *base = path ? strrchr(path, '/') : NULL;
