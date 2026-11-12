@@ -279,6 +279,10 @@ static char *jf_http(const char *method, const char *path, const char *body, int
 	if (r < 0) return NULL;
 	size_t cap = 65536, len = 0;
 	char *buf = (char *)malloc(cap);
+	// A reply with no body (204 to a report) makes FFmpeg print
+	// "Stream ends prematurely": harmless, kept out of the log.
+	int log_level = av_log_get_level();
+	av_log_set_level(AV_LOG_FATAL);
 	while (buf)
 	{
 		if (cap - len < 16384)
@@ -293,6 +297,7 @@ static char *jf_http(const char *method, const char *path, const char *body, int
 		len += n;
 	}
 	avio_closep(&pb);
+	av_log_set_level(log_level);
 	if (buf) buf[len] = 0;
 	return buf;
 }
@@ -864,6 +869,22 @@ static int jf_container_ok(const char *c)
 	return 0;
 }
 
+// Frame rate of the video, as Jellyfin itself takes it: AverageFrameRate,
+// RealFrameRate when that is missing or reads 1000. 0 when not known.
+static double jf_video_fps(jv *src)
+{
+	jv *streams = src ? jv_get(src, "MediaStreams") : NULL;
+	for (jv *s = streams ? streams->c : NULL; s; s = s->nx)
+	{
+		const char *codec = jv_str(s, "Codec");
+		if (strcmp(jv_str(s, "Type"), "Video") || !strcmp(codec, "mjpeg") || !strcmp(codec, "png")) continue;
+		double fps = jv_num(s, "AverageFrameRate", 0);
+		if (fps <= 0 || fps >= 1000) fps = jv_num(s, "RealFrameRate", 0);
+		if (fps > 0) return fps;
+	}
+	return 0;
+}
+
 // Whether the original file plays here as it is; why not in why.
 static int jf_direct_ok(jv *src, int audio_item, char *why, size_t wlen)
 {
@@ -956,6 +977,7 @@ static int jf_play(const jf_item_t *it, int in_playlist, int ask)
 	snprintf(src_id, sizeof(src_id), "%s", src ? jv_str(src, "Id") : it->id);
 	if (!src_id[0]) snprintf(src_id, sizeof(src_id), "%s", it->id);
 	int direct = src ? jf_direct_ok(src, audio, why, sizeof(why)) : 1;
+	double fps = audio ? 0 : jf_video_fps(src);
 	double resume_ticks = jv_num(jv_get(d, "UserData"), "PlaybackPositionTicks", 0);
 	char name[200], series[160];
 	snprintf(name, sizeof(name), "%s", jv_str(d, "Name"));
@@ -974,13 +996,20 @@ static int jf_play(const jf_item_t *it, int in_playlist, int ask)
 	}
 	else if (direct) snprintf(url, sizeof(url), "%s/Videos/%s/stream?static=true&MediaSourceId=%s", jf_server, it->id, src_id);
 	else
-		// HLS from the server: H.264 up to 1920x1080, 8 bit, AC3 5.1
+	{
+		// HLS from the server: H.264 8 bit, AC3 5.1. Up to 1920x1080 for
+		// 24/25 fps; above 25 fps the accelerator cannot finish 1080p
+		// pictures in time (43 ms each, 33 ms at 30 fps): ask for 1280x720.
+		int hd = fps > 0 && fps <= 25.5;
 		snprintf(url, sizeof(url), "%s/Videos/%s/master.m3u8?MediaSourceId=%s&DeviceId=%s&PlaySessionId=%s"
-			"&VideoCodec=h264&AudioCodec=ac3&MaxWidth=1920&MaxHeight=1080&MaxVideoBitDepth=8&VideoBitrate=12000000"
+			"&VideoCodec=h264&AudioCodec=ac3&MaxWidth=%d&MaxHeight=%d&MaxVideoBitDepth=8&VideoBitrate=12000000"
 			"&AudioBitrate=448000&MaxAudioChannels=6&TranscodingMaxAudioChannels=6&SegmentContainer=ts&BreakOnNonKeyFrames=false",
-			jf_server, it->id, src_id, jf_devid, session);
-	printf("mediacenter: Jellyfin: %s, %s%s%s\n", name, direct ? "file originale" : "convertito dal server (",
-		direct ? "" : why, direct ? "" : ")");
+			jf_server, it->id, src_id, jf_devid, session, hd ? 1920 : 1280, hd ? 1080 : 720);
+	}
+	if (direct) printf("mediacenter: Jellyfin: %s, file originale\n", name);
+	else if (audio) printf("mediacenter: Jellyfin: %s, convertito dal server (%s)\n", name, why);
+	else printf("mediacenter: Jellyfin: %s, convertito dal server (%s, %.3f fps -> %s)\n", name, why, fps,
+		fps > 0 && fps <= 25.5 ? "1080p" : "720p");
 
 	double start = 0;
 	if (ask && !audio && resume_ticks > 10000000.0 * 30)
