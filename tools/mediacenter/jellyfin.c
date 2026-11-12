@@ -997,19 +997,23 @@ static int jf_play(const jf_item_t *it, int in_playlist, int ask)
 	else if (direct) snprintf(url, sizeof(url), "%s/Videos/%s/stream?static=true&MediaSourceId=%s", jf_server, it->id, src_id);
 	else
 	{
-		// HLS from the server: H.264 8 bit, AC3 5.1. Up to 1920x1080 for
-		// 24/25 fps; above 25 fps the accelerator cannot finish 1080p
-		// pictures in time (43 ms each, 33 ms at 30 fps): ask for 1280x720.
+		// HLS from the server: H.264 8 bit, AC3 5.1. The accelerator's time
+		// grows with the size of each picture: at 12 Mbit/s (about 49 KB a
+		// picture) it needed 35-43 ms, more than 33 ms at 30 fps. So 1080p
+		// at 8 Mbit/s for 24/25 fps; 720p at 6 Mbit/s above 25 fps, and
+		// above 30 fps the server is asked to bring it down to 30.
 		int hd = fps > 0 && fps <= 25.5;
+		char fr[24] = "";
+		if (fps > 30.5) snprintf(fr, sizeof(fr), "&MaxFramerate=30");
 		snprintf(url, sizeof(url), "%s/Videos/%s/master.m3u8?MediaSourceId=%s&DeviceId=%s&PlaySessionId=%s"
-			"&VideoCodec=h264&AudioCodec=ac3&MaxWidth=%d&MaxHeight=%d&MaxVideoBitDepth=8&VideoBitrate=12000000"
+			"&VideoCodec=h264&AudioCodec=ac3&MaxWidth=%d&MaxHeight=%d&MaxVideoBitDepth=8&VideoBitrate=%d%s"
 			"&AudioBitrate=448000&MaxAudioChannels=6&TranscodingMaxAudioChannels=6&SegmentContainer=ts&BreakOnNonKeyFrames=false",
-			jf_server, it->id, src_id, jf_devid, session, hd ? 1920 : 1280, hd ? 1080 : 720);
+			jf_server, it->id, src_id, jf_devid, session, hd ? 1920 : 1280, hd ? 1080 : 720, hd ? 8000000 : 6000000, fr);
 	}
 	if (direct) printf("mediacenter: Jellyfin: %s, file originale\n", name);
 	else if (audio) printf("mediacenter: Jellyfin: %s, convertito dal server (%s)\n", name, why);
 	else printf("mediacenter: Jellyfin: %s, convertito dal server (%s, %.3f fps -> %s)\n", name, why, fps,
-		fps > 0 && fps <= 25.5 ? "1080p" : "720p");
+		fps > 0 && fps <= 25.5 ? "1080p 8 Mbit/s" : fps > 30.5 ? "720p 30 fps 6 Mbit/s" : "720p 6 Mbit/s");
 
 	double start = 0;
 	if (ask && !audio && resume_ticks > 10000000.0 * 30)
