@@ -1034,7 +1034,6 @@ static int jf_play(const jf_item_t *it, int in_playlist, int ask)
 		jf_message("Jellyfin", "Non riesco ad aprire questo titolo");
 		return END_DONE;
 	}
-	if (start > 0) media_seek(start);
 
 	// the title for the controls and the audio screen
 	char title[300], disp[600], clean[200], cseries[160];
@@ -1053,6 +1052,7 @@ static int jf_play(const jf_item_t *it, int in_playlist, int ask)
 	native_retry();
 	native_fb = !mc.audio_only && !getenv("MC_ARMSCALE");
 	aui_path = disp;
+	play_from = start;
 	int r = media_play(in_playlist);
 	// Stop takes the video back to the start: the place it had then
 	double pos = stop_pos >= 0 ? stop_pos : mc.clock;

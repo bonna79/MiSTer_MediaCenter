@@ -2554,6 +2554,10 @@ static int (*play_end_hook)(void);              // 0: end; 1: play again; 2: kee
 static void (*play_osd_hook)(osd_info_t *info); // menu choice on the controls
 static int play_osd_keep = 0;                   // controls always on screen (a menu)
 
+// Where the next media_play starts (seconds, a saved place), -1 from the
+// beginning: set just before media_play, used once.
+static double play_from = -1;
+
 // Plays the open file. Returns how playback ended.
 static int media_play(int in_playlist)
 {
@@ -2580,6 +2584,10 @@ static int media_play(int in_playlist)
 	cpu_diag(now_seconds(), 1);
 	vt_start();
 	preroll_start();
+	// a saved place: started from the key picture before it, as after fast
+	// forward, or the pictures up to the next key one would all be late
+	if (play_from > 0) media_resume(play_from);
+	play_from = -1;
 	frames_shown = frames_dropped = 0;
 	draw_convert = draw_present = 0;
 	draw_count = 0;
