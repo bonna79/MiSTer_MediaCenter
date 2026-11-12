@@ -1296,7 +1296,7 @@ static void main_idle(int on)
 // They are looked for again while a video plays, every second in its first
 // 20 s and every 10 s after: MiSTer Remote starts only once the wifi is up,
 // half a minute after power-on, and may start just as the video does.
-// mediacenter.sh starts them again also if the player does not end normally.
+// Mister_Media_Center.sh starts them again also if the player does not end normally.
 static const char *const bg_names[] = { "remote.sh" };
 static pid_t bg_pids[8];
 static int bg_count;
@@ -4972,7 +4972,7 @@ int main(int argc, char *argv[])
 	// Zero-copy feasibility test (zctest.c).
 	if (arg && !strcmp(arg, "--zctest") && argc > 2) return zctest(argv[2]);
 
-	// The console back in text mode (mediacenter.sh, after a crash).
+	// The console back in text mode (Mister_Media_Center.sh, after a crash).
 	if (arg && !strcmp(arg, "--console-text"))
 	{
 		int fd = open("/dev/tty0", O_RDWR | O_NOCTTY | O_CLOEXEC);

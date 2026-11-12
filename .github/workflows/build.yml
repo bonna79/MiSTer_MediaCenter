@@ -88,7 +88,7 @@ jobs:
           path: |
             bin/mediacenter
             dvdcss/libdvdcss.so.2
-            Scripts/mediacenter.sh
+            Scripts/Mister_Media_Center.sh
 
       # The menu core is compiled by fpga.yml (Quartus, only when fpga/ changes).
       # The release takes the core build the user tested, by its run id: the
@@ -117,7 +117,7 @@ jobs:
           cp dvdcss/libdvdcss.so.2 pkg/dvdcss/
           cp bin/MiSTer_MediaCenter pkg/
           cp bin/mediacenter pkg/linux/
-          cp Scripts/mediacenter.sh pkg/Scripts/
+          cp Scripts/Mister_Media_Center.sh pkg/Scripts/
           cp LICENSE pkg/linux/mediacenter-LICENSE
           # the MiSTer.ini lines to copy (not a MiSTer.ini: it would replace the user's)
           cp docs/MMC_MiSTer_ini.txt pkg/

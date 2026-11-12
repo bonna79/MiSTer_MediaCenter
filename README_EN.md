@@ -2,7 +2,7 @@
 
 [Italiano](README.md) · **English**
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.0 H264 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.5 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
 
@@ -27,7 +27,7 @@ The package is made of these parts:
 | --- | --- | --- |
 | `MiSTer_MediaCenter` | `/media/fat/` | The Main, the MiSTer's main program, used in the menu. When you insert a disc it recognizes it: video discs and data DVDs open with the player, games start with the right core |
 | `mediacenter` | `/media/fat/linux/` | The player itself, which runs on the ARM |
-| `mediacenter.sh` | `/media/fat/Scripts/` | The script shown in **Scripts**: it opens the player to pick files from SD, USB or network |
+| `Mister_Media_Center.sh` | `/media/fat/Scripts/` | The script shown in **Scripts**: it opens the player to pick files from SD, USB, network or Jellyfin (up to 4.0 it was called `mediacenter.sh`) |
 | `menu_mediacenter.rbf` | `/media/fat/linux/` | MMC's menu core: the normal MiSTer menu plus the colour conversion, the 15 kHz output for the CRT and, from 3.0, the H.264 accelerator for 1080p |
 | `libdvdcss.so.2` | `/media/fat/dvdcss/` | The library for reading protected DVDs |
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | The lines to copy into `MiSTer.ini` (it is not a `MiSTer.ini`: copy only the lines) |
@@ -35,6 +35,43 @@ The package is made of these parts:
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
 The player's on-screen texts are in Italian.
+
+## What's new in version 4.5
+
+Version 4.5 adds the **Jellyfin** connection, a new audio screen, audio CDs inside MMC and more audio formats, and brings the Main up to date with the official MiSTer Main. The menu core is the same as in 4.0.
+
+- **Jellyfin client:** MMC connects to a [Jellyfin](https://jellyfin.org) server on your home network, for example on a Mac or PC, and shows movies, series and music, with **Continue watching**. The code is written for MMC from Jellyfin's public API.
+  - MMC finds the server on the network by itself, or you write its address in `mediacenter.ini` (`MC_JELLYFIN=`). The first sign-in uses a **Quick Connect** code or a user name and password.
+  - Files MMC can read arrive as they are: an H.264 1080p file uses the FPGA accelerator just like a file on the SD card.
+  - The others (HEVC, AV1, VP9, 10-bit, 4K…) are converted to H.264 by the server. For video at 24/25 frames per second MMC asks for **1080p at 8 Mbit/s**, for faster video **720p at 6 Mbit/s**, and video above 30 fps is brought down to 30 by the server. These are values the accelerator handles with room to spare.
+  - MMC resumes where you stopped, even if you stopped in Jellyfin on the computer. Resuming starts from the previous key picture, without stutter.
+  - Music plays in the audio screen, with album and track names.
+  - To install and set up the server, follow the [official Jellyfin documentation](https://jellyfin.org/docs/general/installation/) and the [Quick Connect](https://jellyfin.org/docs/general/server/quick-connect/) page. The MMC details are in the [Jellyfin](#jellyfin) section.
+- **New audio screen:** stereo waves (blue the left channel, red the right), the time, the controls and a **6-band equalizer** (60, 170, 470, 1.3k, 3.6k and 10k Hz) with **volume** from 0 to -5 dB.
+  - **Y** opens the equalizer, and the settings are saved in `/media/fat/linux/mediacenter_eq.cfg`.
+  - **A** turns on the screen saver and **B** stops the sound at once.
+  - The screen is 640 dots wide so it fits inside the CRT. `MC_AUDIO_W=720` in `mediacenter.ini` brings back the full width, `MC_AUDIO_SIMPLE=1` the old screen.
+- **Audio CDs inside MMC:** the CD in the drive and audio `.bin`/`.cue` images play in the audio screen, with names from **CD-Text** and tracks one after the other without gaps. When `AUDIOCD=` is not in `MiSTer.ini`, the Main opens audio CDs with MMC.
+- **More audio formats:** **Opus** files and tracker modules (**MOD, XM, S3M, IT**, MED, MTM, 669, OKT, STM…) through [libxmp](https://github.com/libxmp/libxmp) 4.6.3 (MIT licence).
+- **Main up to date with the official Main of 11 November 2026** ([Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer)): it brings the new controller mapping (**joymap v4**), force feedback requested by cores, and the Minimig/CD32, Atari ST, Apple IIgs and other core updates released after 16 October. The MMC parts (disc detection, colour conversion, CRT) stay as before.
+- **The script is now called `Mister_Media_Center.sh`** (before: `mediacenter.sh`): it does the same things, only the name changes. The name has no spaces because the MiSTer Main does not start scripts with spaces in their name.
+- **New picture** with the words Ver. 4.5 H264 Jellyfin Client 1080 P, shown for 3 seconds only when the script is opened from Scripts. When a DVD, a Video CD or an audio CD starts, it goes straight to the disc, as in earlier versions.
+
+**Updating from 4.0:** extract the 4.5 zip over the old files and delete the old script `/media/fat/Scripts/mediacenter.sh`, otherwise Scripts shows two entries. Then restart the MiSTer. `MiSTer.ini` and `mediacenter.ini` stay as they are.
+
+Tested on a real MiSTer on 11 and 12 November 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI together, with the official Jellyfin server on a Mac mini M2 Pro:
+
+| Test | Result |
+| --- | --- |
+| Controllers with the new mapping (joymap v4), in the menu and in MMC | Working |
+| Original DVD, audio CD, data DVD, 15 kHz CRT | Working as in 4.0 |
+| Audio CD, Opus files, tracker modules, audio screen with equalizer and volume | Working |
+| Jellyfin: Inuyasha H.264 1440x810 MKV, original file with the accelerator | 1410 s, 0.0% of pictures not shown, none lost by the FPGA |
+| Jellyfin: Tears of Steel H.264 1728x720, original file | 734 s with 0.0% of pictures not shown |
+| Jellyfin: HEVC video at 30 fps converted by the server to 720p | 0.8% of pictures not shown |
+| Jellyfin: HEVC video at 59.94 fps converted to 720p at 30 fps | 0.3% of pictures not shown |
+| Jellyfin: resume where you left off | 48 pictures ready in 0.24 s, none skipped, clean sound |
+| Jellyfin: FLAC and MP3 music | Original files in the audio screen, no problems |
 
 ## What's new in version 4.0
 
@@ -344,16 +381,16 @@ Only this second start is needed: no MiSTer restart and no change to `MiSTer.ini
 | DVD-Video, protected originals included (CSS) | Starts by itself when you insert the disc | Disc menus, chapters, audio tracks, subtitles, fast forward and rewind |
 | Video CD 1.0, 1.1 and 2.0 | Starts by itself when you insert the disc | PBC menus, chapters, audio channel |
 | Super Video CD | Starts by itself when you insert the disc | PBC menus, chapters, audio tracks, fast forward and rewind |
-| Super Video CD `.bin` + `.cue` images | From **Scripts → mediacenter**, opening the `.cue` file | As the disc, with its menus |
+| Super Video CD `.bin` + `.cue` images | From **Scripts → Mister_Media_Center**, opening the `.cue` file | As the disc, with its menus |
 | Data DVDs (DVD-R or DVD+R) with DivX, MP4, MP3… | The file list opens by itself when you insert the disc | As for files |
-| DivX, Xvid, MP4, MKV, MPEG and VOB video | From **Scripts → mediacenter**, choosing SD, USB or network | Audio tracks, chapters (or 60-second jumps), fast forward and rewind |
-| DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → mediacenter** | As a DVD |
-| MP1, MP2, MP3, Ogg, Opus, FLAC, WAV and AAC music; MOD, XM, S3M, IT tracker modules (and MED, MTM, 669, OKT, STM...) | From **Scripts → mediacenter** | The tracks of a folder play one after the other, like an album |
+| DivX, Xvid, MP4, MKV, MPEG and VOB video | From **Scripts → Mister_Media_Center**, choosing SD, USB or network | Audio tracks, chapters (or 60-second jumps), fast forward and rewind |
+| DVD `.iso` images and `VIDEO_TS` folders | From **Scripts → Mister_Media_Center** | As a DVD |
+| MP1, MP2, MP3, Ogg, Opus, FLAC, WAV and AAC music; MOD, XM, S3M, IT tracker modules (and MED, MTM, 669, OKT, STM...) | From **Scripts → Mister_Media_Center** | The tracks of a folder play one after the other, like an album |
 | Audio CDs (CD Extra too) and audio `.bin`/`.cue` images | Start by themselves in the `mediacenter` audio screen (or with the core set in `AUDIOCD=` or with [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi)) | Tracks play with no gaps, names from CD-Text, ◄► track, L/R fast |
-| Movies, series and music from a [Jellyfin](https://jellyfin.org) server (for example on a Mac or PC) | From **Scripts → mediacenter → Jellyfin** | The original file arrives as it is: FPGA accelerator, CRT, audio screen, subtitles and audio tracks as for a file on the SD card; resumes where you left off |
+| Movies, series and music from a [Jellyfin](https://jellyfin.org) server (for example on a Mac or PC) | From **Scripts → Mister_Media_Center → Jellyfin** | The original file arrives as it is: FPGA accelerator, CRT, audio screen, subtitles and audio tracks as for a file on the SD card; resumes where you left off |
 | PSX, Saturn, Mega CD, PC Engine CD… games | Start by themselves, with the `_Physical Disc Cores` | Handled by the Physical Disc Main |
 
-CD-Rs with DivX or MP3 files do not start by themselves: open them from **Scripts → mediacenter → Disco nel lettore**.
+CD-Rs with DivX or MP3 files do not start by themselves: open them from **Scripts → Mister_Media_Center → Disco nel lettore**.
 
 ### Jellyfin
 
@@ -361,7 +398,8 @@ MMC connects to a [Jellyfin](https://jellyfin.org) server on the home network (t
 
 - **The server:** MMC finds it on the network by itself. If it does not, write its address in `mediacenter.ini`, for example `MC_JELLYFIN=http://192.168.0.10:8096`.
 - **Signing in, the first time:** MMC shows a 6-digit code. In Jellyfin on the computer open **Profile → Quick Connect** and type the code. Quick Connect is turned on in **Dashboard → General**. Or write user and password in `mediacenter.ini` (`MC_JELLYFIN_USER`, `MC_JELLYFIN_PASS`). The key Jellyfin gives MMC is kept in `/media/fat/linux/mediacenter_jellyfin.cfg`: delete it to disconnect the MiSTer.
-- **What is sent:** the original file, when MMC reads it (H.264 up to 1920x1080 8-bit, MPEG-2, DivX/Xvid, VC-1, with AC3, DTS, AAC, MP3, FLAC… audio). Only the formats MMC cannot read (HEVC/H.265, AV1, VP9, 10-bit H.264, 4K, TrueHD audio) are converted by the server to H.264 1080p with AC3 audio: this needs a reasonably powerful computer.
+- **What is sent:** the original file, when MMC reads it (H.264 up to 1920x1080 8-bit, MPEG-2, DivX/Xvid, VC-1, with AC3, DTS, AAC, MP3, FLAC… audio). Only the formats MMC cannot read (HEVC/H.265, AV1, VP9, 10-bit H.264, 4K, TrueHD audio) are converted by the server to H.264 with AC3 audio: 1080p at 8 Mbit/s for video up to 25 frames per second, 720p at 6 Mbit/s for faster video (above 30 fps brought down to 30). Converting needs a reasonably powerful computer.
+- **The server:** to install and set it up, follow the [official Jellyfin documentation](https://jellyfin.org/docs/general/installation/), with the [Mac](https://jellyfin.org/docs/general/installation/macos) page. For conversion with the computer's graphics card see [Hardware Acceleration](https://jellyfin.org/docs/general/post-install/transcoding/hardware-acceleration/).
 - **Continue watching:** MMC tells Jellyfin where you stopped. Opening the title again asks whether to resume from there, and Jellyfin on the computer shows the same position.
 
 ## Formats and recommended resolutions
@@ -488,6 +526,8 @@ Still to test: Super Video CD read from a burned disc.
 
 From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds everything MMC needs: the Main, the player, the script, the menu core, the library for protected DVDs and `MMC_MiSTer_ini.txt` with the lines for `MiSTer.ini`. The Physical Disc Main, for games, is downloaded from its own project. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
 
+**Updating from 4.0 to 4.5:** extract the 4.5 zip over the old files, delete the old script `/media/fat/Scripts/mediacenter.sh` (it is now called `Mister_Media_Center.sh`) and restart the MiSTer.
+
 **Updating from 2.8 to 3.0:** extract the 3.0 zip over the old files and restart the MiSTer. The 3.0 `mediacenter` player and `menu_mediacenter.rbf` core are needed together: the 1080p accelerator is in the core, and with an old core the player uses the normal decoder as in 2.8. `MiSTer.ini` and `mediacenter.ini` stay as they are.
 
 The latest version is on the [Actions](../../actions) page. Open the latest successful run (green tick) of **Build MiSTer MediaCenter** and download `MiSTer_MediaCenter` and `mediacenter_arm`. The menu core is in the **Build MediaCenter menu core** run, file `mediacenter_rbf`.
@@ -500,7 +540,7 @@ Also install the [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTe
 | --- | --- |
 | `MiSTer_MediaCenter` | `/media/fat/MiSTer_MediaCenter` |
 | `mediacenter` | `/media/fat/linux/mediacenter` |
-| `mediacenter.sh` | `/media/fat/Scripts/mediacenter.sh` |
+| `Mister_Media_Center.sh` | `/media/fat/Scripts/Mister_Media_Center.sh` |
 | `menu_mediacenter.rbf` | `/media/fat/linux/menu_mediacenter.rbf` |
 | `MiSTer_Physical-CD` (Physical Disc Main) | `/media/fat/MiSTer_Physical-CD` |
 
