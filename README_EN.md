@@ -71,6 +71,9 @@ Tested on a real MiSTer on 14 November 2026, on a Sony Trinitron CRT (SCART RGB)
 | Settings page | Working |
 | Start box with format, audio delay and interlaced | Working |
 | External `.srt` subtitles | Working |
+| Subtitles inside MKV (SRT, ASS) and MP4 | Working |
+| Audio delay from the Start box during a DVD | Working |
+| 4.6 picture when the script opens, Build 225 | Working |
 
 ## What's new in version 4.5
 

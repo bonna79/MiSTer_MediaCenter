@@ -69,6 +69,9 @@ Provata su un MiSTer vero il 14 novembre 2026, su CRT Sony Trinitron (SCART RGB)
 | Pagina Impostazioni | Funziona |
 | Riquadro Start con formato, ritardo audio e interlacciato | Funziona |
 | Sottotitoli esterni `.srt` | Funzionano |
+| Sottotitoli dentro MKV (SRT, ASS) e MP4 | Funzionano |
+| Ritardo audio dal riquadro Start durante un DVD | Funziona |
+| Immagine 4.6 all'apertura dello script, Build 225 | Funziona |
 
 ## Novità della versione 4.5
 
