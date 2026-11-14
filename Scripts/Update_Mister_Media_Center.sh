@@ -22,6 +22,21 @@ say() { # say "italiano" "english"
   if [ "$LANG_EN" = 1 ]; then echo "$2"; else echo "$1"; fi
   echo "$(date '+%F %T') $2" >>"$LOG"
 }
+# MiSTer.ini is never changed: remind the lines to copy when the [menu]
+# section does not start our Main yet (same reading as Mister_Media_Center.sh).
+ini_note() {
+  m=$(awk -F= '
+    /^[ \t]*\[/ { s = tolower($0); gsub(/[ \t\r]/, "", s); menu = (s == "[menu]"); next }
+    menu && tolower($1) ~ /^[ \t]*main[ \t]*$/ { v = $2; sub(/[;\r].*/, "", v); gsub(/[ \t]/, "", v); print v; exit }
+  ' "$FAT/MiSTer.ini" 2>/dev/null)
+  if [ "$m" != "MiSTer_MediaCenter" ]; then
+    echo
+    say "Da fare a mano: copia le righe di $FAT/MMC_MiSTer_ini.txt in $FAT/MiSTer.ini" \
+        "To do by hand: copy the lines of $FAT/MMC_MiSTer_ini.txt into $FAT/MiSTer.ini"
+    say "(main=MiSTer_MediaCenter va solo nella sezione [menu]), poi riavvia." \
+        "(main=MiSTer_MediaCenter goes only in the [menu] section), then restart."
+  fi
+}
 fail() {
   say "ERRORE: $1" "ERROR: $2"
   say "Nessun file e' stato cambiato." "No file was changed."
@@ -125,6 +140,7 @@ echo
 if [ -z "$CHANGED" ]; then
   say "Hai gia' la versione $TAG: nessun file da aggiornare." "You already have version $TAG: no file to update."
   rm -rf "$WORK"
+  ini_note
   exit 0
 fi
 
@@ -179,6 +195,7 @@ if [ -f "$FAT/Scripts/mediacenter.sh" ]; then
   say "Nota: c'e' ancora il vecchio script Scripts/mediacenter.sh (4.0): puoi cancellarlo." \
       "Note: the old script Scripts/mediacenter.sh (4.0) is still there: you can delete it."
 fi
+ini_note
 if [ "$REBOOT" = 1 ]; then
   say "Riavvia il MiSTer per completare l'aggiornamento (Main o core cambiati)." "Restart the MiSTer to finish the update (Main or menu core changed)."
 fi
