@@ -2,7 +2,7 @@
 
 **Italiano** · [English](README_EN.md)
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.5 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.6 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > Questo progetto è stato sviluppato con l'aiuto dell'intelligenza artificiale: il codice e la documentazione sono stati scritti con Claude, l'IA di Anthropic, e provati da rgm su un MiSTer vero.
 
@@ -33,6 +33,42 @@ Il pacchetto è formato da queste parti:
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | Le righe da copiare in `MiSTer.ini` (non è un `MiSTer.ini`: copia solo le righe) |
 
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
+
+## Novità della versione 4.6
+
+La 4.6 aggiunge il **menu in inglese**, la pagina **Impostazioni**, il **ritardo audio regolabile durante il film** e i **sottotitoli testo** per i file. Cambia solo il lettore `mediacenter`: il Main e il core del menu sono gli stessi della 4.5.
+
+- **Menu in inglese:** con `MC_LANG=en` in `mediacenter.ini`, oppure dalla pagina Impostazioni, le scritte di MMC sono in inglese: elenchi, comandi durante il video, schermata audio, Jellyfin e Regola CRT. Senza questa riga resta tutto in italiano come prima.
+- **Pagina Impostazioni:** la voce **Impostazioni** nell'elenco delle sorgenti, prima di Regola CRT, permette di scegliere senza scrivere a mano nel file:
+  - **Lingua menu:** italiano o inglese. Vale subito dopo il salvataggio.
+  - **Lingua audio** e **Sottotitoli:** la lingua preferita per i DVD e per i file (italiano, inglese, francese, tedesco, spagnolo, giapponese). I sottotitoli si possono anche spegnere.
+  - **Ritardo audio:** da -1000 a +1000 ms, a passi di 10 ms. Un valore positivo sposta l'audio più tardi.
+  - **Interlacciato:** Sì (ideale per CRT) oppure No. È l'impostazione `MC_FIELDS`.
+  - Un collegamento a **Regola CRT** per dimensioni e posizione.
+  - **A** salva, **B** annulla. Si salvano in `mediacenter.ini` solo le righe cambiate, le altre restano come sono. Lingua audio, sottotitoli, ritardo e interlacciato valgono dal prossimo video.
+- **Riquadro Start durante il film:** **Start** apre un riquadro con tre righe. **▲▼** scelgono la riga e **◄►** cambiano il valore.
+  - **Formato:** come prima (Auto, 4:3, 16:9, Cinema 1,85:1, Anamorfico 2,35:1, Pieno, Pan & scan).
+  - **Ritardo audio:** a passi di 10 ms. Mentre lo cambi il film va in pausa, così l'audio non salta. **A** (Applica) lo conferma, risincronizza l'audio e lo salva in `mediacenter.ini`. Se chiudi senza A il ritardo resta quello di prima.
+  - **Interlacciato:** Sì o No, subito. Viene salvato anche questo.
+- **Sottotitoli testo per i file:**
+  - **File esterni** `.srt`, `.ass`, `.ssa` e `.vtt` accanto al video, con lo stesso nome: `film.srt`, oppure con la lingua nel nome, come `film.ita.srt` o `film.en.srt`. I file `.srt` salvati da Windows con le lettere accentate si leggono correttamente.
+  - **Tracce dentro i file:** SRT, ASS/SSA e WebVTT negli **MKV**, sottotitoli testo (mov_text) negli **MP4**.
+  - Il tasto **A** passa da spenti alla traccia 1, alla 2 e così via. Nella barra dei comandi si vede la traccia, per esempio "Sott. 1/2 ita".
+  - Se non hai scelto una lingua nelle Impostazioni, un file esterno si accende da solo. Con una lingua scelta parte la traccia di quella lingua.
+  - I sottotitoli sono disegnati sopra il video, quindi funzionano anche con l'acceleratore 1080p e sul CRT. Si nascondono mentre ci sono i comandi a schermo.
+  - I sottotitoli a immagini (PGS dei Blu-ray, VobSub, DVB) nei file non sono ancora supportati. Quelli dei DVD funzionano come prima.
+- **Nuova immagine** con la scritta Ver. 4.6 H264 Jellyfin Client 1080 P, mostrata solo quando si apre lo script dagli Scripts.
+
+**Aggiornare dalla 4.5:** estrai lo zip della 4.6 sopra i file vecchi. Basterebbe sostituire `/media/fat/linux/mediacenter`, perché il Main e il core sono gli stessi della 4.5. `MiSTer.ini` e `mediacenter.ini` restano come sono.
+
+Provata su un MiSTer vero il 14 novembre 2026, su CRT Sony Trinitron (SCART RGB) e HDMI insieme:
+
+| Prova | Risultato |
+| --- | --- |
+| Menu in inglese con `MC_LANG=en` | Funziona |
+| Pagina Impostazioni: salvataggio, annulla, collegamento a Regola CRT | Funziona |
+| Riquadro Start con formato, ritardo audio e interlacciato | Funziona |
+| Sottotitoli esterni `.srt` | Funzionano |
 
 ## Novità della versione 4.5
 
@@ -381,7 +417,7 @@ Serve solo questo secondo avvio, nient'altro: niente riavvii del MiSTer e niente
 | Super Video CD | Parte da solo quando inserisci il disco | Menu PBC, capitoli, tracce audio, avanti e indietro veloce |
 | Immagini di Super Video CD `.bin` + `.cue` | Da **Scripts → Mister_Media_Center**, aprendo il file `.cue` | Come il disco, con i menu |
 | DVD dati (DVD-R o DVD+R) con DivX, MP4, MP3… | Quando inserisci il disco si apre da solo l'elenco dei file | Come per i file |
-| Video DivX, Xvid, MP4, MKV, MPEG e VOB | Da **Scripts → Mister_Media_Center**, scegliendo SD, USB o rete | Tracce audio, capitoli (o salti di 60 secondi), avanti e indietro veloce |
+| Video DivX, Xvid, MP4, MKV, MPEG e VOB | Da **Scripts → Mister_Media_Center**, scegliendo SD, USB o rete | Tracce audio, sottotitoli testo (file `.srt`, `.ass`, `.vtt` esterni e tracce dentro MKV e MP4), capitoli (o salti di 60 secondi), avanti e indietro veloce |
 | Immagini DVD `.iso` e cartelle `VIDEO_TS` | Da **Scripts → Mister_Media_Center** | Come un DVD |
 | Musica MP1, MP2, MP3, Ogg, Opus, FLAC, WAV e AAC; moduli tracker MOD, XM, S3M, IT (e MED, MTM, 669, OKT, STM...) | Da **Scripts → Mister_Media_Center** | I brani di una cartella si ascoltano di seguito, come un album |
 | CD audio (anche CD Extra) e immagini `.bin`/`.cue` audio | Parte da solo nella schermata audio di `mediacenter` (oppure con il core indicato in `AUDIOCD=` o con [MiSTer Hi-Fi](https://github.com/Anime0t4ku/MiSTer_Hi-Fi)) | Brani di seguito senza pause, nomi dal CD-Text, ◄► brano, L/R veloce |
@@ -524,6 +560,8 @@ Da provare: Super Video CD letto da un disco masterizzato.
 
 Dalla pagina [Releases](../../releases) scarica `MiSTer_MediaCenter.zip` ed estrailo nella cartella principale della SD (`/media/fat`). Le cartelle dello zip sono già organizzate come sulla SD. Lo zip contiene tutto quello che serve a MMC: Main, lettore, script, core del menu, la libreria per i DVD protetti e `MMC_MiSTer_ini.txt` con le righe per `MiSTer.ini`. Il Main di Physical Disc, per i giochi, si scarica dal suo progetto. Aggiornali sempre insieme, perché la conversione dei colori nell'FPGA richiede il Main e il core della stessa versione. Dopo aver copiato il Main o il core riavvia il MiSTer.
 
+**Aggiornare dalla 4.5 alla 4.6:** estrai lo zip della 4.6 sopra i file vecchi. Il Main e il core sono gli stessi della 4.5. Poi riavvia il MiSTer.
+
 **Aggiornare dalla 4.0 alla 4.5:** estrai lo zip della 4.5 sopra i file vecchi, cancella il vecchio script `/media/fat/Scripts/mediacenter.sh` (ora si chiama `Mister_Media_Center.sh`) e riavvia il MiSTer.
 
 **Aggiornare dalla 2.8 alla 3.0:** estrai lo zip della 3.0 sopra i file vecchi e riavvia il MiSTer. Servono insieme il lettore `mediacenter` e il core `menu_mediacenter.rbf` della 3.0: l'acceleratore 1080p è nel core, e con un core vecchio il lettore usa il decoder normale come nella 2.8. `MiSTer.ini` e `mediacenter.ini` restano come sono.
@@ -580,7 +618,7 @@ Dopo le modifiche riavvia il MiSTer.
 
 ### 4. Impostazioni del lettore (facoltative)
 
-Il lettore legge le sue impostazioni dal file di testo `/media/fat/linux/mediacenter.ini`, una per riga. Il file non serve: crealo solo se vuoi cambiare qualcosa.
+Il lettore legge le sue impostazioni dal file di testo `/media/fat/linux/mediacenter.ini`, una per riga. Il file non serve: crealo solo se vuoi cambiare qualcosa. Le impostazioni più comuni (lingua, ritardo audio, interlacciato) si scelgono anche dalla pagina **Impostazioni** nell'elenco delle sorgenti, che scrive il file da sola.
 
 ```ini
 # sposta l'audio di 50 millisecondi più tardi
@@ -614,6 +652,9 @@ MC_CRT_VPOS=2
 | `MC_MENU_HD=1` | Elenchi a 1280x720 come nella versione 2.1, invece che disegnati per il CRT |
 | `MC_DIAG=0` | Spegne le righe di diagnosi `mediacenter: diag` nel log |
 | `MC_SPLASH=0` | Spegne l'immagine di MMC all'avvio dello script |
+| `MC_LANG=en` | Scritte di MMC in inglese |
+| `MC_AUDIO_LANG=en` | Lingua audio preferita per DVD e file: `it`, `en`, `fr`, `de`, `es`, `ja` |
+| `MC_SUB_LANG=it` | Lingua dei sottotitoli preferita per DVD e file (stessi codici), `off` per spegnerli |
 | `MC_JELLYFIN=http://192.168.0.10:8096` | Indirizzo del server Jellyfin, se MMC non lo trova da solo. `MC_JELLYFIN=0` toglie la voce Jellyfin |
 | `MC_JELLYFIN_USER=nome`, `MC_JELLYFIN_PASS=password` | Accesso a Jellyfin con utente e password invece del codice Quick Connect |
 
@@ -625,9 +666,9 @@ Si usa il controller, con i tasti del menu del MiSTer.
 
 | Tasto | Nell'elenco dei file | Durante la riproduzione |
 | --- | --- | --- |
-| A | Apre | DVD: cambia i sottotitoli |
+| A | Apre | Cambia i sottotitoli (DVD e file) |
 | B | Torna indietro | Stop; nei Super Video CD torna al primo menu |
-| Start | | Play; mentre il film va apre il riquadro Formato |
+| Start | | Play; mentre il film va apre il riquadro con Formato, Ritardo audio e Interlacciato |
 | Select | | Pausa |
 | ◄ ► | Pagina precedente/successiva | Capitolo precedente/successivo; senza capitoli salta di 60 secondi; nella musica cambia brano |
 | ▲ ▼ | Su e giù | Cambia traccia audio, oppure il canale (stereo, sinistro, destro) |
