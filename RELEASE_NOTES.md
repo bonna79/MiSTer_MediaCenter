@@ -14,7 +14,7 @@
 
 Cambia solo il lettore `mediacenter`, che gira sul processore ARM: il Main e il core del menu (seed 12) sono gli stessi della 4.5. I sottotitoli li disegna l'ARM nello stesso strato dei comandi a schermo, quindi compaiono anche quando le immagini arrivano dall'acceleratore FPGA.
 
-**Documentazione completa (PDF della 4.5, valida anche per la 4.6 per chip, lettore e uscite):** [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.5/MMC_4.5_documentazione_completa_IT.pdf) · [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.5/MMC_4.5_documentation_complete_EN.pdf).
+**Documentazione completa (PDF, 20 pagine):** [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6/MMC_4.6_documentazione_completa_IT.pdf) · [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6/MMC_4.6_documentation_complete_EN.pdf). Spiega il chip FPGA, il lettore ARM, i passaggi fra ARM e FPGA, le uscite HDMI e CRT, le novità della 4.5 e della 4.6 (sottotitoli, lingua, impostazioni) e come ricostruire tutto da zero. I PDF sono anche nella cartella [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs).
 
 **Nuove impostazioni in `mediacenter.ini`** (si scelgono anche dalla pagina Impostazioni):
 
@@ -76,7 +76,7 @@ Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0
 
 Only the `mediacenter` player changes, the program that runs on the ARM processor: the Main and the menu core (seed 12) are the same as in 4.5. Subtitles are drawn by the ARM in the same layer as the on-screen controls, so they also show when the pictures come from the FPGA accelerator.
 
-**Complete documentation (the 4.5 PDF, still valid for 4.6 on the chip, the player and the outputs):** [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.5/MMC_4.5_documentation_complete_EN.pdf) · [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.5/MMC_4.5_documentazione_completa_IT.pdf).
+**Complete documentation (PDF, 20 pages):** [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6/MMC_4.6_documentation_complete_EN.pdf) · [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6/MMC_4.6_documentazione_completa_IT.pdf). It explains the FPGA chip, the ARM player, the hand-offs between ARM and FPGA, the HDMI and CRT outputs, what is new in 4.5 and 4.6 (subtitles, language, settings) and how to rebuild everything from scratch. The PDFs are also in the [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs) folder.
 
 **New settings in `mediacenter.ini`** (also chosen from the Settings page): `MC_LANG=en` for English text; `MC_AUDIO_LANG=` preferred audio language for DVDs and files (`it`, `en`, `fr`, `de`, `es`, `ja`); `MC_SUB_LANG=` preferred subtitle language (same codes), `off` to turn them off.
 

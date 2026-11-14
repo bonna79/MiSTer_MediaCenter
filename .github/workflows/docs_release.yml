@@ -1,7 +1,9 @@
 # Attaches the PDF documentation in docs/ to an existing release.
 # Run by hand (Actions -> Attach documentation to release -> Run workflow).
 # It does not build anything and does not touch MiSTer_MediaCenter.zip; it also refreshes the
-# release notes from RELEASE_NOTES.md.
+# release notes from RELEASE_NOTES.md and removes from that release the PDFs of other versions.
+# The PDFs are docs/MMC_<version>_*.pdf, the version taken from the tag (v4.6 -> 4.6).
+# Run it only for the newest release: RELEASE_NOTES.md holds that release's notes.
 name: Attach documentation to release
 
 on:
@@ -10,7 +12,7 @@ on:
       tag:
         description: 'Release tag'
         required: true
-        default: 'v4.5'
+        default: 'v4.6'
 
 permissions:
   contents: write
@@ -20,11 +22,24 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+      - name: Version of the tag
+        run: echo "VER=${TAG#v}" >> "$GITHUB_ENV"
+        env:
+          TAG: ${{ inputs.tag }}
+      - name: Remove the PDFs of other versions from this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          keep="MMC_${VER}_documentazione_completa_IT.pdf MMC_${VER}_documentation_complete_EN.pdf"
+          for a in $(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -E '^MMC_.*_(documentazione_completa_IT|documentation_complete_EN)\.pdf$'); do
+            case " $keep " in *" $a "*) ;; *) echo "removing $a"; gh release delete-asset "$TAG" "$a" --repo "$GITHUB_REPOSITORY" -y ;; esac
+          done
       - name: Upload the PDFs
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
           body_path: RELEASE_NOTES.md
           files: |
-            docs/MMC_4.5_documentazione_completa_IT.pdf
-            docs/MMC_4.5_documentation_complete_EN.pdf
+            docs/MMC_${{ env.VER }}_documentazione_completa_IT.pdf
+            docs/MMC_${{ env.VER }}_documentation_complete_EN.pdf
