@@ -4550,7 +4550,7 @@ static void crt_adjust_screen(void)
 #define SET_CRT 5
 #define SET_ITEMS 6
 static const char *const set_keys[SET_CRT] = { "MC_LANG", "MC_AUDIO_LANG", "MC_SUB_LANG", "MC_AV_OFFSET", "MC_FIELDS" };
-static const char *const set_labels[SET_ITEMS] = { "Lingua menu", "Lingua audio", "Sottotitoli DVD", "Ritardo audio", "Campi su CRT",
+static const char *const set_labels[SET_ITEMS] = { "Lingua menu", "Lingua audio", "Sottotitoli DVD", "Ritardo audio", "Interlacciato",
 	"Regola CRT (dimensioni e posizione)" };
 // languages of the audio and of the DVD's subtitles: the first is "as before"
 // (the file's own choice, Italian on DVD); the subtitles also have "off"
@@ -4608,7 +4608,7 @@ static const char *set_shown(int i, char *buf, size_t len)
 	case SET_ALANG: return TR(set_lang_names[v]);
 	case SET_SLANG: return v == 0 ? TR("Predefiniti") : v == 1 ? TR("Spenti") : TR(set_lang_names[v - 1]);
 	case SET_AVOFF: snprintf(buf, len, "%+d ms", v * 10); return buf;
-	case SET_FIELDS: return TR(v ? "Acceso" : "Spento");
+	case SET_FIELDS: return TR(v ? "Si (ideale per CRT)" : "No");
 	}
 	return "";
 }
