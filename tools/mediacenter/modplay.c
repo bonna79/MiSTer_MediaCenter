@@ -142,7 +142,7 @@ static int mod_play(const char *path, int in_playlist)
 	snprintf(tracker, sizeof(tracker), "%s", mi.mod->type);
 	char *paren = strstr(tracker, " (");
 	if (paren) *paren = 0;
-	snprintf(mp.type, sizeof(mp.type), "%s  %s  %d canali", kind, tracker, mi.mod->chn);
+	snprintf(mp.type, sizeof(mp.type), TR("%s  %s  %d canali"), kind, tracker, mi.mod->chn);
 	printf("mediacenter: modulo %s: \"%s\", %s, %d canali, %d:%02d\n", path, mi.mod->name, mi.mod->type, mi.mod->chn,
 		ms / 60000, ms / 1000 % 60);
 

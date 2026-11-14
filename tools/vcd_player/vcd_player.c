@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 #include <linux/cdrom.h>
@@ -44,6 +45,142 @@
 
 #define PL_MPEG_IMPLEMENTATION
 #include "pl_mpeg.h"
+
+// Language of the text on screen: Italian, or English with MC_LANG=en in
+// mediacenter.ini (read by the MediaCenter before anything is drawn).
+// TR() gives the English text of an Italian one listed here, and the
+// Italian text itself when MC_LANG is not en or the text is not listed.
+static int lang_en(void)
+{
+	static int en = -1;
+	if (en < 0)
+	{
+		const char *e = getenv("MC_LANG");
+		en = e && !strncasecmp(e, "en", 2);
+	}
+	return en;
+}
+
+static const char *const tr_table[][2] =
+{
+	// playback controls (VCD, files, DVD)
+	{ "Pausa", "Pause" },
+	{ "Capitolo", "Chapter" },
+	{ "Esci", "Exit" },
+	{ "Scelta", "Choose" },
+	{ "Conferma", "Confirm" },
+	{ "Pagina", "Page" },
+	{ "Indietro", "Back" },
+	{ "Sottotitoli", "Subtitles" },
+	{ "Torna al film", "Back to film" },
+	{ "Chiudi", "Close" },
+	{ "Uscire dal Video CD?", "Exit the Video CD?" },
+	{ "Uscire dal DVD?", "Exit the DVD?" },
+	{ "Uscire dal %s?", "Exit the %s?" },
+	{ "Tornare all'elenco?", "Back to the list?" },
+	{ "Scelta: %d", "Choice: %d" },
+	{ "PAUSA", "PAUSE" },
+	{ "AVANTI 10x", "FORWARD 10x" },
+	{ "INDIETRO 10x", "REWIND 10x" },
+	{ "Audio Sinistro", "Audio Left" },
+	{ "Audio Destro", "Audio Right" },
+	{ "Capitolo %d/%d", "Chapter %d/%d" },
+	{ "Altro tasto: Annulla", "Other key: Cancel" },
+	{ "Formato  \x10 %s \x11", "Format  \x10 %s \x11" },
+	{ "Senza audio", "No audio" },
+	{ "  Sott. no", "  Subs off" },
+	{ "  Sott. %d/%d%s", "  Subs %d/%d%s" },
+	{ "MENU DVD", "DVD MENU" },
+	// lists
+	{ "Disco nel lettore", "Disc in the drive" },
+	{ "SD: Musica", "SD: Music" },
+	{ "SD: tutta la scheda", "SD: whole card" },
+	{ "Rete (CIFS)", "Network (CIFS)" },
+	{ "Regola CRT (dimensioni e posizione)", "CRT Adjust (size and position)" },
+	{ "Nessun file video o audio qui", "No video or audio files here" },
+	{ "A Apri  B Indietro  \x10\x11 Pagina  X Esci", "A Open  B Back  \x10\x11 Page  X Exit" },
+	{ "A Apri  B Indietro  X Esci", "A Open  B Back  X Exit" },
+	{ "Scegli la sorgente", "Choose the source" },
+	{ "Nessun disco leggibile", "No readable disc" },
+	{ "La MiSTer sta finendo l'avvio", "The MiSTer is finishing its start-up" },
+	{ "Il video parte da solo  (%d s)", "The video starts by itself  (%d s)" },
+	{ "B Indietro", "B Back" },
+	{ "%s - traccia %d", "%s - track %d" },
+	// Regola CRT and the format box
+	{ "Larghezza", "Width" },
+	{ "Pos. orizzontale", "Horiz. position" },
+	{ "Altezza", "Height" },
+	{ "Pos. verticale", "Vert. position" },
+	{ "Modo 15 kHz", "15 kHz mode" },
+	{ "Filtro tremolio", "Flicker filter" },
+	{ "Formato", "Format" },
+	{ "Spento", "Off" },
+	{ "Acceso", "On" },
+	{ "Pieno", "Full" },
+	{ "Anamorfico 2,35:1", "Anamorphic 2.35:1" },
+	{ "Cinema 1,85:1", "Cinema 1.85:1" },
+	{ "Regola CRT", "CRT Adjust" },
+	{ "Il bordo rosso deve toccare i lati", "The red border must touch the sides" },
+	{ "Misurata: %s", "Measured: %s" },
+	{ "non ancora", "not yet" },
+	{ "Su/Giu Scegli  \x10\x11 Cambia", "Up/Down Choose  \x10\x11 Change" },
+	{ "A Salva  B Annulla  Y Azzera", "A Save  B Cancel  Y Reset" },
+	{ "Impossibile salvare il file ini", "Cannot save the ini file" },
+	// Jellyfin
+	{ "Accesso rifiutato dal server", "Access refused by the server" },
+	{ "Il server non conosce questa richiesta", "The server does not know this request" },
+	{ "Risposta del server non valida", "Invalid reply from the server" },
+	{ "Server Jellyfin non raggiungibile", "Jellyfin server not reachable" },
+	{ "Utente o password non accettati", "User or password not accepted" },
+	{ "Quick Connect e' spento nel server.", "Quick Connect is off on the server." },
+	{ "Accendilo in Jellyfin: Pannello di controllo", "Turn it on in Jellyfin: Dashboard" },
+	{ "> Generale > Abilita Quick Connect,", "> General > Enable Quick Connect," },
+	{ "oppure scrivi in mediacenter.ini", "or write in mediacenter.ini" },
+	{ "MC_JELLYFIN_USER e MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER and MC_JELLYFIN_PASS." },
+	{ "Jellyfin: accesso", "Jellyfin: sign in" },
+	{ "       Codice:   %s", "       Code:   %s" },
+	{ "Sul computer apri Jellyfin, poi", "On the computer open Jellyfin, then" },
+	{ "Profilo > Quick Connect e scrivi:", "Profile > Quick Connect and enter:" },
+	{ "In attesa... (B per annullare)", "Waiting... (B to cancel)" },
+	{ "Cerco un server Jellyfin nella rete...", "Looking for a Jellyfin server on the network..." },
+	{ "Nessun server Jellyfin trovato.", "No Jellyfin server found." },
+	{ "Controlla che sia acceso, oppure scrivi", "Check that it is on, or write" },
+	{ "in mediacenter.ini il suo indirizzo:", "its address in mediacenter.ini:" },
+	{ "Continua a guardare", "Continue watching" },
+	{ "Riprendi da %s", "Resume from %s" },
+	{ "Dall'inizio", "From the start" },
+	{ "Non riesco ad aprire questo titolo", "Cannot open this title" },
+	{ "Carico l'elenco...", "Loading the list..." },
+	{ "Niente da riprodurre qui", "Nothing to play here" },
+	// audio screen, audio CD, tracker modules
+	{ "Rete", "Network" },
+	{ "Disco", "Disc" },
+	{ "Multicanale", "Multichannel" },
+	{ "Traccia %d di %d   \xb7   %s", "Track %d of %d   \xb7   %s" },
+	{ "IN PAUSA", "PAUSED" },
+	{ "FERMO", "STOPPED" },
+	{ "EQUALIZZATORE   \x83\x84 guadagno   \x81\x82 banda", "EQUALIZER   \x83\x84 gain   \x81\x82 band" },
+	{ "EQUALIZZATORE   (Y per regolare)", "EQUALIZER   (Y to adjust)" },
+	{ "Start Play  Select Pausa  B Stop  \x81 \x82 Brano  L/R Veloce  Y Equalizzatore  A Salvaschermo  X Esci",
+	  "Start Play  Select Pause  B Stop  \x81 \x82 Track  L/R Fast  Y Equalizer  A Screensaver  X Exit" },
+	{ "A conferma     altro tasto annulla", "A confirm     other key cancel" },
+	{ "1,3k", "1.3k" },
+	{ "3,6k", "3.6k" },
+	{ "Traccia %d", "Track %d" },
+	{ "CD audio", "Audio CD" },
+	{ "CD audio%s%s", "Audio CD%s%s" },
+	{ "CD  44,1 kHz  16 bit  Stereo", "CD  44.1 kHz  16 bit  Stereo" },
+	{ "%s  %s  %d canali", "%s  %s  %d channels" },
+};
+
+__attribute__((format_arg(1)))
+static const char *TR(const char *it)
+{
+	if (!it || !lang_en()) return it;
+	for (size_t i = 0; i < sizeof(tr_table) / sizeof(tr_table[0]); i++)
+		if (!strcmp(tr_table[i][0], it)) return tr_table[i][1];
+	return it;
+}
 
 #define RAW_SECTOR 2352
 #define FORM2_DATA 2324
@@ -728,6 +865,7 @@ static void icon_with_shadow(int x, int y, int state)
 static int legend_item(int x, int y, const char *button, const char *label, int draw)
 {
 	int padx = SX(3), pady = SY(3);
+	label = TR(label);
 	int bw = text_width(button) + 2 * padx;
 	int bh = LEGEND_H;
 	if (draw)
@@ -919,7 +1057,7 @@ static void osd_draw(const osd_info_t *info)
 	{
 		// Menu: the current choice, changed with up/down and taken with A.
 		x = ovl_text(mx, status_y, "MENU");
-		snprintf(buf, sizeof(buf), "Scelta: %d", info->sel);
+		snprintf(buf, sizeof(buf), TR("Scelta: %d"), info->sel);
 		x = ovl_text(x + SX(16), status_y, buf);
 		snprintf(buf, sizeof(buf), "(%d-%d)", info->sel_min, info->sel_max);
 		ovl_text(x + SX(8), status_y, buf);
@@ -936,15 +1074,15 @@ static void osd_draw(const osd_info_t *info)
 	int time_x = fb_w - mx - text_width(buf);
 	ovl_text(time_x, status_y, buf);
 	icon_with_shadow(mx, status_y, info->state);
-	x = ovl_text(mx + icon_width(info->state) + SX(4), status_y, info->state_label ? info->state_label : names[info->state]);
+	x = ovl_text(mx + icon_width(info->state) + SX(4), status_y, TR(info->state_label ? info->state_label : names[info->state]));
 	if (info->chapters > 0 && info->chapter > 0)
 	{
-		snprintf(buf, sizeof(buf), "Capitolo %d/%d", info->chapter, info->chapters);
+		snprintf(buf, sizeof(buf), TR("Capitolo %d/%d"), info->chapter, info->chapters);
 		if (x + SX(16) + text_width(buf) < time_x) x = ovl_text(x + SX(16), status_y, buf);
 	}
 	if (info->state != ST_STOP)
 	{
-		const char *al = info->audio_label ? info->audio_label : audio[info->audio_mode % 3];
+		const char *al = info->audio_label ? info->audio_label : TR(audio[info->audio_mode % 3]);
 		char cut[96];
 		snprintf(cut, sizeof(cut), "%s", al);
 		int lx = legend_rows > 1 ? mx : x + SX(16);
@@ -969,13 +1107,14 @@ static void osd_draw(const osd_info_t *info)
 	// Button legend, or the exit confirmation.
 	if (info->confirm_exit)
 	{
-		const char *q = exit_question;
-		int w = text_width(q) + SX(16) + legend_item(0, 0, "A", "Conferma", 0) + SX(16) + text_width("Altro tasto: Annulla");
+		const char *q = TR(exit_question);
+		const char *other = TR("Altro tasto: Annulla");
+		int w = text_width(q) + SX(16) + legend_item(0, 0, "A", "Conferma", 0) + SX(16) + text_width(other);
 		if (w > fb_w - 2 * safe_x() && legend_rows > 1)
 		{
 			// two rows: the question above, the answers below
 			ovl_text((fb_w - text_width(q)) / 2, legend_y - LEGEND_H - SY(4) + SY(3), q);
-			w = legend_item(0, 0, "A", "Conferma", 0) + SX(16) + text_width("Altro tasto: Annulla");
+			w = legend_item(0, 0, "A", "Conferma", 0) + SX(16) + text_width(other);
 			x = (fb_w - w) / 2;
 		}
 		else
@@ -984,13 +1123,13 @@ static void osd_draw(const osd_info_t *info)
 			x = ovl_text(x, legend_y + SY(3), q) + SX(16);
 		}
 		x += legend_item(x, legend_y, "A", "Conferma", 1) + SX(16);
-		ovl_text(x, legend_y + SY(3), "Altro tasto: Annulla");
+		ovl_text(x, legend_y + SY(3), other);
 	}
 	else if (info->format_label)
 	{
 		// the format chosen during the film (MediaCenter's format_key)
 		char q[64];
-		snprintf(q, sizeof(q), "Formato  \x10 %s \x11", info->format_label);
+		snprintf(q, sizeof(q), TR("Formato  \x10 %s \x11"), TR(info->format_label));
 		int w = text_width(q) + SX(16) + legend_item(0, 0, "A", "Chiudi", 0);
 		x = (fb_w - w) / 2;
 		x = ovl_text(x, legend_y + SY(3), q) + SX(16);

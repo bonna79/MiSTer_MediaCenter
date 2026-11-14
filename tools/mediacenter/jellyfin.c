@@ -513,10 +513,10 @@ static void jf_message(const char *title, const char *text)
 
 static const char *jf_err_text(int e)
 {
-	if (e == AVERROR_HTTP_UNAUTHORIZED || e == AVERROR_HTTP_FORBIDDEN) return "Accesso rifiutato dal server";
-	if (e == AVERROR_HTTP_NOT_FOUND) return "Il server non conosce questa richiesta";
-	if (e == AVERROR_INVALIDDATA) return "Risposta del server non valida";
-	return "Server Jellyfin non raggiungibile";
+	if (e == AVERROR_HTTP_UNAUTHORIZED || e == AVERROR_HTTP_FORBIDDEN) return TR("Accesso rifiutato dal server");
+	if (e == AVERROR_HTTP_NOT_FOUND) return TR("Il server non conosce questa richiesta");
+	if (e == AVERROR_INVALIDDATA) return TR("Risposta del server non valida");
+	return TR("Server Jellyfin non raggiungibile");
 }
 
 // Signed in from the answer of AuthenticateByName / AuthenticateWithQuickConnect.
@@ -550,7 +550,7 @@ static int jf_login_password(const char *user)
 	jv *v = jf_post_json("/Users/AuthenticateByName", body, &e);
 	int r = v ? jf_take_auth(v) : -1;
 	jf_free(v);
-	if (r) jf_message("Jellyfin", e ? jf_err_text(e) : "Utente o password non accettati");
+	if (r) jf_message("Jellyfin", e ? jf_err_text(e) : TR("Utente o password non accettati"));
 	return r;
 }
 
@@ -565,13 +565,13 @@ static int jf_login_quick_connect(void)
 	if (!enabled)
 	{
 		const char *lines[] = {
-			"Quick Connect e' spento nel server.",
-			"Accendilo in Jellyfin: Pannello di controllo",
-			"> Generale > Abilita Quick Connect,",
-			"oppure scrivi in mediacenter.ini",
-			"MC_JELLYFIN_USER e MC_JELLYFIN_PASS.",
+			TR("Quick Connect e' spento nel server."),
+			TR("Accendilo in Jellyfin: Pannello di controllo"),
+			TR("> Generale > Abilita Quick Connect,"),
+			TR("oppure scrivi in mediacenter.ini"),
+			TR("MC_JELLYFIN_USER e MC_JELLYFIN_PASS."),
 		};
-		jf_screen("Jellyfin: accesso", lines, 5);
+		jf_screen(TR("Jellyfin: accesso"), lines, 5);
 		wait_key();
 		return -1;
 	}
@@ -583,20 +583,20 @@ static int jf_login_quick_connect(void)
 	jf_free(init);
 	if (!secret[0] || !code[0])
 	{
-		jf_message("Jellyfin: accesso", jf_err_text(e));
+		jf_message(TR("Jellyfin: accesso"), jf_err_text(e));
 		return -1;
 	}
 	char code_line[64];
-	snprintf(code_line, sizeof(code_line), "       Codice:   %s", code);
+	snprintf(code_line, sizeof(code_line), TR("       Codice:   %s"), code);
 	const char *lines[] = {
-		"Sul computer apri Jellyfin, poi",
-		"Profilo > Quick Connect e scrivi:",
+		TR("Sul computer apri Jellyfin, poi"),
+		TR("Profilo > Quick Connect e scrivi:"),
 		"",
 		code_line,
 		"",
-		"In attesa... (B per annullare)",
+		TR("In attesa... (B per annullare)"),
 	};
-	jf_screen("Jellyfin: accesso", lines, 6);
+	jf_screen(TR("Jellyfin: accesso"), lines, 6);
 	printf("mediacenter: Jellyfin: Quick Connect, codice %s\n", code);
 	char path[256], enc[160];
 	jf_urlenc(enc, sizeof(enc), secret);
@@ -619,7 +619,7 @@ static int jf_login_quick_connect(void)
 		jv *v = jf_post_json("/Users/AuthenticateWithQuickConnect", body, &e);
 		int r = v ? jf_take_auth(v) : -1;
 		jf_free(v);
-		if (r) jf_message("Jellyfin: accesso", jf_err_text(e));
+		if (r) jf_message(TR("Jellyfin: accesso"), jf_err_text(e));
 		return r;
 	}
 	return -1;
@@ -677,15 +677,15 @@ static int jf_connect(void)
 	}
 	if (!jf_server[0])
 	{
-		const char *lines[] = { "Cerco un server Jellyfin nella rete..." };
+		const char *lines[] = { TR("Cerco un server Jellyfin nella rete...") };
 		jf_screen("Jellyfin", lines, 1);
 		char name[128];
 		if (jf_discover(jf_server, sizeof(jf_server), name, sizeof(name)))
 		{
 			const char *l2[] = {
-				"Nessun server Jellyfin trovato.",
-				"Controlla che sia acceso, oppure scrivi",
-				"in mediacenter.ini il suo indirizzo:",
+				TR("Nessun server Jellyfin trovato."),
+				TR("Controlla che sia acceso, oppure scrivi"),
+				TR("in mediacenter.ini il suo indirizzo:"),
 				"MC_JELLYFIN=http://192.168.0.10:8096",
 			};
 			jf_screen("Jellyfin", l2, 4);
@@ -802,7 +802,7 @@ static int jf_load_level(const jf_level_t *lv)
 			jf_item_t *it = &jf_items[jf_count++];
 			memset(it, 0, sizeof(*it));
 			snprintf(it->id, sizeof(it->id), "resume");
-			snprintf(it->label, sizeof(it->label), "Continua a guardare");
+			snprintf(it->label, sizeof(it->label), "%s", TR("Continua a guardare"));
 			it->folder = 1;
 		}
 		snprintf(path, sizeof(path), "/UserViews?userId=%s", jf_uid);
@@ -941,9 +941,9 @@ static int jf_ask_resume(const char *title, double ticks)
 {
 	char t[32], line[64], head[220];
 	jf_ticks_text(t, sizeof(t), ticks);
-	snprintf(line, sizeof(line), "Riprendi da %s", t);
+	snprintf(line, sizeof(line), TR("Riprendi da %s"), t);
 	jf_ascii(head, sizeof(head), title);
-	const char *labels[2] = { line, "Dall'inizio" };
+	const char *labels[2] = { line, TR("Dall'inizio") };
 	int sel = 0;
 	for (;;)
 	{
@@ -1031,7 +1031,7 @@ static int jf_play(const jf_item_t *it, int in_playlist, int ask)
 	if (media_open(url))
 	{
 		av_dict_free(&media_opts);
-		jf_message("Jellyfin", "Non riesco ad aprire questo titolo");
+		jf_message("Jellyfin", TR("Non riesco ad aprire questo titolo"));
 		return END_DONE;
 	}
 
@@ -1091,7 +1091,7 @@ static int jf_browse(void)
 		jf_level_t *lv = &stack[depth];
 		if (reload)
 		{
-			const char *wait[] = { "Carico l'elenco..." };
+			const char *wait[] = { TR("Carico l'elenco...") };
 			jf_screen(lv->title, wait, 1);
 			int e = jf_load_level(lv);
 			if (e)
@@ -1115,7 +1115,7 @@ static int jf_browse(void)
 			}
 		}
 		if (lv->sel >= jf_count) lv->sel = jf_count ? jf_count - 1 : 0;
-		draw_browser(lv->title, labels, dirs, jf_count, lv->sel, "Niente da riprodurre qui");
+		draw_browser(lv->title, labels, dirs, jf_count, lv->sel, TR("Niente da riprodurre qui"));
 		int top, row_h, page;
 		browser_layout(&top, &row_h, &page);
 		int code = wait_key();

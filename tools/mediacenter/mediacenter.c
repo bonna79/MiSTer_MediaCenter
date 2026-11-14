@@ -2568,7 +2568,7 @@ static int media_play(int in_playlist)
 	have_frame = 0;
 	stop_pos = -1;
 	static char svcd_question[48];
-	snprintf(svcd_question, sizeof(svcd_question), "Uscire dal %s?", svcd_kind);
+	snprintf(svcd_question, sizeof(svcd_question), TR("Uscire dal %s?"), svcd_kind);
 	exit_question = svcd_on ? svcd_question : "Tornare all'elenco?";
 
 	if (mc.astream >= 0 && audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
@@ -2830,7 +2830,7 @@ static int media_play(int in_playlist)
 			info.chapter = info.chapters ? chapter_index(info.time) + 1 : 0;
 			info.audio_mode = audio_mode;
 			info.audio_label = mc.audio_label[0] ? mc.audio_label : NULL;
-			if (mc.astream < 0) info.audio_label = "Senza audio";
+			if (mc.astream < 0) info.audio_label = TR("Senza audio");
 			if (play_osd_hook) play_osd_hook(&info);
 			info.format_label = format_label();
 			osd_build(&info);
@@ -2999,10 +2999,10 @@ static int jf_enabled(void);
 static void scan_sources(void)
 {
 	num_sources = 0;
-	add_source("Disco nel lettore", "");
+	add_source(TR("Disco nel lettore"), "");
 	if (dir_exists("/media/fat/Video")) add_source("SD: Video", "/media/fat/Video");
-	if (dir_exists("/media/fat/Music")) add_source("SD: Musica", "/media/fat/Music");
-	add_source("SD: tutta la scheda", "/media/fat");
+	if (dir_exists("/media/fat/Music")) add_source(TR("SD: Musica"), "/media/fat/Music");
+	add_source(TR("SD: tutta la scheda"), "/media/fat");
 	// the same disk mounted on two /media/usbN (it happens) is listed once
 	dev_t seen[8];
 	int nseen = 0;
@@ -3028,9 +3028,9 @@ static void scan_sources(void)
 		snprintf(label, sizeof(label), "USB %d", i);
 		add_source(label, path);
 	}
-	if (dir_has_entries("/media/fat/cifs")) add_source("Rete (CIFS)", "/media/fat/cifs");
+	if (dir_has_entries("/media/fat/cifs")) add_source(TR("Rete (CIFS)"), "/media/fat/cifs");
 	if (jf_enabled()) add_source("Jellyfin", "jellyfin:");
-	add_source("Regola CRT (dimensioni e posizione)", "crt:");
+	add_source(TR("Regola CRT (dimensioni e posizione)"), "crt:");
 }
 
 // ---------------------------------------------------------------------------
@@ -3147,7 +3147,7 @@ static void draw_browser(const char *title, const char *const *labels, const int
 	int first = sel - rows / 2;
 	if (first > count - rows) first = count - rows;
 	if (first < 0) first = 0;
-	if (!count) fb_text_xy(ox + mx, top + 2 * sy, sx, sy, 1, message ? message : "Nessun file video o audio qui", grey);
+	if (!count) fb_text_xy(ox + mx, top + 2 * sy, sx, sy, 1, message ? message : TR("Nessun file video o audio qui"), grey);
 	for (int i = first; i < count && i < first + rows; i++)
 	{
 		int y = top + (i - first) * row_h;
@@ -3159,8 +3159,8 @@ static void draw_browser(const char *title, const char *const *labels, const int
 	}
 
 	// the keys: centred, as large as the list and bold
-	const char *help = "A Apri  B Indietro  \x10\x11 Pagina  X Esci";
-	if (text_w(help, sx) > mw) help = "A Apri  B Indietro  X Esci";
+	const char *help = TR("A Apri  B Indietro  \x10\x11 Pagina  X Esci");
+	if (text_w(help, sx) > mw) help = TR("A Apri  B Indietro  X Esci");
 	text_centre(fb_h - 14 * sy, sx, sy, 1, help, fb_rgb(230, 230, 230));
 	menu_end();
 }
@@ -3333,10 +3333,10 @@ static int boot_wait(void)
 			{
 				int sx = menu_sx(), sy = menu_sy();
 				char line[64];
-				text_centre(fb_h / 2 - 24 * sy, sx, sy, 1, "La MiSTer sta finendo l'avvio", fb_rgb(255, 200, 80));
-				snprintf(line, sizeof(line), "Il video parte da solo  (%d s)", s);
+				text_centre(fb_h / 2 - 24 * sy, sx, sy, 1, TR("La MiSTer sta finendo l'avvio"), fb_rgb(255, 200, 80));
+				snprintf(line, sizeof(line), TR("Il video parte da solo  (%d s)"), s);
 				text_centre(fb_h / 2 - 4 * sy, sx, sy, 1, line, fb_rgb(255, 255, 255));
-				text_centre(fb_h - 14 * sy, sx, sy, 1, "B Indietro", fb_rgb(230, 230, 230));
+				text_centre(fb_h - 14 * sy, sx, sy, 1, TR("B Indietro"), fb_rgb(230, 230, 230));
 			}
 			menu_end();
 		}
@@ -3792,7 +3792,7 @@ static int spbc_item(int item)
 	if (item >= 2 && item <= 99)
 	{
 		if (item > track_last || !tracks[item].data) return -1;
-		snprintf(name, sizeof(name), "%s - traccia %d", svcd_kind, item - 1);
+		snprintf(name, sizeof(name), TR("%s - traccia %d"), svcd_kind, item - 1);
 		return svcd_play_range(tracks[item].start, tracks[item].end, item, -1, name, 1);
 	}
 	if (item >= 100 && item < 600)
@@ -3800,7 +3800,7 @@ static int spbc_item(int item)
 		int e = item - 100;
 		if (e >= num_entry_items || !entry_items[e].track) return -1;
 		int t = entry_items[e].track;
-		snprintf(name, sizeof(name), "%s - traccia %d", svcd_kind, t - 1);
+		snprintf(name, sizeof(name), TR("%s - traccia %d"), svcd_kind, t - 1);
 		return svcd_play_range(tracks[t].start, tracks[t].end, t, entry_items[e].lba, name, 1);
 	}
 	if (item >= 1000 && item < 1000 + seg_count)
@@ -4410,30 +4410,30 @@ static void crt_draw(int sel, const char *message)
 	int bx = (fb_w - bw) / 2, by = (fb_h - bh) / 2;
 	fb_fill_rect(bx, by, bw, bh, fb_rgb(0, 0, 0));
 	int y = by + 4 * sy;
-	text_centre(y, sx, sy, 1, "Regola CRT", white);
+	text_centre(y, sx, sy, 1, TR("Regola CRT"), white);
 	y += row_h;
-	text_centre(y, sx, sy, 0, "Il bordo rosso deve toccare i lati", grey);
+	text_centre(y, sx, sy, 0, TR("Il bordo rosso deve toccare i lati"), grey);
 	y += row_h * 3 / 2;
 	for (int i = 0; i < CRT_ITEMS; i++, y += row_h)
 	{
 		char line[64];
-		if (i == CRT_MODE) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_mode_names[crt_val[i]]);
-		else if (i == CRT_FILTER) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_filter_names[crt_val[i]]);
-		else if (i == CRT_ASPECT) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_aspect_names[crt_val[i]]);
-		else if (i == CRT_PANSCAN) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_val[i] ? "Acceso" : "Spento");
-		else snprintf(line, sizeof(line), "%-17s %+d", crt_items[i].label, crt_val[i]);
+		if (i == CRT_MODE) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), crt_mode_names[crt_val[i]]);
+		else if (i == CRT_FILTER) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), TR(crt_filter_names[crt_val[i]]));
+		else if (i == CRT_ASPECT) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), TR(crt_aspect_names[crt_val[i]]));
+		else if (i == CRT_PANSCAN) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), TR(crt_val[i] ? "Acceso" : "Spento"));
+		else snprintf(line, sizeof(line), "%-17s %+d", TR(crt_items[i].label), crt_val[i]);
 		if (i == sel) fb_fill_rect(bx + sx, y - 2 * sy, bw - 2 * sx, row_h, accent);
 		fb_text_xy(bx + gw, y, sx, sy, 1, line, white);
 	}
 	y += row_h / 2;
 	char m[64], line[96];
-	snprintf(line, sizeof(line), "Misurata: %s", crt_measured_short(m, sizeof(m))[0] ? m : "non ancora");
+	snprintf(line, sizeof(line), TR("Misurata: %s"), crt_measured_short(m, sizeof(m))[0] ? m : TR("non ancora"));
 	text_centre(y, sx, sy, 0, line, grey);
 	y += row_h * 3 / 2;
 	if (message) text_centre(y, sx, sy, 1, message, fb_rgb(255, 200, 80));
-	else text_centre(y, sx, sy, 1, "Su/Giu Scegli  \x10\x11 Cambia", fb_rgb(230, 230, 230));
+	else text_centre(y, sx, sy, 1, TR("Su/Giu Scegli  \x10\x11 Cambia"), fb_rgb(230, 230, 230));
 	y += row_h;
-	text_centre(y, sx, sy, 1, "A Salva  B Annulla  Y Azzera", fb_rgb(230, 230, 230));
+	text_centre(y, sx, sy, 1, TR("A Salva  B Annulla  Y Azzera"), fb_rgb(230, 230, 230));
 	menu_end();
 }
 
@@ -4485,7 +4485,7 @@ static void crt_adjust_screen(void)
 		case KEY_ENTER: case KEY_PLAY:
 			if (crt_save())
 			{
-				message = "Impossibile salvare il file ini";
+				message = TR("Impossibile salvare il file ini");
 				crt_draw(sel, message);
 				continue;
 			}
@@ -4572,7 +4572,7 @@ static int run_browser(void)
 		const char *labels[16];
 		for (int i = 0; i < num_sources; i++) labels[i] = sources[i].label;
 		if (sel >= num_sources) sel = 0;
-		draw_browser("Scegli la sorgente", labels, NULL, num_sources, sel, NULL);
+		draw_browser(TR("Scegli la sorgente"), labels, NULL, num_sources, sel, NULL);
 
 		int code = wait_key();
 		if (!code) break;
@@ -4595,8 +4595,8 @@ static int run_browser(void)
 		{
 			if (play_disc_in_drive(NULL))
 			{
-				draw_browser("Scegli la sorgente", labels, NULL, num_sources, sel, NULL);
-				menu_notice("Nessun disco leggibile");
+				draw_browser(TR("Scegli la sorgente"), labels, NULL, num_sources, sel, NULL);
+				menu_notice(TR("Nessun disco leggibile"));
 				sleep(2);
 			}
 			quit_requested = 0;

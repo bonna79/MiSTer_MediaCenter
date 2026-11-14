@@ -1191,8 +1191,8 @@ static void dvd_make_labels(void)
 	else
 	{
 		int l = dvd_spu_logical();
-		if (l < 0) snprintf(s, sizeof(s), "  Sott. no");
-		else snprintf(s, sizeof(s), "  Sott. %d/%d%s", l + 1, ns, lang_name(dvdnav_spu_stream_to_lang(dvd.nav, l), lang));
+		if (l < 0) snprintf(s, sizeof(s), "%s", TR("  Sott. no"));
+		else snprintf(s, sizeof(s), TR("  Sott. %d/%d%s"), l + 1, ns, lang_name(dvdnav_spu_stream_to_lang(dvd.nav, l), lang));
 	}
 	char label[sizeof(dvd.audio_label)];
 	snprintf(label, sizeof(label), "%s%s", a, s);
