@@ -66,7 +66,7 @@ Provata su un MiSTer vero il 14 novembre 2026, su CRT Sony Trinitron (SCART RGB)
 | Prova | Risultato |
 | --- | --- |
 | Menu in inglese con `MC_LANG=en` | Funziona |
-| Pagina Impostazioni: salvataggio, annulla, collegamento a Regola CRT | Funziona |
+| Pagina Impostazioni | Funziona |
 | Riquadro Start con formato, ritardo audio e interlacciato | Funziona |
 | Sottotitoli esterni `.srt` | Funzionano |
 

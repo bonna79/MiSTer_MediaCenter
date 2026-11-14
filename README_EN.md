@@ -68,7 +68,7 @@ Tested on a real MiSTer on 14 November 2026, on a Sony Trinitron CRT (SCART RGB)
 | Test | Result |
 | --- | --- |
 | English menu with `MC_LANG=en` | Working |
-| Settings page: save, cancel, link to CRT Adjust | Working |
+| Settings page | Working |
 | Start box with format, audio delay and interlaced | Working |
 | External `.srt` subtitles | Working |
 
