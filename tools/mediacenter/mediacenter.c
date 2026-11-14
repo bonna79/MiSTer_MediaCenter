@@ -288,6 +288,21 @@ static void vq_clear(void)
 	mc.vq_count = 0;
 }
 
+// Whether a language tag (ita, it, ger...) is the language with the two
+// letter code want (it, en, fr, de, es, ja: those of Impostazioni).
+static int lang_is(const char *tag, const char *want)
+{
+	static const char *const alias[][3] = {
+		{ "it", "ita", NULL }, { "en", "eng", NULL }, { "fr", "fra", "fre" },
+		{ "de", "deu", "ger" }, { "es", "spa", NULL }, { "ja", "jpn", NULL },
+	};
+	if (!strcasecmp(tag, want)) return 1;
+	for (unsigned i = 0; i < sizeof(alias) / sizeof(alias[0]); i++)
+		if (!strcasecmp(want, alias[i][0]))
+			return !strcasecmp(tag, alias[i][1]) || (alias[i][2] && !strcasecmp(tag, alias[i][2]));
+	return 0;
+}
+
 static void set_audio_label(void)
 {
 	mc.audio_label[0] = 0;
@@ -427,6 +442,19 @@ static int media_open(const char *path)
 		if (mc.fmt->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
 		if ((int)i == best_audio) mc.audio_track = mc.num_audio_tracks;
 		mc.audio_tracks[mc.num_audio_tracks++] = i;
+	}
+	// MC_AUDIO_LANG (Impostazioni): the first track in that language, when
+	// the file names the languages; otherwise the one chosen above
+	const char *want = getenv("MC_AUDIO_LANG");
+	for (int t = 0; want && want[0] && t < mc.num_audio_tracks; t++)
+	{
+		AVDictionaryEntry *lang = av_dict_get(mc.fmt->streams[mc.audio_tracks[t]]->metadata, "language", NULL, 0);
+		if (lang && lang_is(lang->value, want))
+		{
+			if (t != mc.audio_track) printf("mediacenter: traccia audio %d (%s) come da MC_AUDIO_LANG\n", t + 1, lang->value);
+			mc.audio_track = t;
+			break;
+		}
 	}
 	if (mc.num_audio_tracks) open_audio_track(mc.audio_track);
 
@@ -588,13 +616,13 @@ static void feed_audio_output(void)
 // now is behind the clock, the clock waits for it (the pictures wait, the
 // sound is never cut). MC_AV_OFFSET (seconds) moves the sound later (+) or
 // earlier (-) for a TV that delays the picture.
+static double av_offset = NAN; // read again after Impostazioni saves it
 static void av_sync(double elapsed)
 {
-	static double offset = NAN;
-	if (isnan(offset))
+	if (isnan(av_offset))
 	{
 		const char *e = getenv("MC_AV_OFFSET");
-		offset = e ? atof(e) : 0;
+		av_offset = e ? atof(e) : 0;
 	}
 	static double held; // seconds the clock has been held without a break
 	if (av_pause > 0)
@@ -611,7 +639,7 @@ static void av_sync(double elapsed)
 	// stream) is silence: the clock runs through it, otherwise the sound
 	// after the gap would never become due and playback would stop
 	if (mc.pend_len && mc.pend_pts > sent_end + 0.1) { held = 0; av_gaps++; return; }
-	double heard = sent_end - audio_queued() - offset;
+	double heard = sent_end - audio_queued() - av_offset;
 	double late = mc.clock - heard;
 	if (late > 0.03)
 	{
@@ -3030,6 +3058,7 @@ static void scan_sources(void)
 	}
 	if (dir_has_entries("/media/fat/cifs")) add_source(TR("Rete (CIFS)"), "/media/fat/cifs");
 	if (jf_enabled()) add_source("Jellyfin", "jellyfin:");
+	add_source(TR("Impostazioni"), "settings:");
 	add_source(TR("Regola CRT (dimensioni e posizione)"), "crt:");
 }
 
@@ -4508,6 +4537,230 @@ static void crt_adjust_screen(void)
 	}
 }
 
+// Impostazioni: the settings of mediacenter.ini chosen once, changed on
+// screen. Up/Down choose, Left/Right change, A saves (on the last row it
+// opens Regola CRT), B leaves without saving. Only the settings changed here
+// are written: their lines are replaced, every other line stays as it is.
+// They apply from the next video (the language at once).
+#define SET_UILANG 0
+#define SET_ALANG 1
+#define SET_SLANG 2
+#define SET_AVOFF 3
+#define SET_FIELDS 4
+#define SET_CRT 5
+#define SET_ITEMS 6
+static const char *const set_keys[SET_CRT] = { "MC_LANG", "MC_AUDIO_LANG", "MC_SUB_LANG", "MC_AV_OFFSET", "MC_FIELDS" };
+static const char *const set_labels[SET_ITEMS] = { "Lingua menu", "Lingua audio", "Sottotitoli DVD", "Ritardo audio", "Campi su CRT",
+	"Regola CRT (dimensioni e posizione)" };
+// languages of the audio and of the DVD's subtitles: the first is "as before"
+// (the file's own choice, Italian on DVD); the subtitles also have "off"
+static const char *const set_lang_codes[] = { "", "it", "en", "fr", "de", "es", "ja" };
+static const char *const set_lang_names[] = { "Predefinita", "Italiano", "Inglese", "Francese", "Tedesco", "Spagnolo", "Giapponese" };
+#define SET_LANGS ((int)(sizeof(set_lang_codes) / sizeof(set_lang_codes[0])))
+#define SET_AVOFF_MAX 100 // tens of milliseconds
+static int set_val[SET_CRT];
+
+static int set_lang_index(const char *e)
+{
+	for (int i = 1; e && i < SET_LANGS; i++)
+		if (!strcasecmp(e, set_lang_codes[i])) return i;
+	return 0;
+}
+
+// The values in the environment (mediacenter.ini, read at start).
+static void set_load(void)
+{
+	set_val[SET_UILANG] = lang_en();
+	set_val[SET_ALANG] = set_lang_index(getenv("MC_AUDIO_LANG"));
+	const char *e = getenv("MC_SUB_LANG");
+	set_val[SET_SLANG] = e && !strcasecmp(e, "off") ? 1 : set_lang_index(e) ? set_lang_index(e) + 1 : 0;
+	e = getenv("MC_AV_OFFSET");
+	int v = e ? (int)lround(atof(e) * 100) : 0;
+	set_val[SET_AVOFF] = v < -SET_AVOFF_MAX ? -SET_AVOFF_MAX : v > SET_AVOFF_MAX ? SET_AVOFF_MAX : v;
+	e = getenv("MC_FIELDS");
+	set_val[SET_FIELDS] = e && atoi(e) ? 1 : 0;
+}
+
+static int set_max(int i)
+{
+	return i == SET_UILANG || i == SET_FIELDS ? 1 : i == SET_ALANG ? SET_LANGS - 1 : i == SET_SLANG ? SET_LANGS : SET_AVOFF_MAX;
+}
+
+// The value written in mediacenter.ini ("" leaves the line out).
+static void set_text(int i, char *buf, size_t len)
+{
+	int v = set_val[i];
+	buf[0] = 0;
+	if (i == SET_UILANG && v) snprintf(buf, len, "en");
+	if (i == SET_ALANG && v) snprintf(buf, len, "%s", set_lang_codes[v]);
+	if (i == SET_SLANG && v) snprintf(buf, len, "%s", v == 1 ? "off" : set_lang_codes[v - 1]);
+	if (i == SET_AVOFF && v) snprintf(buf, len, "%.2f", v / 100.0);
+	if (i == SET_FIELDS && v) snprintf(buf, len, "1");
+}
+
+// The value shown on screen.
+static const char *set_shown(int i, char *buf, size_t len)
+{
+	int v = set_val[i];
+	switch (i)
+	{
+	case SET_UILANG: return v ? "English" : "Italiano";
+	case SET_ALANG: return TR(set_lang_names[v]);
+	case SET_SLANG: return v == 0 ? TR("Predefiniti") : v == 1 ? TR("Spenti") : TR(set_lang_names[v - 1]);
+	case SET_AVOFF: snprintf(buf, len, "%+d ms", v * 10); return buf;
+	case SET_FIELDS: return TR(v ? "Acceso" : "Spento");
+	}
+	return "";
+}
+
+// Replaces the lines of the changed settings in mediacenter.ini.
+static int set_save(const int *before)
+{
+	const char *path = "/media/fat/linux/mediacenter.ini";
+	char *old = NULL;
+	size_t len = 0;
+	FILE *f = fopen(path, "r");
+	if (f)
+	{
+		fseek(f, 0, SEEK_END);
+		long sz = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		if (sz > 0 && sz < 65536 && (old = (char *)malloc(sz + 1)))
+		{
+			len = fread(old, 1, sz, f);
+			old[len] = 0;
+		}
+		fclose(f);
+		if (sz > 0 && !old) return -1;
+	}
+	char tmp[64];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	f = fopen(tmp, "w");
+	if (!f) { free(old); return -1; }
+	for (char *line = old; line && *line;)
+	{
+		char *next = strchr(line, '\n');
+		size_t n = next ? (size_t)(next - line + 1) : strlen(line);
+		const char *p = line;
+		while (*p == ' ' || *p == '\t') p++;
+		int drop = 0;
+		for (int i = 0; i < SET_CRT && !drop; i++)
+		{
+			size_t k = strlen(set_keys[i]);
+			if (set_val[i] == before[i] || strncmp(p, set_keys[i], k)) continue;
+			const char *q = p + k;
+			while (*q == ' ' || *q == '\t') q++;
+			drop = *q == '=';
+		}
+		if (!drop) fwrite(line, 1, n, f);
+		line += n;
+	}
+	if (len && old[len - 1] != '\n') fputc('\n', f);
+	for (int i = 0; i < SET_CRT; i++)
+	{
+		if (set_val[i] == before[i]) continue;
+		char v[16];
+		set_text(i, v, sizeof(v));
+		if (v[0]) { fprintf(f, "%s=%s\n", set_keys[i], v); setenv(set_keys[i], v, 1); }
+		else unsetenv(set_keys[i]);
+	}
+	free(old);
+	int err = fclose(f);
+	if (!err) err = rename(tmp, path);
+	sync();
+	lang_cache = -1;  // the language at once
+	av_offset = NAN;  // the delay from the next video
+	return err;
+}
+
+static void set_draw(int sel, const char *message)
+{
+	menu_begin();
+	int sx = menu_sx(), sy = menu_sy(), gw = GLYPH_W * sx;
+	int ox = menu_ox(), mw = menu_w();
+	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(160, 160, 160), accent = fb_rgb(40, 90, 190);
+	const char *name = "MiSTer MediaCenter";
+	int mx = 12 * sx;
+	int tsx = text_w(name, 2 * sx) <= mw - 2 * mx ? 2 * sx : sx;
+	text_centre(6 * sy, tsx, 3 * sy, 1, name, white);
+	fb_text_xy(ox + mx, 34 * sy, sx, sy, 0, TR("Impostazioni"), grey);
+	int row_h = 11 * sy, y = 48 * sy;
+	for (int i = 0; i < SET_ITEMS; i++, y += row_h)
+	{
+		char line[96], v[24];
+		if (i == SET_CRT) { y += row_h / 2; snprintf(line, sizeof(line), "%s", TR(set_labels[i])); }
+		else snprintf(line, sizeof(line), "%-16s %s", TR(set_labels[i]), set_shown(i, v, sizeof(v)));
+		char fit[96];
+		fit_text(fit, sizeof(fit), line, (mw - 2 * mx) / gw);
+		if (i == sel) fb_fill_rect(ox + mx / 2, y - 2 * sy, mw - mx, row_h, accent);
+		fb_text_xy(ox + mx, y, sx, sy, 1, fit, white);
+	}
+	y += row_h / 2;
+	text_centre(y, sx, sy, 0, TR(sel == SET_CRT ? "A apre Regola CRT" : sel == SET_UILANG ? "Subito dopo il salvataggio" :
+		"Vale dal prossimo video"), grey);
+	if (message) text_centre(fb_h - 26 * sy, sx, sy, 1, message, fb_rgb(255, 200, 80));
+	else text_centre(fb_h - 26 * sy, sx, sy, 1, TR("Su/Giu Scegli  \x10\x11 Cambia"), fb_rgb(230, 230, 230));
+	text_centre(fb_h - 14 * sy, sx, sy, 1, TR("A Salva  B Annulla"), fb_rgb(230, 230, 230));
+	menu_end();
+}
+
+static void settings_screen(void)
+{
+	set_load();
+	int before[SET_CRT];
+	memcpy(before, set_val, sizeof(before));
+	int sel = 0;
+	const char *message = NULL;
+	set_draw(sel, message);
+	while (!quit_requested)
+	{
+		int code = wait_key();
+		if (!code) break;
+		message = NULL;
+		int d = 0;
+		switch (code)
+		{
+		case KEY_UP: sel = (sel + SET_ITEMS - 1) % SET_ITEMS; set_draw(sel, message); continue;
+		case KEY_DOWN: sel = (sel + 1) % SET_ITEMS; set_draw(sel, message); continue;
+		case KEY_LEFT: d = -1; break;
+		case KEY_RIGHT: d = 1; break;
+		case KEY_PAGEUP: case KEY_REWIND: d = -10; break;
+		case KEY_PAGEDOWN: case KEY_FASTFORWARD: d = 10; break;
+		case KEY_ENTER: case KEY_PLAY:
+			if (sel == SET_CRT)
+			{
+				crt_adjust_screen();
+				set_draw(sel, message);
+				continue;
+			}
+			if (set_save(before))
+			{
+				message = TR("Impossibile salvare il file ini");
+				set_draw(sel, message);
+				continue;
+			}
+			for (int i = 0; i < SET_CRT; i++)
+			{
+				char v[16];
+				set_text(i, v, sizeof(v));
+				if (set_val[i] != before[i]) fprintf(stderr, "mediacenter: impostazioni: %s=%s%s\n", set_keys[i], v, v[0] ? "" : " (tolto)");
+			}
+			return;
+		case KEY_ESC: case KEY_TAB: case KEY_STOP: case KEY_STOPCD:
+			return;
+		default: continue;
+		}
+		if (sel == SET_CRT) continue;
+		int v = set_val[sel], lo = sel == SET_AVOFF ? -SET_AVOFF_MAX : 0, hi = set_max(sel);
+		if (sel == SET_AVOFF) v += d;
+		else if (d) v += d > 0 ? 1 : -1;
+		if (sel != SET_AVOFF) v = v < lo ? hi : v > hi ? lo : v; // the choices go round
+		else v = v < lo ? lo : v > hi ? hi : v;
+		set_val[sel] = v;
+		set_draw(sel, message);
+	}
+}
+
 #include "splash.h"
 
 #ifndef MC_BUILD
@@ -4584,6 +4837,11 @@ static int run_browser(void)
 		if (!strcmp(sources[sel].path, "crt:"))
 		{
 			crt_adjust_screen();
+			continue;
+		}
+		if (!strcmp(sources[sel].path, "settings:"))
+		{
+			settings_screen();
 			continue;
 		}
 		if (!strcmp(sources[sel].path, "jellyfin:"))

@@ -50,15 +50,15 @@
 // mediacenter.ini (read by the MediaCenter before anything is drawn).
 // TR() gives the English text of an Italian one listed here, and the
 // Italian text itself when MC_LANG is not en or the text is not listed.
+static int lang_cache = -1; // -1: read MC_LANG again (MediaCenter's Impostazioni)
 static int lang_en(void)
 {
-	static int en = -1;
-	if (en < 0)
+	if (lang_cache < 0)
 	{
 		const char *e = getenv("MC_LANG");
-		en = e && !strncasecmp(e, "en", 2);
+		lang_cache = e && !strncasecmp(e, "en", 2);
 	}
-	return en;
+	return lang_cache;
 }
 
 static const char *const tr_table[][2] =
@@ -171,6 +171,26 @@ static const char *const tr_table[][2] =
 	{ "CD audio%s%s", "Audio CD%s%s" },
 	{ "CD  44,1 kHz  16 bit  Stereo", "CD  44.1 kHz  16 bit  Stereo" },
 	{ "%s  %s  %d canali", "%s  %s  %d channels" },
+	// Impostazioni
+	{ "Impostazioni", "Settings" },
+	{ "Lingua menu", "Menu language" },
+	{ "Lingua audio", "Audio language" },
+	{ "Sottotitoli DVD", "DVD subtitles" },
+	{ "Ritardo audio", "Audio delay" },
+	{ "Campi su CRT", "CRT fields" },
+	{ "Predefinita", "Default" },
+	{ "Predefiniti", "Default" },
+	{ "Spenti", "Off" },
+	{ "Italiano", "Italian" },
+	{ "Inglese", "English" },
+	{ "Francese", "French" },
+	{ "Tedesco", "German" },
+	{ "Spagnolo", "Spanish" },
+	{ "Giapponese", "Japanese" },
+	{ "A apre Regola CRT", "A opens CRT Adjust" },
+	{ "Subito dopo il salvataggio", "At once after saving" },
+	{ "Vale dal prossimo video", "From the next video" },
+	{ "A Salva  B Annulla", "A Save  B Cancel" },
 };
 
 __attribute__((format_arg(1)))

@@ -1242,9 +1242,17 @@ static int dvd_open(const char *device)
 		return -1;
 	}
 	dvdnav_set_readahead_flag(dvd.nav, 1);
-	dvdnav_menu_language_select(dvd.nav, (char *)DVD_LANG);
-	dvdnav_audio_language_select(dvd.nav, (char *)DVD_LANG);
-	dvdnav_spu_language_select(dvd.nav, (char *)DVD_LANG);
+	// languages: Italian, or those chosen in Impostazioni (MC_AUDIO_LANG
+	// also for the menus, MC_SUB_LANG=off: subtitles off, forced ones aside)
+	const char *alang = getenv("MC_AUDIO_LANG"), *slang = getenv("MC_SUB_LANG");
+	if (!alang || strlen(alang) != 2) alang = DVD_LANG;
+	int subs_off = slang && !strcasecmp(slang, "off");
+	if (!slang || strlen(slang) != 2) slang = DVD_LANG;
+	dvdnav_menu_language_select(dvd.nav, (char *)alang);
+	dvdnav_audio_language_select(dvd.nav, (char *)alang);
+	dvdnav_spu_language_select(dvd.nav, (char *)slang);
+	if (strcmp(alang, DVD_LANG) || strcmp(slang, DVD_LANG) || subs_off)
+		printf("mediacenter: DVD lingua audio %s, sottotitoli %s\n", alang, subs_off ? "spenti" : slang);
 	dvdnav_set_PGC_positioning_flag(dvd.nav, 1);
 
 	mc.vdec = dvd_open_codec(AV_CODEC_ID_MPEG2VIDEO, NULL);
@@ -1265,7 +1273,7 @@ static int dvd_open(const char *device)
 	mc.last_vpts = NAN;
 	dvd.vfed_pos = NAN;
 	dvd.user_audio = -1;
-	dvd.user_spu = -2;
+	dvd.user_spu = subs_off ? -1 : -2;
 	dvd.vm_audio_phys = 0;
 	dvd.vm_audio_logical = 0;
 	dvd.vm_spu_phys = -1;
