@@ -565,6 +565,12 @@ Still to test: Super Video CD read from a burned disc.
 
 From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds everything MMC needs: the Main, the player, the script, the menu core, the library for protected DVDs and `MMC_MiSTer_ini.txt` with the lines for `MiSTer.ini`. The Physical Disc Main, for games, is downloaded from its own project. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
 
+**Updating with the script (from 4.6 on):** `Update_Mister_Media_Center.sh` downloads the latest release from GitHub and replaces only the files that changed. Put it in `/media/fat/Scripts` and start it from the Scripts menu; it needs no button presses. It checks the download (size, the sha256 given by GitHub and a zip test) and saves the old files in `/media/fat/linux/mmc_backup`. If the Main or the core changed, it asks you to restart. It never changes `MiSTer.ini` or `mediacenter.ini`; if `MiSTer.ini` has no `main=MiSTer_MediaCenter` in the `[menu]` section, it reminds you to copy the lines of `MMC_MiSTer_ini.txt`. It also works on a MiSTer without MMC, for the first install. It uses `curl`, `unzip` and the https certificates already in the MiSTer Linux, never insecure connections. The script will be in the zip from the next version; with 4.6 download it once over ssh:
+
+```
+cd /media/fat/Scripts && curl -sSfL --cacert /etc/ssl/certs/cacert.pem -O https://raw.githubusercontent.com/bonna79/MiSTer_MediaCenter/main/Scripts/Update_Mister_Media_Center.sh
+```
+
 **Updating from 4.5 to 4.6:** extract the 4.6 zip over the old files. The Main and the core are the same as in 4.5. Then restart the MiSTer.
 
 **Updating from 4.0 to 4.5:** extract the 4.5 zip over the old files, delete the old script `/media/fat/Scripts/mediacenter.sh` (it is now called `Mister_Media_Center.sh`) and restart the MiSTer.

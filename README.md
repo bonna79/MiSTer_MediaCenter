@@ -563,6 +563,12 @@ Da provare: Super Video CD letto da un disco masterizzato.
 
 Dalla pagina [Releases](../../releases) scarica `MiSTer_MediaCenter.zip` ed estrailo nella cartella principale della SD (`/media/fat`). Le cartelle dello zip sono già organizzate come sulla SD. Lo zip contiene tutto quello che serve a MMC: Main, lettore, script, core del menu, la libreria per i DVD protetti e `MMC_MiSTer_ini.txt` con le righe per `MiSTer.ini`. Il Main di Physical Disc, per i giochi, si scarica dal suo progetto. Aggiornali sempre insieme, perché la conversione dei colori nell'FPGA richiede il Main e il core della stessa versione. Dopo aver copiato il Main o il core riavvia il MiSTer.
 
+**Aggiornare con lo script (dalla 4.6 in poi):** `Update_Mister_Media_Center.sh` scarica l'ultima release da GitHub e sostituisce solo i file cambiati. Va messo in `/media/fat/Scripts` e si lancia dal menu Scripts, senza dover premere niente. Controlla il file scaricato (dimensione, impronta sha256 data da GitHub e test dello zip) e salva i vecchi file in `/media/fat/linux/mmc_backup`. Se cambiano il Main o il core, chiede di riavviare. Non modifica mai `MiSTer.ini` né `mediacenter.ini`; se in `MiSTer.ini` manca `main=MiSTer_MediaCenter` nella sezione `[menu]`, ricorda di copiare le righe di `MMC_MiSTer_ini.txt`. Funziona anche su un MiSTer senza MMC, per la prima installazione. Usa `curl`, `unzip` e i certificati https che ci sono già nel Linux del MiSTer, mai collegamenti non sicuri. Lo script sarà nello zip dalla prossima versione; con la 4.6 si scarica una volta via ssh:
+
+```
+cd /media/fat/Scripts && curl -sSfL --cacert /etc/ssl/certs/cacert.pem -O https://raw.githubusercontent.com/bonna79/MiSTer_MediaCenter/main/Scripts/Update_Mister_Media_Center.sh
+```
+
 **Aggiornare dalla 4.5 alla 4.6:** estrai lo zip della 4.6 sopra i file vecchi. Il Main e il core sono gli stessi della 4.5. Poi riavvia il MiSTer.
 
 **Aggiornare dalla 4.0 alla 4.5:** estrai lo zip della 4.5 sopra i file vecchi, cancella il vecchio script `/media/fat/Scripts/mediacenter.sh` (ora si chiama `Mister_Media_Center.sh`) e riavvia il MiSTer.
