@@ -174,7 +174,6 @@ static const char *const tr_table[][2] =
 	{ "Impostazioni", "Settings" },
 	{ "Lingua menu", "Menu language" },
 	{ "Lingua audio", "Audio language" },
-	{ "Sottotitoli DVD", "DVD subtitles" },
 	{ "Ritardo audio", "Audio delay" },
 	{ "Interlacciato", "Interlaced" },
 	{ "Si (ideale per CRT)", "Yes (best for CRT)" },
@@ -607,6 +606,7 @@ static double fb_par = 1.0;
 // On-screen controls: a band at the bottom of the screen, blended over the
 // picture. ovl_a is the coverage and ovl_v the grey level of each pixel.
 static int ovl_y = 0, ovl_h = 0, ovl_shown = 0;
+static int ovl_cap = 0, osd_ovl_y = 0, osd_ovl_h = 0; // the buffers' lines, the controls' band
 static uint8_t *ovl_a = NULL, *ovl_v = NULL;
 static unsigned ovl_gen; // counts the changes of ovl_a and ovl_v
 static uint32_t *full_line = NULL;
@@ -1032,11 +1032,26 @@ static void osd_layout(void)
 	ovl_y = info_y - SY(4);
 	if (ovl_y < 0) ovl_y = 0;
 	ovl_h = fb_h - ovl_y;
-	ovl_a = (uint8_t *)calloc((size_t)fb_w * ovl_h, 1);
-	ovl_v = (uint8_t *)calloc((size_t)fb_w * ovl_h, 1);
+	// room for a taller band too (the MediaCenter's subtitles, ovl_band)
+	ovl_cap = ovl_h > fb_h / 2 ? ovl_h : fb_h / 2;
+	ovl_a = (uint8_t *)calloc((size_t)fb_w * ovl_cap, 1);
+	ovl_v = (uint8_t *)calloc((size_t)fb_w * ovl_cap, 1);
 	ovl_gen++;
 	full_line = (uint32_t *)malloc((size_t)fb_w * 4);
 	if (!ovl_a || !ovl_v || !full_line) ovl_y = fb_h;
+	osd_ovl_y = ovl_y;
+	osd_ovl_h = ovl_h;
+}
+
+// The band of the layer: from line top to the bottom (at most ovl_cap
+// lines), or the controls' band (top < 0).
+static void ovl_band(int top)
+{
+	if (!ovl_cap) return;
+	if (top < 0) { ovl_y = osd_ovl_y; ovl_h = osd_ovl_h; return; }
+	if (top < fb_h - ovl_cap) top = fb_h - ovl_cap;
+	ovl_y = top;
+	ovl_h = fb_h - top;
 }
 
 // Every line of the controls blended with the next one: their edges are
@@ -1172,6 +1187,7 @@ static void osd_draw(const osd_info_t *info)
 
 static void osd_build(const osd_info_t *info)
 {
+	ovl_band(-1);
 	memset(ovl_a, 0, (size_t)fb_w * ovl_h);
 	memset(ovl_v, 0, (size_t)fb_w * ovl_h);
 	osd_draw(info);

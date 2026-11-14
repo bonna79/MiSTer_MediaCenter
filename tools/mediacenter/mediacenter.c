@@ -379,8 +379,14 @@ static int yuv_dvd, yuv_ilace, yuv_deint;
 static void (*yuv_ovl_begin)(void), (*yuv_ovl_end)(void);
 static void (*yuv_ovl_row)(uint8_t *row, int y, int w, int shift);
 
+// Text subtitles (subs.c, after audio_ui.c for its font).
+static void sub_open(const char *path, char *keep);
+static void sub_packet(const AVPacket *pkt);
+static void sub_free(void);
+
 static void media_close(void)
 {
+	sub_free();
 	if (yuv_last) av_frame_unref(yuv_last);
 	vq_clear();
 	if (mc.vdec) avcodec_free_context(&mc.vdec);
@@ -465,9 +471,12 @@ static int media_open(const char *path)
 		return -1;
 	}
 
+	// the text subtitles of the file are read too (subs.c)
+	char keep[64] = { 0 }; // SUB_KEEP
+	sub_open(path, keep);
 	for (unsigned i = 0; i < mc.fmt->nb_streams; i++)
 	{
-		if ((int)i != mc.vstream && (int)i != mc.astream) mc.fmt->streams[i]->discard = AVDISCARD_ALL;
+		if ((int)i != mc.vstream && (int)i != mc.astream && !(i < sizeof(keep) && keep[i])) mc.fmt->streams[i]->discard = AVDISCARD_ALL;
 	}
 
 	mc.pkt = av_packet_alloc();
@@ -1061,6 +1070,7 @@ static int decode_step(void)
 		}
 		receive_frames(mc.adec, 0);
 	}
+	else if (mc.fmt->streams[mc.pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) sub_packet(mc.pkt);
 	av_packet_unref(mc.pkt);
 	return 1;
 }
@@ -2568,6 +2578,7 @@ static void draw_audio_screen(void)
 enum { END_DONE, END_NEXT, END_PREV, END_BACK, END_QUIT, END_GOTO };
 
 #include "audio_ui.c"
+#include "subs.c"
 
 // The format box during the film (format_key, after Regola CRT).
 #define FMT_TAKEN 1
@@ -2759,6 +2770,10 @@ static int media_play(int in_playlist)
 			case KEY_TAB:
 				p.confirm_exit = 1;
 				break;
+			case KEY_ENTER:
+				sub_next();
+				sub_shown[0] = 1; // drawn again
+				break;
 			}
 			if (result != END_DONE) break;
 		}
@@ -2875,15 +2890,36 @@ static int media_play(int in_playlist)
 			info.audio_label = mc.audio_label[0] ? mc.audio_label : NULL;
 			if (mc.astream < 0) info.audio_label = TR("Senza audio");
 			if (play_osd_hook) play_osd_hook(&info);
+			char alabel[96];
+			if (sub_n && !info.legend)
+			{
+				// the subtitles: their key and their track on the controls
+				static const char *const amode[] = { "Audio Stereo", "Audio Sinistro", "Audio Destro" };
+				snprintf(alabel, sizeof(alabel), "%s%s", info.audio_label ? info.audio_label : TR(amode[audio_mode % 3]), sub_label);
+				info.audio_label = alabel;
+				info.legend = legend_subs;
+				info.legend_n = sizeof(legend_subs) / sizeof(legend_subs[0]);
+			}
 			info.format_label = format_label();
 			info.format_button = format_button();
 			osd_build(&info);
 			osd_built = t;
+			sub_shown[0] = 1; // the layer holds the controls now
 			p.dirty = 1;
 		}
-		if (show_osd != ovl_shown && !aui.on)
+		// the subtitle in the layer of the controls while they are hidden
+		const char *stext = !show_osd && !aui.on && p.state != ST_STOP ? sub_text_at(p.state == ST_FF || p.state == ST_REW ? p.ff_time : mc.clock) : NULL;
+		if (stext && strcmp(stext, sub_shown))
 		{
-			ovl_shown = show_osd;
+			snprintf(sub_shown, sizeof(sub_shown), "%s", stext);
+			sub_build(stext);
+			p.dirty = 1;
+		}
+		if (!stext && !show_osd) sub_shown[0] = 1;
+		int want_ovl = show_osd || stext;
+		if (want_ovl != ovl_shown && !aui.on)
+		{
+			ovl_shown = want_ovl;
 			p.dirty = 1;
 		}
 
@@ -4660,9 +4696,9 @@ static void crt_adjust_screen(void)
 #define SET_CRT 5
 #define SET_ITEMS 6
 static const char *const set_keys[SET_CRT] = { "MC_LANG", "MC_AUDIO_LANG", "MC_SUB_LANG", "MC_AV_OFFSET", "MC_FIELDS" };
-static const char *const set_labels[SET_ITEMS] = { "Lingua menu", "Lingua audio", "Sottotitoli DVD", "Ritardo audio", "Interlacciato",
+static const char *const set_labels[SET_ITEMS] = { "Lingua menu", "Lingua audio", "Sottotitoli", "Ritardo audio", "Interlacciato",
 	"Regola CRT (dimensioni e posizione)" };
-// languages of the audio and of the DVD's subtitles: the first is "as before"
+// languages of the audio and of the subtitles (DVD and files): the first is "as before"
 // (the file's own choice, Italian on DVD); the subtitles also have "off"
 static const char *const set_lang_codes[] = { "", "it", "en", "fr", "de", "es", "ja" };
 static const char *const set_lang_names[] = { "Predefinita", "Italiano", "Inglese", "Francese", "Tedesco", "Spagnolo", "Giapponese" };
