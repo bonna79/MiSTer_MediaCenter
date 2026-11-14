@@ -360,13 +360,13 @@ static void cd_screen(double *time, double *dur)
 		aui_track = t - cd.first + 1;
 		aui_tracks = cd.last - cd.first + 1;
 		if (cd.title[t][0]) snprintf(line, sizeof(line), "%s", cd.title[t]);
-		else snprintf(line, sizeof(line), "Traccia %d", aui_track);
+		else snprintf(line, sizeof(line), TR("Traccia %d"), aui_track);
 		aui_latin1(aui.title, sizeof(aui.title), line);
 		const char *who = cd.performer[t][0] ? cd.performer[t] : cd.artist;
-		aui_latin1(aui.file, sizeof(aui.file), who[0] ? who : "CD audio");
-		snprintf(line, sizeof(line), "CD audio%s%s", cd.album[0] ? ": " : "", cd.album);
+		aui_latin1(aui.file, sizeof(aui.file), who[0] ? who : TR("CD audio"));
+		snprintf(line, sizeof(line), TR("CD audio%s%s"), cd.album[0] ? ": " : "", cd.album);
 		aui_latin1(aui.folder, sizeof(aui.folder), line);
-		snprintf(aui.fmt, sizeof(aui.fmt), "CD  44,1 kHz  16 bit  Stereo");
+		snprintf(aui.fmt, sizeof(aui.fmt), "%s", TR("CD  44,1 kHz  16 bit  Stereo"));
 		aui.bg_state = -1; // the still part is drawn again
 		printf("mediacenter: CD traccia %d di %d%s%s\n", aui_track, aui_tracks, cd.title[t][0] ? ": " : "", cd.title[t]);
 	}
@@ -446,7 +446,7 @@ static int cdda_play(const char *cue)
 	cdda_on = 1;
 	if (media_io && !media_open("CD audio"))
 	{
-		snprintf(mc.title, sizeof(mc.title), "%s", cd.album[0] ? cd.album : "CD audio");
+		snprintf(mc.title, sizeof(mc.title), "%s", cd.album[0] ? cd.album : TR("CD audio"));
 		native_fb = 0;
 		r = media_play(0);
 		if (!(mc.audio_only && fb_menu)) fb_native(0, 0, 0);

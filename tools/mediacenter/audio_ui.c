@@ -576,10 +576,10 @@ static void aui_info(const char *path)
 		char dir[512];
 		snprintf(dir, sizeof(dir), "%.*s", (int)(dir_end - path), path);
 		const char *rest = dir, *label = NULL;
-		if (!strncmp(dir, "/media/fat/cifs", 15)) { label = "Rete"; rest = dir + 15; }
+		if (!strncmp(dir, "/media/fat/cifs", 15)) { label = TR("Rete"); rest = dir + 15; }
 		else if (!strncmp(dir, "/media/fat", 10)) { label = "SD"; rest = dir + 10; }
 		else if (!strncmp(dir, "/media/usb", 10)) { label = "USB"; rest = dir + 10; while (*rest && *rest != '/') rest++; }
-		else if (!strncmp(dir, "/media/", 7)) { label = "Disco"; rest = dir + 7; while (*rest && *rest != '/') rest++; }
+		else if (!strncmp(dir, "/media/", 7)) { label = TR("Disco"); rest = dir + 7; while (*rest && *rest != '/') rest++; }
 		size_t n = 0;
 		if (label) n = snprintf(tmp, sizeof(tmp), "%s:", label);
 		for (const char *p = rest; *p && n + 4 < sizeof(tmp); p++)
@@ -604,7 +604,7 @@ static void aui_info(const char *path)
 		AVCodecParameters *cp = mc.fmt->streams[mc.astream]->codecpar;
 		int rate = mc.adec->sample_rate, ch = mc.adec->ch_layout.nb_channels;
 		char khz[16];
-		if (rate % 1000) snprintf(khz, sizeof(khz), "%d,%d", rate / 1000, (rate % 1000) / 100);
+		if (rate % 1000) snprintf(khz, sizeof(khz), "%d%c%d", rate / 1000, lang_en() ? '.' : ',', (rate % 1000) / 100);
 		else snprintf(khz, sizeof(khz), "%d", rate / 1000);
 		char extra[32] = "";
 		int bits = cp->bits_per_raw_sample ? cp->bits_per_raw_sample : cp->bits_per_coded_sample;
@@ -614,7 +614,7 @@ static void aui_info(const char *path)
 		else if (cp->bit_rate > 0) snprintf(extra, sizeof(extra), "  %d kbit/s", (int)(cp->bit_rate / 1000));
 		else if (mc.fmt->bit_rate > 0) snprintf(extra, sizeof(extra), "  %d kbit/s", (int)(mc.fmt->bit_rate / 1000));
 		snprintf(tmp, sizeof(tmp), "%s  %s kHz%s  %s", aui_codec_name(cp->codec_id), khz, extra,
-			ch == 1 ? "Mono" : ch == 2 ? "Stereo" : "Multicanale");
+			ch == 1 ? "Mono" : ch == 2 ? "Stereo" : TR("Multicanale"));
 		aui_latin1(aui.fmt, sizeof(aui.fmt), tmp);
 	}
 	if (aui_fmt_label && aui_fmt_label()) aui_latin1(aui.fmt, sizeof(aui.fmt), aui_fmt_label());
@@ -666,7 +666,7 @@ static void aui_draw_bg(int state)
 	snprintf(line, sizeof(line), "%s", aui.title);
 	a_fit(&afont_title, line, CW);
 	a_text(&afont_title, X0, AY(96), line, C_TEXT);
-	if (aui_tracks > 0) snprintf(line, sizeof(line), "Traccia %d di %d   \xb7   %s", aui_track, aui_tracks, aui.file);
+	if (aui_tracks > 0) snprintf(line, sizeof(line), TR("Traccia %d di %d   \xb7   %s"), aui_track, aui_tracks, aui.file);
 	else snprintf(line, sizeof(line), "%s", aui.file);
 	a_fit(&afont_text, line, CW);
 	a_text(&afont_text, X0, AY(122), line, C_MUTED);
@@ -678,7 +678,7 @@ static void aui_draw_bg(int state)
 	a_text(&afont_small, X0 + 12, bt + 20, "L", C_L);
 	a_text(&afont_small, X0 + 26, bt + 20, "R", C_R);
 	if (state == ST_PAUSE || state == ST_STOP)
-		a_text_c(&afont_text, AUI_W / 2, mid - 12, state == ST_PAUSE ? "IN PAUSA" : "FERMO", C_MUTED);
+		a_text_c(&afont_text, AUI_W / 2, mid - 12, TR(state == ST_PAUSE ? "IN PAUSA" : "FERMO"), C_MUTED);
 
 	// buttons: previous, rewind, play/pause, stop, forward, next
 	static const char *const hint[6] = { "\x81", "L", NULL, "B", "R", "\x82" };
@@ -703,14 +703,14 @@ static void aui_draw_bg(int state)
 	int ex = E_X, ew = X1 - ex, et = E_TOP, eb = E_BOT;
 	a_round(ex - 8, et - AY(26), ew + 8, eb - et + AY(64), 8, aui.eq_open ? C_EQOPEN : C_PANEL);
 	if (aui.eq_open) a_round_line(ex - 8, et - AY(26), ew + 8, eb - et + AY(64), 8, 2, C_SEL);
-	a_text(&afont_small, ex, et - AY(10), aui.eq_open ? "EQUALIZZATORE   \x83\x84 guadagno   \x81\x82 banda" : "EQUALIZZATORE   (Y per regolare)",
+	a_text(&afont_small, ex, et - AY(10), TR(aui.eq_open ? "EQUALIZZATORE   \x83\x84 guadagno   \x81\x82 banda" : "EQUALIZZATORE   (Y per regolare)"),
 		aui.eq_open ? C_SEL : C_MUTED);
 
 	// time bar track
 	a_rect(X0 + 62, P_Y - 2, CW - 124, 4, C_LINE);
 
 	// keys
-	a_text_c(&afont_small, AUI_W / 2, AY(556), "Start Play  Select Pausa  B Stop  \x81 \x82 Brano  L/R Veloce  Y Equalizzatore  A Salvaschermo  X Esci", C_DIM);
+	a_text_c(&afont_small, AUI_W / 2, AY(556), TR("Start Play  Select Pausa  B Stop  \x81 \x82 Brano  L/R Veloce  Y Equalizzatore  A Salvaschermo  X Esci"), C_DIM);
 	aui.bg_gen++;
 }
 
@@ -956,7 +956,7 @@ static void aui_draw_dyn(int state, int confirm, double time, double dur, int li
 		}
 		int gy = (int)lrintf(zero - eq_gain[b] / 12.0f * h / 2);
 		a_rect(cx - 14, gy - 1, 28, 3, sel ? C_SEL : C_TEXT);
-		a_text_c(&afont_small, cx, eb + AY(16), eq_label[b], sel ? C_SEL : C_MUTED);
+		a_text_c(&afont_small, cx, eb + AY(16), TR(eq_label[b]), sel ? C_SEL : C_MUTED);
 		if (aui.eq_open || eq_gain[b])
 		{
 			snprintf(s, sizeof(s), "%s%d", eq_gain[b] > 0 ? "+" : "", eq_gain[b]);
@@ -981,7 +981,7 @@ static void aui_draw_dyn(int state, int confirm, double time, double dur, int li
 	// the exit question over the band
 	if (confirm)
 	{
-		const char *q1 = "Tornare all'elenco?", *q2 = "A conferma     altro tasto annulla";
+		const char *q1 = TR("Tornare all'elenco?"), *q2 = TR("A conferma     altro tasto annulla");
 		int w = a_text_w(&afont_title, q1);
 		if (a_text_w(&afont_text, q2) > w) w = a_text_w(&afont_text, q2);
 		w += 48;

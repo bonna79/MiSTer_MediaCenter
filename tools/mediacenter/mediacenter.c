@@ -288,6 +288,21 @@ static void vq_clear(void)
 	mc.vq_count = 0;
 }
 
+// Whether a language tag (ita, it, ger...) is the language with the two
+// letter code want (it, en, fr, de, es, ja: those of Impostazioni).
+static int lang_is(const char *tag, const char *want)
+{
+	static const char *const alias[][3] = {
+		{ "it", "ita", NULL }, { "en", "eng", NULL }, { "fr", "fra", "fre" },
+		{ "de", "deu", "ger" }, { "es", "spa", NULL }, { "ja", "jpn", NULL },
+	};
+	if (!strcasecmp(tag, want)) return 1;
+	for (unsigned i = 0; i < sizeof(alias) / sizeof(alias[0]); i++)
+		if (!strcasecmp(want, alias[i][0]))
+			return !strcasecmp(tag, alias[i][1]) || (alias[i][2] && !strcasecmp(tag, alias[i][2]));
+	return 0;
+}
+
 static void set_audio_label(void)
 {
 	mc.audio_label[0] = 0;
@@ -364,8 +379,14 @@ static int yuv_dvd, yuv_ilace, yuv_deint;
 static void (*yuv_ovl_begin)(void), (*yuv_ovl_end)(void);
 static void (*yuv_ovl_row)(uint8_t *row, int y, int w, int shift);
 
+// Text subtitles (subs.c, after audio_ui.c for its font).
+static void sub_open(const char *path, char *keep);
+static void sub_packet(const AVPacket *pkt);
+static void sub_free(void);
+
 static void media_close(void)
 {
+	sub_free();
 	if (yuv_last) av_frame_unref(yuv_last);
 	vq_clear();
 	if (mc.vdec) avcodec_free_context(&mc.vdec);
@@ -428,6 +449,19 @@ static int media_open(const char *path)
 		if ((int)i == best_audio) mc.audio_track = mc.num_audio_tracks;
 		mc.audio_tracks[mc.num_audio_tracks++] = i;
 	}
+	// MC_AUDIO_LANG (Impostazioni): the first track in that language, when
+	// the file names the languages; otherwise the one chosen above
+	const char *want = getenv("MC_AUDIO_LANG");
+	for (int t = 0; want && want[0] && t < mc.num_audio_tracks; t++)
+	{
+		AVDictionaryEntry *lang = av_dict_get(mc.fmt->streams[mc.audio_tracks[t]]->metadata, "language", NULL, 0);
+		if (lang && lang_is(lang->value, want))
+		{
+			if (t != mc.audio_track) printf("mediacenter: traccia audio %d (%s) come da MC_AUDIO_LANG\n", t + 1, lang->value);
+			mc.audio_track = t;
+			break;
+		}
+	}
 	if (mc.num_audio_tracks) open_audio_track(mc.audio_track);
 
 	if (mc.vstream < 0 && mc.astream < 0)
@@ -437,9 +471,12 @@ static int media_open(const char *path)
 		return -1;
 	}
 
+	// the text subtitles of the file are read too (subs.c)
+	char keep[64] = { 0 }; // SUB_KEEP
+	sub_open(path, keep);
 	for (unsigned i = 0; i < mc.fmt->nb_streams; i++)
 	{
-		if ((int)i != mc.vstream && (int)i != mc.astream) mc.fmt->streams[i]->discard = AVDISCARD_ALL;
+		if ((int)i != mc.vstream && (int)i != mc.astream && !(i < sizeof(keep) && keep[i])) mc.fmt->streams[i]->discard = AVDISCARD_ALL;
 	}
 
 	mc.pkt = av_packet_alloc();
@@ -588,13 +625,13 @@ static void feed_audio_output(void)
 // now is behind the clock, the clock waits for it (the pictures wait, the
 // sound is never cut). MC_AV_OFFSET (seconds) moves the sound later (+) or
 // earlier (-) for a TV that delays the picture.
+static double av_offset = NAN; // read again after Impostazioni saves it
 static void av_sync(double elapsed)
 {
-	static double offset = NAN;
-	if (isnan(offset))
+	if (isnan(av_offset))
 	{
 		const char *e = getenv("MC_AV_OFFSET");
-		offset = e ? atof(e) : 0;
+		av_offset = e ? atof(e) : 0;
 	}
 	static double held; // seconds the clock has been held without a break
 	if (av_pause > 0)
@@ -611,7 +648,7 @@ static void av_sync(double elapsed)
 	// stream) is silence: the clock runs through it, otherwise the sound
 	// after the gap would never become due and playback would stop
 	if (mc.pend_len && mc.pend_pts > sent_end + 0.1) { held = 0; av_gaps++; return; }
-	double heard = sent_end - audio_queued() - offset;
+	double heard = sent_end - audio_queued() - av_offset;
 	double late = mc.clock - heard;
 	if (late > 0.03)
 	{
@@ -1033,6 +1070,7 @@ static int decode_step(void)
 		}
 		receive_frames(mc.adec, 0);
 	}
+	else if (mc.fmt->streams[mc.pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_SUBTITLE) sub_packet(mc.pkt);
 	av_packet_unref(mc.pkt);
 	return 1;
 }
@@ -2540,9 +2578,15 @@ static void draw_audio_screen(void)
 enum { END_DONE, END_NEXT, END_PREV, END_BACK, END_QUIT, END_GOTO };
 
 #include "audio_ui.c"
+#include "subs.c"
 
 // The format box during the film (format_key, after Regola CRT).
+#define FMT_TAKEN 1
+#define FMT_PAUSE 2
+#define FMT_RESUME 3
+#define FMT_RESYNC 4
 static int format_key(int code, double t, int state, int menu);
+static const char *format_button(void);
 static int format_tick(double t);
 static const char *format_label(void);
 static void fmt_close(void);
@@ -2568,7 +2612,7 @@ static int media_play(int in_playlist)
 	have_frame = 0;
 	stop_pos = -1;
 	static char svcd_question[48];
-	snprintf(svcd_question, sizeof(svcd_question), "Uscire dal %s?", svcd_kind);
+	snprintf(svcd_question, sizeof(svcd_question), TR("Uscire dal %s?"), svcd_kind);
 	exit_question = svcd_on ? svcd_question : "Tornare all'elenco?";
 
 	if (mc.astream >= 0 && audio_open(MC_AUDIO_RATE)) fprintf(stderr, "mediacenter: playing without audio\n");
@@ -2626,7 +2670,17 @@ static int media_play(int in_playlist)
 				continue;
 			}
 			if (aui_key(code, t)) continue;
-			if (format_key(code, t, p.state, mc.audio_only || play_osd_keep)) continue;
+			{
+				int f = format_key(code, t, p.state, mc.audio_only || play_osd_keep);
+				if (f == FMT_PAUSE && p.state == ST_PLAY) p.state = ST_PAUSE;
+				if (f == FMT_RESUME && p.state == ST_PAUSE) p.state = ST_PLAY;
+				if (f == FMT_RESYNC)
+				{
+					// the new delay: the sound lined up again from here
+					if (p.state == ST_PAUSE || p.state == ST_PLAY) { media_seek(mc.clock); p.state = ST_PLAY; }
+				}
+				if (f) continue;
+			}
 			if (play_key_hook)
 			{
 				int h = play_key_hook(code);
@@ -2715,6 +2769,10 @@ static int media_play(int in_playlist)
 				break;
 			case KEY_TAB:
 				p.confirm_exit = 1;
+				break;
+			case KEY_ENTER:
+				sub_next();
+				sub_shown[0] = 1; // drawn again
 				break;
 			}
 			if (result != END_DONE) break;
@@ -2830,16 +2888,38 @@ static int media_play(int in_playlist)
 			info.chapter = info.chapters ? chapter_index(info.time) + 1 : 0;
 			info.audio_mode = audio_mode;
 			info.audio_label = mc.audio_label[0] ? mc.audio_label : NULL;
-			if (mc.astream < 0) info.audio_label = "Senza audio";
+			if (mc.astream < 0) info.audio_label = TR("Senza audio");
 			if (play_osd_hook) play_osd_hook(&info);
+			char alabel[96];
+			if (sub_n && !info.legend)
+			{
+				// the subtitles: their key and their track on the controls
+				static const char *const amode[] = { "Audio Stereo", "Audio Sinistro", "Audio Destro" };
+				snprintf(alabel, sizeof(alabel), "%s%s", info.audio_label ? info.audio_label : TR(amode[audio_mode % 3]), sub_label);
+				info.audio_label = alabel;
+				info.legend = legend_subs;
+				info.legend_n = sizeof(legend_subs) / sizeof(legend_subs[0]);
+			}
 			info.format_label = format_label();
+			info.format_button = format_button();
 			osd_build(&info);
 			osd_built = t;
+			sub_shown[0] = 1; // the layer holds the controls now
 			p.dirty = 1;
 		}
-		if (show_osd != ovl_shown && !aui.on)
+		// the subtitle in the layer of the controls while they are hidden
+		const char *stext = !show_osd && !aui.on && p.state != ST_STOP ? sub_text_at(p.state == ST_FF || p.state == ST_REW ? p.ff_time : mc.clock) : NULL;
+		if (stext && strcmp(stext, sub_shown))
 		{
-			ovl_shown = show_osd;
+			snprintf(sub_shown, sizeof(sub_shown), "%s", stext);
+			sub_build(stext);
+			p.dirty = 1;
+		}
+		if (!stext && !show_osd) sub_shown[0] = 1;
+		int want_ovl = show_osd || stext;
+		if (want_ovl != ovl_shown && !aui.on)
+		{
+			ovl_shown = want_ovl;
 			p.dirty = 1;
 		}
 
@@ -2999,10 +3079,10 @@ static int jf_enabled(void);
 static void scan_sources(void)
 {
 	num_sources = 0;
-	add_source("Disco nel lettore", "");
+	add_source(TR("Disco nel lettore"), "");
 	if (dir_exists("/media/fat/Video")) add_source("SD: Video", "/media/fat/Video");
-	if (dir_exists("/media/fat/Music")) add_source("SD: Musica", "/media/fat/Music");
-	add_source("SD: tutta la scheda", "/media/fat");
+	if (dir_exists("/media/fat/Music")) add_source(TR("SD: Musica"), "/media/fat/Music");
+	add_source(TR("SD: tutta la scheda"), "/media/fat");
 	// the same disk mounted on two /media/usbN (it happens) is listed once
 	dev_t seen[8];
 	int nseen = 0;
@@ -3028,9 +3108,10 @@ static void scan_sources(void)
 		snprintf(label, sizeof(label), "USB %d", i);
 		add_source(label, path);
 	}
-	if (dir_has_entries("/media/fat/cifs")) add_source("Rete (CIFS)", "/media/fat/cifs");
+	if (dir_has_entries("/media/fat/cifs")) add_source(TR("Rete (CIFS)"), "/media/fat/cifs");
 	if (jf_enabled()) add_source("Jellyfin", "jellyfin:");
-	add_source("Regola CRT (dimensioni e posizione)", "crt:");
+	add_source(TR("Impostazioni"), "settings:");
+	add_source(TR("Regola CRT (dimensioni e posizione)"), "crt:");
 }
 
 // ---------------------------------------------------------------------------
@@ -3147,7 +3228,7 @@ static void draw_browser(const char *title, const char *const *labels, const int
 	int first = sel - rows / 2;
 	if (first > count - rows) first = count - rows;
 	if (first < 0) first = 0;
-	if (!count) fb_text_xy(ox + mx, top + 2 * sy, sx, sy, 1, message ? message : "Nessun file video o audio qui", grey);
+	if (!count) fb_text_xy(ox + mx, top + 2 * sy, sx, sy, 1, message ? message : TR("Nessun file video o audio qui"), grey);
 	for (int i = first; i < count && i < first + rows; i++)
 	{
 		int y = top + (i - first) * row_h;
@@ -3159,8 +3240,8 @@ static void draw_browser(const char *title, const char *const *labels, const int
 	}
 
 	// the keys: centred, as large as the list and bold
-	const char *help = "A Apri  B Indietro  \x10\x11 Pagina  X Esci";
-	if (text_w(help, sx) > mw) help = "A Apri  B Indietro  X Esci";
+	const char *help = TR("A Apri  B Indietro  \x10\x11 Pagina  X Esci");
+	if (text_w(help, sx) > mw) help = TR("A Apri  B Indietro  X Esci");
 	text_centre(fb_h - 14 * sy, sx, sy, 1, help, fb_rgb(230, 230, 230));
 	menu_end();
 }
@@ -3333,10 +3414,10 @@ static int boot_wait(void)
 			{
 				int sx = menu_sx(), sy = menu_sy();
 				char line[64];
-				text_centre(fb_h / 2 - 24 * sy, sx, sy, 1, "La MiSTer sta finendo l'avvio", fb_rgb(255, 200, 80));
-				snprintf(line, sizeof(line), "Il video parte da solo  (%d s)", s);
+				text_centre(fb_h / 2 - 24 * sy, sx, sy, 1, TR("La MiSTer sta finendo l'avvio"), fb_rgb(255, 200, 80));
+				snprintf(line, sizeof(line), TR("Il video parte da solo  (%d s)"), s);
 				text_centre(fb_h / 2 - 4 * sy, sx, sy, 1, line, fb_rgb(255, 255, 255));
-				text_centre(fb_h - 14 * sy, sx, sy, 1, "B Indietro", fb_rgb(230, 230, 230));
+				text_centre(fb_h - 14 * sy, sx, sy, 1, TR("B Indietro"), fb_rgb(230, 230, 230));
 			}
 			menu_end();
 		}
@@ -3792,7 +3873,7 @@ static int spbc_item(int item)
 	if (item >= 2 && item <= 99)
 	{
 		if (item > track_last || !tracks[item].data) return -1;
-		snprintf(name, sizeof(name), "%s - traccia %d", svcd_kind, item - 1);
+		snprintf(name, sizeof(name), TR("%s - traccia %d"), svcd_kind, item - 1);
 		return svcd_play_range(tracks[item].start, tracks[item].end, item, -1, name, 1);
 	}
 	if (item >= 100 && item < 600)
@@ -3800,7 +3881,7 @@ static int spbc_item(int item)
 		int e = item - 100;
 		if (e >= num_entry_items || !entry_items[e].track) return -1;
 		int t = entry_items[e].track;
-		snprintf(name, sizeof(name), "%s - traccia %d", svcd_kind, t - 1);
+		snprintf(name, sizeof(name), TR("%s - traccia %d"), svcd_kind, t - 1);
 		return svcd_play_range(tracks[t].start, tracks[t].end, t, entry_items[e].lba, name, 1);
 	}
 	if (item >= 1000 && item < 1000 + seg_count)
@@ -4243,10 +4324,16 @@ static int crt_save(void)
 	return err;
 }
 
-// The format chosen during the film: Start opens a box in place of the
-// button legend, Left/Right (or Up/Down) change the format at once, on the
-// CRT and over HDMI; A, Start or B close it, and so does a pause of 6 s.
-// The choice is saved like Regola CRT's (MC_CRT_ASPECT, MC_CRT_PANSCAN).
+// The box opened with Start during the film, in place of the button legend:
+// Up/Down choose the setting, Left/Right change it.
+// - Formato: at once, on the CRT and over HDMI; saved like Regola CRT's
+//   (MC_CRT_ASPECT, MC_CRT_PANSCAN).
+// - Ritardo audio: the film pauses while it changes; A applies it (the
+//   sound is lined up again as after a jump, MC_AV_OFFSET saved), B goes
+//   back to the old value. Nothing is heard jumping meanwhile.
+// - Interlacciato: at once (MC_FIELDS, saved).
+// A, Start or B close it, and so does a pause of 6 s (not while a delay
+// waits for A).
 static const struct { const char *name; int aspect, pan; } fmt_list[] = {
 	{ "Auto", 0, 0 },
 	{ "4:3", 2, 0 },
@@ -4257,8 +4344,14 @@ static const struct { const char *name; int aspect, pan; } fmt_list[] = {
 	{ "Pan & scan", 0, 1 },
 };
 #define FMT_N ((int)(sizeof(fmt_list) / sizeof(fmt_list[0])))
-static int fmt_open, fmt_changed;
+#define FMT_ROWS 3
+static int fmt_open, fmt_changed, fmt_row;
+static int fmt_delay, fmt_delay_was; // tens of ms: shown, applied
+static int fmt_paused;               // the film paused for the delay
+static int fmt_fields_changed;
 static double fmt_until;
+static char fmt_text[96];
+static void fmt_save_settings(int delay, int fields); // after Impostazioni
 
 static int fmt_index(void)
 {
@@ -4268,19 +4361,44 @@ static int fmt_index(void)
 	return 0;
 }
 
+static int fmt_fields(void)
+{
+	const char *e = getenv("MC_FIELDS");
+	return e && atoi(e);
+}
+
+static int fmt_delay_now(void)
+{
+	const char *e = getenv("MC_AV_OFFSET");
+	int v = e ? (int)lround(atof(e) * 100) : 0;
+	return v < -100 ? -100 : v > 100 ? 100 : v;
+}
+
 static void fmt_close(void)
 {
 	if (!fmt_open) return;
 	fmt_open = 0;
-	if (!fmt_changed) return;
-	fmt_changed = 0;
-	int err = crt_save();
-	fprintf(stderr, "mediacenter: formato scelto durante il film: %s%s\n", fmt_list[fmt_index()].name,
-		err ? " (non salvato nel file ini)" : "");
+	fmt_delay = fmt_delay_was; // a delay not applied with A is dropped
+	fmt_paused = 0;
+	if (fmt_changed)
+	{
+		fmt_changed = 0;
+		int err = crt_save();
+		fprintf(stderr, "mediacenter: formato scelto durante il film: %s%s\n", fmt_list[fmt_index()].name,
+			err ? " (non salvato nel file ini)" : "");
+	}
+	if (fmt_fields_changed)
+	{
+		fmt_fields_changed = 0;
+		fmt_save_settings(-1000, fmt_fields());
+		fprintf(stderr, "mediacenter: interlacciato scelto durante il film: %s\n", fmt_fields() ? "si" : "no");
+	}
 }
 
-// A key while a film plays; 1 when the box took it. menu: a disc menu or a
-// list is on screen (Start belongs to it).
+// A key while a film plays; 0 when the box did not take it, else FMT_TAKEN,
+// or FMT_PAUSE / FMT_RESUME / FMT_RESYNC for the player to do (FMT_RESYNC:
+// line the sound up again, then play). menu: a disc menu or a list is on
+// screen (Start belongs to it).
 static int format_key(int code, double t, int state, int menu)
 {
 	if (!fmt_open)
@@ -4288,44 +4406,101 @@ static int format_key(int code, double t, int state, int menu)
 		if ((code == KEY_PLAY || code == KEY_PLAYCD) && state == ST_PLAY && !menu)
 		{
 			fmt_open = 1;
+			fmt_row = 0;
+			fmt_delay = fmt_delay_was = fmt_delay_now();
+			fmt_paused = 0;
 			fmt_until = t + 6.0;
-			return 1;
+			return FMT_TAKEN;
 		}
 		return 0;
 	}
+	fmt_until = t + 6.0;
 	int d = 0;
 	switch (code)
 	{
-	case KEY_LEFT: case KEY_UP: d = FMT_N - 1; break;
-	case KEY_RIGHT: case KEY_DOWN: d = 1; break;
-	case KEY_ENTER: case KEY_PLAY: case KEY_PLAYCD: case KEY_ESC: case KEY_SPACE:
+	case KEY_UP: fmt_row = (fmt_row + FMT_ROWS - 1) % FMT_ROWS; return FMT_TAKEN;
+	case KEY_DOWN: fmt_row = (fmt_row + 1) % FMT_ROWS; return FMT_TAKEN;
+	case KEY_LEFT: d = -1; break;
+	case KEY_RIGHT: d = 1; break;
+	case KEY_ENTER: case KEY_PLAY: case KEY_PLAYCD:
+		if (fmt_delay != fmt_delay_was)
+		{
+			// A applies the delay
+			char v[16];
+			snprintf(v, sizeof(v), "%.2f", fmt_delay / 100.0);
+			setenv("MC_AV_OFFSET", v, 1);
+			av_offset = NAN;
+			fmt_save_settings(fmt_delay, -1);
+			fprintf(stderr, "mediacenter: ritardo audio scelto durante il film: %+d ms\n", fmt_delay * 10);
+			fmt_delay_was = fmt_delay;
+			fmt_close();
+			return FMT_RESYNC;
+		}
+		{
+			int was_paused = fmt_paused;
+			fmt_close();
+			return was_paused ? FMT_RESUME : FMT_TAKEN;
+		}
+	case KEY_ESC: case KEY_SPACE:
+	{
+		int was_paused = fmt_paused;
 		fmt_close();
-		return 1;
+		return was_paused ? FMT_RESUME : FMT_TAKEN;
+	}
 	default:
-		// any other key closes the box and does its own job
+		// any other key closes the box and does its own job; with a delay
+		// waiting for A it is dropped and the film plays on (the key does
+		// nothing else)
+		if (fmt_paused) { fmt_close(); return FMT_RESUME; }
 		fmt_close();
 		return 0;
 	}
-	int i = (fmt_index() + d) % FMT_N;
-	crt_val[CRT_ASPECT] = fmt_list[i].aspect;
-	crt_val[CRT_PANSCAN] = fmt_list[i].pan;
-	crt_send();
-	fmt_changed = 1;
-	fmt_until = t + 6.0;
-	return 1;
+	if (fmt_row == 0)
+	{
+		int i = (fmt_index() + (d > 0 ? 1 : FMT_N - 1)) % FMT_N;
+		crt_val[CRT_ASPECT] = fmt_list[i].aspect;
+		crt_val[CRT_PANSCAN] = fmt_list[i].pan;
+		crt_send();
+		fmt_changed = 1;
+		return FMT_TAKEN;
+	}
+	if (fmt_row == 1)
+	{
+		int v = fmt_delay + d;
+		fmt_delay = v < -100 ? -100 : v > 100 ? 100 : v;
+		if (!fmt_paused && state == ST_PLAY) { fmt_paused = 1; return FMT_PAUSE; }
+		return FMT_TAKEN;
+	}
+	setenv("MC_FIELDS", fmt_fields() ? "0" : "1", 1);
+	fmt_fields_changed = 1;
+	return FMT_TAKEN;
 }
 
 // Closes the box after its time; 1 when it did (the controls to redraw).
 static int format_tick(double t)
 {
-	if (!fmt_open || t < fmt_until) return 0;
+	if (!fmt_open || fmt_paused || t < fmt_until) return 0;
 	fmt_close();
 	return 1;
 }
 
+// The line of the box, translated; NULL when it is closed.
 static const char *format_label(void)
 {
-	return fmt_open ? fmt_list[fmt_index()].name : NULL;
+	if (!fmt_open) return NULL;
+	char v[32];
+	const char *name;
+	if (fmt_row == 0) { name = TR("Formato"); snprintf(v, sizeof(v), "%s", TR(fmt_list[fmt_index()].name)); }
+	else if (fmt_row == 1) { name = TR("Ritardo audio"); snprintf(v, sizeof(v), "%+d ms", fmt_delay * 10); }
+	else { name = TR("Interlacciato"); snprintf(v, sizeof(v), "%s", fmt_fields() ? TR("Si") : "No"); }
+	snprintf(fmt_text, sizeof(fmt_text), "\x12\x13 %d/%d  %s  \x10 %s \x11", fmt_row + 1, FMT_ROWS, name, v);
+	return fmt_text;
+}
+
+// The key shown beside the box: A applies a delay waiting for it.
+static const char *format_button(void)
+{
+	return fmt_open && fmt_delay != fmt_delay_was ? TR("Applica") : TR("Chiudi");
 }
 
 // A test picture for the adjustment: border, grid, centre cross and values.
@@ -4410,30 +4585,30 @@ static void crt_draw(int sel, const char *message)
 	int bx = (fb_w - bw) / 2, by = (fb_h - bh) / 2;
 	fb_fill_rect(bx, by, bw, bh, fb_rgb(0, 0, 0));
 	int y = by + 4 * sy;
-	text_centre(y, sx, sy, 1, "Regola CRT", white);
+	text_centre(y, sx, sy, 1, TR("Regola CRT"), white);
 	y += row_h;
-	text_centre(y, sx, sy, 0, "Il bordo rosso deve toccare i lati", grey);
+	text_centre(y, sx, sy, 0, TR("Il bordo rosso deve toccare i lati"), grey);
 	y += row_h * 3 / 2;
 	for (int i = 0; i < CRT_ITEMS; i++, y += row_h)
 	{
 		char line[64];
-		if (i == CRT_MODE) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_mode_names[crt_val[i]]);
-		else if (i == CRT_FILTER) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_filter_names[crt_val[i]]);
-		else if (i == CRT_ASPECT) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_aspect_names[crt_val[i]]);
-		else if (i == CRT_PANSCAN) snprintf(line, sizeof(line), "%-17s %s", crt_items[i].label, crt_val[i] ? "Acceso" : "Spento");
-		else snprintf(line, sizeof(line), "%-17s %+d", crt_items[i].label, crt_val[i]);
+		if (i == CRT_MODE) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), crt_mode_names[crt_val[i]]);
+		else if (i == CRT_FILTER) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), TR(crt_filter_names[crt_val[i]]));
+		else if (i == CRT_ASPECT) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), TR(crt_aspect_names[crt_val[i]]));
+		else if (i == CRT_PANSCAN) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), TR(crt_val[i] ? "Acceso" : "Spento"));
+		else snprintf(line, sizeof(line), "%-17s %+d", TR(crt_items[i].label), crt_val[i]);
 		if (i == sel) fb_fill_rect(bx + sx, y - 2 * sy, bw - 2 * sx, row_h, accent);
 		fb_text_xy(bx + gw, y, sx, sy, 1, line, white);
 	}
 	y += row_h / 2;
 	char m[64], line[96];
-	snprintf(line, sizeof(line), "Misurata: %s", crt_measured_short(m, sizeof(m))[0] ? m : "non ancora");
+	snprintf(line, sizeof(line), TR("Misurata: %s"), crt_measured_short(m, sizeof(m))[0] ? m : TR("non ancora"));
 	text_centre(y, sx, sy, 0, line, grey);
 	y += row_h * 3 / 2;
 	if (message) text_centre(y, sx, sy, 1, message, fb_rgb(255, 200, 80));
-	else text_centre(y, sx, sy, 1, "Su/Giu Scegli  \x10\x11 Cambia", fb_rgb(230, 230, 230));
+	else text_centre(y, sx, sy, 1, TR("Su/Giu Scegli  \x10\x11 Cambia"), fb_rgb(230, 230, 230));
 	y += row_h;
-	text_centre(y, sx, sy, 1, "A Salva  B Annulla  Y Azzera", fb_rgb(230, 230, 230));
+	text_centre(y, sx, sy, 1, TR("A Salva  B Annulla  Y Azzera"), fb_rgb(230, 230, 230));
 	menu_end();
 }
 
@@ -4485,7 +4660,7 @@ static void crt_adjust_screen(void)
 		case KEY_ENTER: case KEY_PLAY:
 			if (crt_save())
 			{
-				message = "Impossibile salvare il file ini";
+				message = TR("Impossibile salvare il file ini");
 				crt_draw(sel, message);
 				continue;
 			}
@@ -4505,6 +4680,242 @@ static void crt_adjust_screen(void)
 		crt_val[sel] = v;
 		crt_send();
 		crt_draw(sel, message);
+	}
+}
+
+// Impostazioni: the settings of mediacenter.ini chosen once, changed on
+// screen. Up/Down choose, Left/Right change, A saves (on the last row it
+// opens Regola CRT), B leaves without saving. Only the settings changed here
+// are written: their lines are replaced, every other line stays as it is.
+// They apply from the next video (the language at once).
+#define SET_UILANG 0
+#define SET_ALANG 1
+#define SET_SLANG 2
+#define SET_AVOFF 3
+#define SET_FIELDS 4
+#define SET_CRT 5
+#define SET_ITEMS 6
+static const char *const set_keys[SET_CRT] = { "MC_LANG", "MC_AUDIO_LANG", "MC_SUB_LANG", "MC_AV_OFFSET", "MC_FIELDS" };
+static const char *const set_labels[SET_ITEMS] = { "Lingua menu", "Lingua audio", "Sottotitoli", "Ritardo audio", "Interlacciato",
+	"Regola CRT (dimensioni e posizione)" };
+// languages of the audio and of the subtitles (DVD and files): the first is "as before"
+// (the file's own choice, Italian on DVD); the subtitles also have "off"
+static const char *const set_lang_codes[] = { "", "it", "en", "fr", "de", "es", "ja" };
+static const char *const set_lang_names[] = { "Predefinita", "Italiano", "Inglese", "Francese", "Tedesco", "Spagnolo", "Giapponese" };
+#define SET_LANGS ((int)(sizeof(set_lang_codes) / sizeof(set_lang_codes[0])))
+#define SET_AVOFF_MAX 100 // tens of milliseconds
+static int set_val[SET_CRT];
+
+static int set_lang_index(const char *e)
+{
+	for (int i = 1; e && i < SET_LANGS; i++)
+		if (!strcasecmp(e, set_lang_codes[i])) return i;
+	return 0;
+}
+
+// The values in the environment (mediacenter.ini, read at start).
+static void set_load(void)
+{
+	set_val[SET_UILANG] = lang_en();
+	set_val[SET_ALANG] = set_lang_index(getenv("MC_AUDIO_LANG"));
+	const char *e = getenv("MC_SUB_LANG");
+	set_val[SET_SLANG] = e && !strcasecmp(e, "off") ? 1 : set_lang_index(e) ? set_lang_index(e) + 1 : 0;
+	e = getenv("MC_AV_OFFSET");
+	int v = e ? (int)lround(atof(e) * 100) : 0;
+	set_val[SET_AVOFF] = v < -SET_AVOFF_MAX ? -SET_AVOFF_MAX : v > SET_AVOFF_MAX ? SET_AVOFF_MAX : v;
+	e = getenv("MC_FIELDS");
+	set_val[SET_FIELDS] = e && atoi(e) ? 1 : 0;
+}
+
+static int set_max(int i)
+{
+	return i == SET_UILANG || i == SET_FIELDS ? 1 : i == SET_ALANG ? SET_LANGS - 1 : i == SET_SLANG ? SET_LANGS : SET_AVOFF_MAX;
+}
+
+// The value written in mediacenter.ini ("" leaves the line out).
+static void set_text(int i, char *buf, size_t len)
+{
+	int v = set_val[i];
+	buf[0] = 0;
+	if (i == SET_UILANG && v) snprintf(buf, len, "en");
+	if (i == SET_ALANG && v) snprintf(buf, len, "%s", set_lang_codes[v]);
+	if (i == SET_SLANG && v) snprintf(buf, len, "%s", v == 1 ? "off" : set_lang_codes[v - 1]);
+	if (i == SET_AVOFF && v) snprintf(buf, len, "%.2f", v / 100.0);
+	if (i == SET_FIELDS && v) snprintf(buf, len, "1");
+}
+
+// The value shown on screen.
+static const char *set_shown(int i, char *buf, size_t len)
+{
+	int v = set_val[i];
+	switch (i)
+	{
+	case SET_UILANG: return v ? "English" : "Italiano";
+	case SET_ALANG: return TR(set_lang_names[v]);
+	case SET_SLANG: return v == 0 ? TR("Predefiniti") : v == 1 ? TR("Spenti") : TR(set_lang_names[v - 1]);
+	case SET_AVOFF: snprintf(buf, len, "%+d ms", v * 10); return buf;
+	case SET_FIELDS: return TR(v ? "Si (ideale per CRT)" : "No");
+	}
+	return "";
+}
+
+// Replaces the lines of the changed settings in mediacenter.ini.
+static int set_save(const int *before)
+{
+	const char *path = "/media/fat/linux/mediacenter.ini";
+	char *old = NULL;
+	size_t len = 0;
+	FILE *f = fopen(path, "r");
+	if (f)
+	{
+		fseek(f, 0, SEEK_END);
+		long sz = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		if (sz > 0 && sz < 65536 && (old = (char *)malloc(sz + 1)))
+		{
+			len = fread(old, 1, sz, f);
+			old[len] = 0;
+		}
+		fclose(f);
+		if (sz > 0 && !old) return -1;
+	}
+	char tmp[64];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	f = fopen(tmp, "w");
+	if (!f) { free(old); return -1; }
+	for (char *line = old; line && *line;)
+	{
+		char *next = strchr(line, '\n');
+		size_t n = next ? (size_t)(next - line + 1) : strlen(line);
+		const char *p = line;
+		while (*p == ' ' || *p == '\t') p++;
+		int drop = 0;
+		for (int i = 0; i < SET_CRT && !drop; i++)
+		{
+			size_t k = strlen(set_keys[i]);
+			if (set_val[i] == before[i] || strncmp(p, set_keys[i], k)) continue;
+			const char *q = p + k;
+			while (*q == ' ' || *q == '\t') q++;
+			drop = *q == '=';
+		}
+		if (!drop) fwrite(line, 1, n, f);
+		line += n;
+	}
+	if (len && old[len - 1] != '\n') fputc('\n', f);
+	for (int i = 0; i < SET_CRT; i++)
+	{
+		if (set_val[i] == before[i]) continue;
+		char v[16];
+		set_text(i, v, sizeof(v));
+		if (v[0]) { fprintf(f, "%s=%s\n", set_keys[i], v); setenv(set_keys[i], v, 1); }
+		else unsetenv(set_keys[i]);
+	}
+	free(old);
+	int err = fclose(f);
+	if (!err) err = rename(tmp, path);
+	sync();
+	lang_cache = -1;  // the language at once
+	av_offset = NAN;  // the delay from the next video
+	return err;
+}
+
+// The box during the film saves its delay (tens of ms) or interlacing
+// (-1000 / -1: unchanged) like Impostazioni does.
+static void fmt_save_settings(int delay, int fields)
+{
+	set_load();
+	int before[SET_CRT];
+	memcpy(before, set_val, sizeof(before));
+	if (delay != -1000) { before[SET_AVOFF] = 1000; set_val[SET_AVOFF] = delay; }
+	if (fields >= 0) { before[SET_FIELDS] = -1; set_val[SET_FIELDS] = fields; }
+	if (set_save(before)) fprintf(stderr, "mediacenter: impostazione non salvata nel file ini\n");
+}
+
+static void set_draw(int sel, const char *message)
+{
+	menu_begin();
+	int sx = menu_sx(), sy = menu_sy(), gw = GLYPH_W * sx;
+	int ox = menu_ox(), mw = menu_w();
+	uint32_t white = fb_rgb(255, 255, 255), grey = fb_rgb(160, 160, 160), accent = fb_rgb(40, 90, 190);
+	const char *name = "MiSTer MediaCenter";
+	int mx = 12 * sx;
+	int tsx = text_w(name, 2 * sx) <= mw - 2 * mx ? 2 * sx : sx;
+	text_centre(6 * sy, tsx, 3 * sy, 1, name, white);
+	fb_text_xy(ox + mx, 34 * sy, sx, sy, 0, TR("Impostazioni"), grey);
+	int row_h = 11 * sy, y = 48 * sy;
+	for (int i = 0; i < SET_ITEMS; i++, y += row_h)
+	{
+		char line[96], v[24];
+		if (i == SET_CRT) { y += row_h / 2; snprintf(line, sizeof(line), "%s", TR(set_labels[i])); }
+		else snprintf(line, sizeof(line), "%-16s %s", TR(set_labels[i]), set_shown(i, v, sizeof(v)));
+		char fit[96];
+		fit_text(fit, sizeof(fit), line, (mw - 2 * mx) / gw);
+		if (i == sel) fb_fill_rect(ox + mx / 2, y - 2 * sy, mw - mx, row_h, accent);
+		fb_text_xy(ox + mx, y, sx, sy, 1, fit, white);
+	}
+	y += row_h / 2;
+	text_centre(y, sx, sy, 0, TR(sel == SET_CRT ? "A apre Regola CRT" : sel == SET_UILANG ? "Subito dopo il salvataggio" :
+		"Vale dal prossimo video"), grey);
+	if (message) text_centre(fb_h - 26 * sy, sx, sy, 1, message, fb_rgb(255, 200, 80));
+	else text_centre(fb_h - 26 * sy, sx, sy, 1, TR("Su/Giu Scegli  \x10\x11 Cambia"), fb_rgb(230, 230, 230));
+	text_centre(fb_h - 14 * sy, sx, sy, 1, TR("A Salva  B Annulla"), fb_rgb(230, 230, 230));
+	menu_end();
+}
+
+static void settings_screen(void)
+{
+	set_load();
+	int before[SET_CRT];
+	memcpy(before, set_val, sizeof(before));
+	int sel = 0;
+	const char *message = NULL;
+	set_draw(sel, message);
+	while (!quit_requested)
+	{
+		int code = wait_key();
+		if (!code) break;
+		message = NULL;
+		int d = 0;
+		switch (code)
+		{
+		case KEY_UP: sel = (sel + SET_ITEMS - 1) % SET_ITEMS; set_draw(sel, message); continue;
+		case KEY_DOWN: sel = (sel + 1) % SET_ITEMS; set_draw(sel, message); continue;
+		case KEY_LEFT: d = -1; break;
+		case KEY_RIGHT: d = 1; break;
+		case KEY_PAGEUP: case KEY_REWIND: d = -10; break;
+		case KEY_PAGEDOWN: case KEY_FASTFORWARD: d = 10; break;
+		case KEY_ENTER: case KEY_PLAY:
+			if (sel == SET_CRT)
+			{
+				crt_adjust_screen();
+				set_draw(sel, message);
+				continue;
+			}
+			if (set_save(before))
+			{
+				message = TR("Impossibile salvare il file ini");
+				set_draw(sel, message);
+				continue;
+			}
+			for (int i = 0; i < SET_CRT; i++)
+			{
+				char v[16];
+				set_text(i, v, sizeof(v));
+				if (set_val[i] != before[i]) fprintf(stderr, "mediacenter: impostazioni: %s=%s%s\n", set_keys[i], v, v[0] ? "" : " (tolto)");
+			}
+			return;
+		case KEY_ESC: case KEY_TAB: case KEY_STOP: case KEY_STOPCD:
+			return;
+		default: continue;
+		}
+		if (sel == SET_CRT) continue;
+		int v = set_val[sel], lo = sel == SET_AVOFF ? -SET_AVOFF_MAX : 0, hi = set_max(sel);
+		if (sel == SET_AVOFF) v += d;
+		else if (d) v += d > 0 ? 1 : -1;
+		if (sel != SET_AVOFF) v = v < lo ? hi : v > hi ? lo : v; // the choices go round
+		else v = v < lo ? lo : v > hi ? hi : v;
+		set_val[sel] = v;
+		set_draw(sel, message);
 	}
 }
 
@@ -4572,7 +4983,7 @@ static int run_browser(void)
 		const char *labels[16];
 		for (int i = 0; i < num_sources; i++) labels[i] = sources[i].label;
 		if (sel >= num_sources) sel = 0;
-		draw_browser("Scegli la sorgente", labels, NULL, num_sources, sel, NULL);
+		draw_browser(TR("Scegli la sorgente"), labels, NULL, num_sources, sel, NULL);
 
 		int code = wait_key();
 		if (!code) break;
@@ -4586,6 +4997,11 @@ static int run_browser(void)
 			crt_adjust_screen();
 			continue;
 		}
+		if (!strcmp(sources[sel].path, "settings:"))
+		{
+			settings_screen();
+			continue;
+		}
 		if (!strcmp(sources[sel].path, "jellyfin:"))
 		{
 			if (jf_browse()) break;
@@ -4595,8 +5011,8 @@ static int run_browser(void)
 		{
 			if (play_disc_in_drive(NULL))
 			{
-				draw_browser("Scegli la sorgente", labels, NULL, num_sources, sel, NULL);
-				menu_notice("Nessun disco leggibile");
+				draw_browser(TR("Scegli la sorgente"), labels, NULL, num_sources, sel, NULL);
+				menu_notice(TR("Nessun disco leggibile"));
 				sleep(2);
 			}
 			quit_requested = 0;
