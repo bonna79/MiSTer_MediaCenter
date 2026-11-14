@@ -1458,7 +1458,20 @@ static int dvd_play(const char *device)
 				if (code == KEY_ENTER) result = END_BACK;
 				continue;
 			}
-			if (format_key(code, t, p.state, menu)) continue;
+			{
+				int f = format_key(code, t, p.state, menu);
+				if (f == FMT_PAUSE && p.state == ST_PLAY) p.state = ST_PAUSE;
+				if (f == FMT_RESUME && p.state == ST_PAUSE) p.state = ST_PLAY;
+				if (f == FMT_RESYNC && (p.state == ST_PAUSE || p.state == ST_PLAY))
+				{
+					// the new delay: the sound lined up again, as for another audio track
+					DVD_LOCK();
+					dvd.req_audio = 1;
+					DVD_UNLOCK();
+					p.state = ST_PLAY;
+				}
+				if (f) continue;
+			}
 			if (menu && p.state == ST_PLAY)
 			{
 				int done = 1;
@@ -1764,6 +1777,7 @@ static int dvd_play(const char *device)
 				info.legend = legend_dvd_play;
 				info.legend_n = sizeof(legend_dvd_play) / sizeof(legend_dvd_play[0]);
 				info.format_label = format_label();
+				info.format_button = format_button();
 			}
 			osd_build(&info);
 			osd_built = t;

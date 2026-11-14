@@ -86,7 +86,6 @@ static const char *const tr_table[][2] =
 	{ "Audio Destro", "Audio Right" },
 	{ "Capitolo %d/%d", "Chapter %d/%d" },
 	{ "Altro tasto: Annulla", "Other key: Cancel" },
-	{ "Formato  \x10 %s \x11", "Format  \x10 %s \x11" },
 	{ "Senza audio", "No audio" },
 	{ "  Sott. no", "  Subs off" },
 	{ "  Sott. %d/%d%s", "  Subs %d/%d%s" },
@@ -192,6 +191,8 @@ static const char *const tr_table[][2] =
 	{ "Subito dopo il salvataggio", "At once after saving" },
 	{ "Vale dal prossimo video", "From the next video" },
 	{ "A Salva  B Annulla", "A Save  B Cancel" },
+	{ "Si", "Yes" },
+	{ "Applica", "Apply" },
 };
 
 __attribute__((format_arg(1)))
@@ -995,6 +996,7 @@ typedef struct
 	legend_t *legend;        // replaces the playback legend when set
 	int legend_n;
 	const char *format_label; // MediaCenter: the format box in place of the legend
+	const char *format_button; // its key's label (NULL: Chiudi)
 } osd_info_t;
 
 static const char *exit_question = "Uscire dal Video CD?";
@@ -1149,12 +1151,13 @@ static void osd_draw(const osd_info_t *info)
 	else if (info->format_label)
 	{
 		// the format chosen during the film (MediaCenter's format_key)
-		char q[64];
-		snprintf(q, sizeof(q), TR("Formato  \x10 %s \x11"), TR(info->format_label));
-		int w = text_width(q) + SX(16) + legend_item(0, 0, "A", "Chiudi", 0);
+		// (its line comes translated, with the setting and its value)
+		const char *q = info->format_label;
+		const char *b = info->format_button ? info->format_button : "Chiudi";
+		int w = text_width(q) + SX(16) + legend_item(0, 0, "A", b, 0);
 		x = (fb_w - w) / 2;
 		x = ovl_text(x, legend_y + SY(3), q) + SX(16);
-		legend_item(x, legend_y, "A", "Chiudi", 1);
+		legend_item(x, legend_y, "A", b, 1);
 	}
 	else if (info->legend)
 	{

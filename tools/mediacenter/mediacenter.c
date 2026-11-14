@@ -2570,7 +2570,12 @@ enum { END_DONE, END_NEXT, END_PREV, END_BACK, END_QUIT, END_GOTO };
 #include "audio_ui.c"
 
 // The format box during the film (format_key, after Regola CRT).
+#define FMT_TAKEN 1
+#define FMT_PAUSE 2
+#define FMT_RESUME 3
+#define FMT_RESYNC 4
 static int format_key(int code, double t, int state, int menu);
+static const char *format_button(void);
 static int format_tick(double t);
 static const char *format_label(void);
 static void fmt_close(void);
@@ -2654,7 +2659,17 @@ static int media_play(int in_playlist)
 				continue;
 			}
 			if (aui_key(code, t)) continue;
-			if (format_key(code, t, p.state, mc.audio_only || play_osd_keep)) continue;
+			{
+				int f = format_key(code, t, p.state, mc.audio_only || play_osd_keep);
+				if (f == FMT_PAUSE && p.state == ST_PLAY) p.state = ST_PAUSE;
+				if (f == FMT_RESUME && p.state == ST_PAUSE) p.state = ST_PLAY;
+				if (f == FMT_RESYNC)
+				{
+					// the new delay: the sound lined up again from here
+					if (p.state == ST_PAUSE || p.state == ST_PLAY) { media_seek(mc.clock); p.state = ST_PLAY; }
+				}
+				if (f) continue;
+			}
 			if (play_key_hook)
 			{
 				int h = play_key_hook(code);
@@ -2861,6 +2876,7 @@ static int media_play(int in_playlist)
 			if (mc.astream < 0) info.audio_label = TR("Senza audio");
 			if (play_osd_hook) play_osd_hook(&info);
 			info.format_label = format_label();
+			info.format_button = format_button();
 			osd_build(&info);
 			osd_built = t;
 			p.dirty = 1;
@@ -4272,10 +4288,16 @@ static int crt_save(void)
 	return err;
 }
 
-// The format chosen during the film: Start opens a box in place of the
-// button legend, Left/Right (or Up/Down) change the format at once, on the
-// CRT and over HDMI; A, Start or B close it, and so does a pause of 6 s.
-// The choice is saved like Regola CRT's (MC_CRT_ASPECT, MC_CRT_PANSCAN).
+// The box opened with Start during the film, in place of the button legend:
+// Up/Down choose the setting, Left/Right change it.
+// - Formato: at once, on the CRT and over HDMI; saved like Regola CRT's
+//   (MC_CRT_ASPECT, MC_CRT_PANSCAN).
+// - Ritardo audio: the film pauses while it changes; A applies it (the
+//   sound is lined up again as after a jump, MC_AV_OFFSET saved), B goes
+//   back to the old value. Nothing is heard jumping meanwhile.
+// - Interlacciato: at once (MC_FIELDS, saved).
+// A, Start or B close it, and so does a pause of 6 s (not while a delay
+// waits for A).
 static const struct { const char *name; int aspect, pan; } fmt_list[] = {
 	{ "Auto", 0, 0 },
 	{ "4:3", 2, 0 },
@@ -4286,8 +4308,14 @@ static const struct { const char *name; int aspect, pan; } fmt_list[] = {
 	{ "Pan & scan", 0, 1 },
 };
 #define FMT_N ((int)(sizeof(fmt_list) / sizeof(fmt_list[0])))
-static int fmt_open, fmt_changed;
+#define FMT_ROWS 3
+static int fmt_open, fmt_changed, fmt_row;
+static int fmt_delay, fmt_delay_was; // tens of ms: shown, applied
+static int fmt_paused;               // the film paused for the delay
+static int fmt_fields_changed;
 static double fmt_until;
+static char fmt_text[96];
+static void fmt_save_settings(int delay, int fields); // after Impostazioni
 
 static int fmt_index(void)
 {
@@ -4297,19 +4325,44 @@ static int fmt_index(void)
 	return 0;
 }
 
+static int fmt_fields(void)
+{
+	const char *e = getenv("MC_FIELDS");
+	return e && atoi(e);
+}
+
+static int fmt_delay_now(void)
+{
+	const char *e = getenv("MC_AV_OFFSET");
+	int v = e ? (int)lround(atof(e) * 100) : 0;
+	return v < -100 ? -100 : v > 100 ? 100 : v;
+}
+
 static void fmt_close(void)
 {
 	if (!fmt_open) return;
 	fmt_open = 0;
-	if (!fmt_changed) return;
-	fmt_changed = 0;
-	int err = crt_save();
-	fprintf(stderr, "mediacenter: formato scelto durante il film: %s%s\n", fmt_list[fmt_index()].name,
-		err ? " (non salvato nel file ini)" : "");
+	fmt_delay = fmt_delay_was; // a delay not applied with A is dropped
+	fmt_paused = 0;
+	if (fmt_changed)
+	{
+		fmt_changed = 0;
+		int err = crt_save();
+		fprintf(stderr, "mediacenter: formato scelto durante il film: %s%s\n", fmt_list[fmt_index()].name,
+			err ? " (non salvato nel file ini)" : "");
+	}
+	if (fmt_fields_changed)
+	{
+		fmt_fields_changed = 0;
+		fmt_save_settings(-1000, fmt_fields());
+		fprintf(stderr, "mediacenter: interlacciato scelto durante il film: %s\n", fmt_fields() ? "si" : "no");
+	}
 }
 
-// A key while a film plays; 1 when the box took it. menu: a disc menu or a
-// list is on screen (Start belongs to it).
+// A key while a film plays; 0 when the box did not take it, else FMT_TAKEN,
+// or FMT_PAUSE / FMT_RESUME / FMT_RESYNC for the player to do (FMT_RESYNC:
+// line the sound up again, then play). menu: a disc menu or a list is on
+// screen (Start belongs to it).
 static int format_key(int code, double t, int state, int menu)
 {
 	if (!fmt_open)
@@ -4317,44 +4370,101 @@ static int format_key(int code, double t, int state, int menu)
 		if ((code == KEY_PLAY || code == KEY_PLAYCD) && state == ST_PLAY && !menu)
 		{
 			fmt_open = 1;
+			fmt_row = 0;
+			fmt_delay = fmt_delay_was = fmt_delay_now();
+			fmt_paused = 0;
 			fmt_until = t + 6.0;
-			return 1;
+			return FMT_TAKEN;
 		}
 		return 0;
 	}
+	fmt_until = t + 6.0;
 	int d = 0;
 	switch (code)
 	{
-	case KEY_LEFT: case KEY_UP: d = FMT_N - 1; break;
-	case KEY_RIGHT: case KEY_DOWN: d = 1; break;
-	case KEY_ENTER: case KEY_PLAY: case KEY_PLAYCD: case KEY_ESC: case KEY_SPACE:
+	case KEY_UP: fmt_row = (fmt_row + FMT_ROWS - 1) % FMT_ROWS; return FMT_TAKEN;
+	case KEY_DOWN: fmt_row = (fmt_row + 1) % FMT_ROWS; return FMT_TAKEN;
+	case KEY_LEFT: d = -1; break;
+	case KEY_RIGHT: d = 1; break;
+	case KEY_ENTER: case KEY_PLAY: case KEY_PLAYCD:
+		if (fmt_delay != fmt_delay_was)
+		{
+			// A applies the delay
+			char v[16];
+			snprintf(v, sizeof(v), "%.2f", fmt_delay / 100.0);
+			setenv("MC_AV_OFFSET", v, 1);
+			av_offset = NAN;
+			fmt_save_settings(fmt_delay, -1);
+			fprintf(stderr, "mediacenter: ritardo audio scelto durante il film: %+d ms\n", fmt_delay * 10);
+			fmt_delay_was = fmt_delay;
+			fmt_close();
+			return FMT_RESYNC;
+		}
+		{
+			int was_paused = fmt_paused;
+			fmt_close();
+			return was_paused ? FMT_RESUME : FMT_TAKEN;
+		}
+	case KEY_ESC: case KEY_SPACE:
+	{
+		int was_paused = fmt_paused;
 		fmt_close();
-		return 1;
+		return was_paused ? FMT_RESUME : FMT_TAKEN;
+	}
 	default:
-		// any other key closes the box and does its own job
+		// any other key closes the box and does its own job; with a delay
+		// waiting for A it is dropped and the film plays on (the key does
+		// nothing else)
+		if (fmt_paused) { fmt_close(); return FMT_RESUME; }
 		fmt_close();
 		return 0;
 	}
-	int i = (fmt_index() + d) % FMT_N;
-	crt_val[CRT_ASPECT] = fmt_list[i].aspect;
-	crt_val[CRT_PANSCAN] = fmt_list[i].pan;
-	crt_send();
-	fmt_changed = 1;
-	fmt_until = t + 6.0;
-	return 1;
+	if (fmt_row == 0)
+	{
+		int i = (fmt_index() + (d > 0 ? 1 : FMT_N - 1)) % FMT_N;
+		crt_val[CRT_ASPECT] = fmt_list[i].aspect;
+		crt_val[CRT_PANSCAN] = fmt_list[i].pan;
+		crt_send();
+		fmt_changed = 1;
+		return FMT_TAKEN;
+	}
+	if (fmt_row == 1)
+	{
+		int v = fmt_delay + d;
+		fmt_delay = v < -100 ? -100 : v > 100 ? 100 : v;
+		if (!fmt_paused && state == ST_PLAY) { fmt_paused = 1; return FMT_PAUSE; }
+		return FMT_TAKEN;
+	}
+	setenv("MC_FIELDS", fmt_fields() ? "0" : "1", 1);
+	fmt_fields_changed = 1;
+	return FMT_TAKEN;
 }
 
 // Closes the box after its time; 1 when it did (the controls to redraw).
 static int format_tick(double t)
 {
-	if (!fmt_open || t < fmt_until) return 0;
+	if (!fmt_open || fmt_paused || t < fmt_until) return 0;
 	fmt_close();
 	return 1;
 }
 
+// The line of the box, translated; NULL when it is closed.
 static const char *format_label(void)
 {
-	return fmt_open ? fmt_list[fmt_index()].name : NULL;
+	if (!fmt_open) return NULL;
+	char v[32];
+	const char *name;
+	if (fmt_row == 0) { name = TR("Formato"); snprintf(v, sizeof(v), "%s", TR(fmt_list[fmt_index()].name)); }
+	else if (fmt_row == 1) { name = TR("Ritardo audio"); snprintf(v, sizeof(v), "%+d ms", fmt_delay * 10); }
+	else { name = TR("Interlacciato"); snprintf(v, sizeof(v), "%s", fmt_fields() ? TR("Si") : "No"); }
+	snprintf(fmt_text, sizeof(fmt_text), "\x12\x13 %d/%d  %s  \x10 %s \x11", fmt_row + 1, FMT_ROWS, name, v);
+	return fmt_text;
+}
+
+// The key shown beside the box: A applies a delay waiting for it.
+static const char *format_button(void)
+{
+	return fmt_open && fmt_delay != fmt_delay_was ? TR("Applica") : TR("Chiudi");
 }
 
 // A test picture for the adjustment: border, grid, centre cross and values.
@@ -4671,6 +4781,18 @@ static int set_save(const int *before)
 	lang_cache = -1;  // the language at once
 	av_offset = NAN;  // the delay from the next video
 	return err;
+}
+
+// The box during the film saves its delay (tens of ms) or interlacing
+// (-1000 / -1: unchanged) like Impostazioni does.
+static void fmt_save_settings(int delay, int fields)
+{
+	set_load();
+	int before[SET_CRT];
+	memcpy(before, set_val, sizeof(before));
+	if (delay != -1000) { before[SET_AVOFF] = 1000; set_val[SET_AVOFF] = delay; }
+	if (fields >= 0) { before[SET_FIELDS] = -1; set_val[SET_FIELDS] = fields; }
+	if (set_save(before)) fprintf(stderr, "mediacenter: impostazione non salvata nel file ini\n");
 }
 
 static void set_draw(int sel, const char *message)
