@@ -28,13 +28,37 @@ The package is made of these parts:
 | `MiSTer_MediaCenter` | `/media/fat/` | The Main, the MiSTer's main program, used in the menu. When you insert a disc it recognizes it: video discs and data DVDs open with the player, games start with the right core |
 | `mediacenter` | `/media/fat/linux/` | The player itself, which runs on the ARM |
 | `Mister_Media_Center.sh` | `/media/fat/Scripts/` | The script shown in **Scripts**: it opens the player to pick files from SD, USB, network or Jellyfin (up to 4.0 it was called `mediacenter.sh`) |
+| `Update_Mister_Media_Center.sh` | `/media/fat/Scripts/` | The script that installs or updates MMC by downloading the latest release from GitHub (in the zip from 4.6.1) |
 | `menu_mediacenter.rbf` | `/media/fat/linux/` | MMC's menu core: the normal MiSTer menu plus the colour conversion, the 15 kHz output for the CRT and, from 3.0, the H.264 accelerator for 1080p |
 | `libdvdcss.so.2` | `/media/fat/dvdcss/` | The library for reading protected DVDs |
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | The lines to copy into `MiSTer.ini` (it is not a `MiSTer.ini`: copy only the lines) |
 
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
-The player's on-screen texts are in Italian.
+The player's on-screen texts are in Italian unless you choose another menu language: English (from 4.6), Spanish, French or German (from 4.6.1).
+
+## What's new in version 4.6.1
+
+Version 4.6.1 adds **Spanish, French and German menus**, makes the **audio screen** text easier to read on a CRT and puts the **script that installs or updates MMC** in the zip. Only the `mediacenter` player and the scripts change: the Main and the menu core are built from the same sources as in 4.6.
+
+- **Spanish, French and German menus:** in addition to Italian and English. Choose it on the **Settings** page, **Menu language** row (Italiano, English, Español, Français, Deutsch), or with a line in `mediacenter.ini`: `MC_LANG=es`, `MC_LANG=fr` or `MC_LANG=de`. They cover everything English covers: lists, controls during DVD, Video CD, Super Video CD, DivX/Xvid, MKV and MP4 playback, audio screen, Jellyfin, CRT Adjust and Settings.
+  - The small menu font now has **accented letters** (à, é, ñ, ç, ü, ß…), so words read in full on a CRT too.
+  - File names stay as they are written on the disc.
+  - Chinese and Japanese will come later: they need thousands of characters and a bigger font.
+- **Audio screen easier to read on a CRT:** the keys line at the bottom (Start Play, Select Pause, B Stop…) and the captions under the buttons (◄ L Select B R ►) are now **yellow** (FFFF00) instead of dark grey. The equalizer labels stay as before.
+- **Install or update script in the zip:** `Update_Mister_Media_Center.sh` goes in `/media/fat/Scripts` next to `Mister_Media_Center.sh`. From the **Scripts** menu it downloads the latest release from GitHub: on a MiSTer without MMC it installs everything, if MMC is already there it replaces only the files that changed. How to use it is explained in [Installing or updating with the script](#installing-or-updating-with-the-script).
+
+**Updating from 4.6:** start **Update_Mister_Media_Center** from the Scripts menu (if you do not have it yet, see [Installing or updating with the script](#installing-or-updating-with-the-script)), or extract the 4.6.1 zip over the old files. Then restart the MiSTer. `MiSTer.ini` and `mediacenter.ini` stay as they are.
+
+Tested on a real MiSTer on 14 and 15 November 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI at the same time:
+
+| Test | Result |
+| --- | --- |
+| Spanish, French and German menus, also from the Settings page | Working |
+| Accented letters in the menus | Working |
+| Audio screen with yellow keys line and button captions | Working |
+| Update with the script: Main in use and player replaced, second run "You already have version v4.6" | Working |
+| Script reminder when `MiSTer.ini` does not start the MMC Main yet | Working |
 
 ## What's new in version 4.6
 
@@ -42,7 +66,7 @@ Version 4.6 adds an **English menu**, the **Settings** page, an **audio delay yo
 
 - **English menu:** with `MC_LANG=en` in `mediacenter.ini`, or from the Settings page, MMC's text is in English: lists, controls during the video, audio screen, Jellyfin and CRT Adjust. Without this line everything stays in Italian as before.
 - **Settings page:** the **Settings** entry in the list of sources, before CRT Adjust, lets you choose without editing the file by hand:
-  - **Menu language:** Italian or English. It applies at once after saving.
+  - **Menu language:** Italian or English (from 4.6.1 also Spanish, French and German). It applies at once after saving.
   - **Audio language** and **Subtitles:** the preferred language for DVDs and files (Italian, English, French, German, Spanish, Japanese). Subtitles can also be turned off.
   - **Audio delay:** from -1000 to +1000 ms, in 10 ms steps. A positive value moves the sound later.
   - **Interlaced:** Yes (best for CRT) or No. This is the `MC_FIELDS` setting.
@@ -565,13 +589,26 @@ Still to test: Super Video CD read from a burned disc.
 
 From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds everything MMC needs: the Main, the player, the script, the menu core, the library for protected DVDs and `MMC_MiSTer_ini.txt` with the lines for `MiSTer.ini`. The Physical Disc Main, for games, is downloaded from its own project. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
 
-**Installing or updating with the script (from 4.6 on):** `Update_Mister_Media_Center.sh` downloads the latest release from GitHub. On a MiSTer without MMC it installs everything; if MMC is already there, it replaces only the files that changed. Put it in `/media/fat/Scripts` and start it from the Scripts menu; it needs no button presses. It checks the download (size, the sha256 given by GitHub and a zip test) and saves the old files in `/media/fat/linux/mmc_backup`. If the Main or the core changed, it asks you to restart. It never changes `MiSTer.ini` or `mediacenter.ini`; if `MiSTer.ini` has no `main=MiSTer_MediaCenter` in the `[menu]` section, it reminds you to copy the lines of `MMC_MiSTer_ini.txt`. It uses `curl`, `unzip` and the https certificates already in the MiSTer Linux, never insecure connections. The script will be in the zip from the next version; for now download it once over ssh (or copy it from your computer into the `Scripts` folder of the SD card):
+#### Installing or updating with the script
+
+`Update_Mister_Media_Center.sh` downloads the latest release from GitHub. On a MiSTer without MMC it installs everything; if MMC is already there, it replaces only the files that changed. Put it in `/media/fat/Scripts` and start it from the Scripts menu; it needs no button presses. It checks the download (size, the sha256 given by GitHub and a zip test) and saves the old files in `/media/fat/linux/mmc_backup`. If the Main or the core changed, it asks you to restart. It never changes `MiSTer.ini` or `mediacenter.ini`; if `MiSTer.ini` has no `main=MiSTer_MediaCenter` in the `[menu]` section, it reminds you to copy the lines of `MMC_MiSTer_ini.txt`. It uses `curl`, `unzip` and the https certificates already in the MiSTer Linux, never insecure connections. From 4.6.1 the script is in the zip, in the `Scripts` folder: if you extracted the 4.6.1 zip or a later one, you find it in the Scripts menu. If you do not have it yet, download it once over ssh, or copy it from your computer into the `Scripts` folder of the SD card:
 
 ```
 cd /media/fat/Scripts && curl -sSfL --cacert /etc/ssl/certs/cacert.pem -O https://raw.githubusercontent.com/bonna79/MiSTer_MediaCenter/main/Scripts/Update_Mister_Media_Center.sh
 ```
 
-**First install with the script:** download the script with the command above, start **Update_Mister_Media_Center** from the Scripts menu, then copy the lines of `/media/fat/MMC_MiSTer_ini.txt` into `/media/fat/MiSTer.ini` (see step 3) and restart the MiSTer.
+**First install with the script**, on a MiSTer without MMC:
+
+1. Put the script in `/media/fat/Scripts`, with the command above or by copying it from your computer.
+2. Start **Update_Mister_Media_Center** from the **Scripts** menu. The script downloads the zip, checks it and copies every file to its place; at the end it prints what it did.
+3. Copy the lines of `/media/fat/MMC_MiSTer_ini.txt` into `/media/fat/MiSTer.ini` (see step 3). The script reminds you as long as the `[menu]` section has no `main=MiSTer_MediaCenter`.
+4. Restart the MiSTer.
+
+**Updating with the script:** start **Update_Mister_Media_Center** from the Scripts menu when a new version is out. If you already have the latest one, the script says so and changes nothing. If it replaces the Main or the menu core, at the end it asks you to restart the MiSTer. If something goes wrong (no network, downloaded file not correct, SD card full) it stops before changing any file and says so on screen. The log of what it did is in `/tmp/Update_Mister_Media_Center.log`, and the replaced files stay in `/media/fat/linux/mmc_backup` until the next update.
+
+#### Updating by extracting the zip
+
+**Updating from 4.6 to 4.6.1:** with the script, or extract the 4.6.1 zip over the old files. Then restart the MiSTer.
 
 **Updating from 4.5 to 4.6:** extract the 4.6 zip over the old files. The Main and the core are the same as in 4.5. Then restart the MiSTer.
 
@@ -590,6 +627,7 @@ Also install the [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTe
 | `MiSTer_MediaCenter` | `/media/fat/MiSTer_MediaCenter` |
 | `mediacenter` | `/media/fat/linux/mediacenter` |
 | `Mister_Media_Center.sh` | `/media/fat/Scripts/Mister_Media_Center.sh` |
+| `Update_Mister_Media_Center.sh` | `/media/fat/Scripts/Update_Mister_Media_Center.sh` |
 | `menu_mediacenter.rbf` | `/media/fat/linux/menu_mediacenter.rbf` |
 | `MiSTer_Physical-CD` (Physical Disc Main) | `/media/fat/MiSTer_Physical-CD` |
 
@@ -665,7 +703,7 @@ MC_CRT_VPOS=2
 | `MC_MENU_HD=1` | Lists at 1280x720 as in version 2.1, instead of drawn for the CRT |
 | `MC_DIAG=0` | Turns off the `mediacenter: diag` diagnosis lines in the log |
 | `MC_SPLASH=0` | Turns off the MMC picture when the script starts |
-| `MC_LANG=en` | MMC's text in English |
+| `MC_LANG=en` | MMC's text in English; `es` Spanish, `fr` French, `de` German (from 4.6.1) |
 | `MC_AUDIO_LANG=en` | Preferred audio language for DVDs and files: `it`, `en`, `fr`, `de`, `es`, `ja` |
 | `MC_SUB_LANG=it` | Preferred subtitle language for DVDs and files (same codes), `off` to turn them off |
 | `MC_JELLYFIN=http://192.168.0.10:8096` | Jellyfin server address, when MMC does not find it by itself. `MC_JELLYFIN=0` removes the Jellyfin entry |
