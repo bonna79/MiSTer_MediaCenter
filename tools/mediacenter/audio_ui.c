@@ -312,7 +312,7 @@ static void aui_bands(double t, float out[2][6])
 // Drawing in the picture (AUI_W x aui.h, colours from fb_rgb)
 // ---------------------------------------------------------------------------
 
-static uint32_t C_BG, C_PANEL, C_LINE, C_TEXT, C_MUTED, C_DIM, C_L, C_R, C_SEL, C_BTN, C_EQBG, C_EQOPEN, C_PL, C_PR;
+static uint32_t C_BG, C_PANEL, C_LINE, C_TEXT, C_MUTED, C_DIM, C_L, C_R, C_SEL, C_BTN, C_EQBG, C_EQOPEN, C_PL, C_PR, C_KEYS;
 static uint32_t *aui_buf; // where the drawing goes: aui.bg or aui.img
 
 static int AY(int y) { return aui.h == 576 ? y : (y * aui.h + 288) / 576; }
@@ -540,6 +540,7 @@ static void aui_colours(void)
 	C_TEXT = fb_rgb(0xf2, 0xf4, 0xf8);
 	C_MUTED = fb_rgb(0x8a, 0x93, 0xa6);
 	C_DIM = fb_rgb(0x4a, 0x52, 0x63);
+	C_KEYS = fb_rgb(0xff, 0xff, 0x00); // the keys line: yellow, readable on a CRT
 	C_L = fb_rgb(0x3f, 0xd8, 0xff);
 	C_R = fb_rgb(0xff, 0x5a, 0x7a);
 	C_SEL = fb_rgb(0xff, 0xd3, 0x4d);
@@ -718,7 +719,7 @@ static void aui_draw_bg(int state)
 	a_rect(X0 + 62, P_Y - 2, CW - 124, 4, C_LINE);
 
 	// keys
-	a_text_c(&afont_small, AUI_W / 2, AY(556), TR("Start Play  Select Pausa  B Stop  \x81 \x82 Brano  L/R Veloce  Y Equalizzatore  A Salvaschermo  X Esci"), C_DIM);
+	a_text_c(&afont_small, AUI_W / 2, AY(556), TR("Start Play  Select Pausa  B Stop  \x81 \x82 Brano  L/R Veloce  Y Equalizzatore  A Salvaschermo  X Esci"), C_KEYS);
 	aui.bg_gen++;
 }
 
