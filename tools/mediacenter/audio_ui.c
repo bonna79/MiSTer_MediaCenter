@@ -705,7 +705,7 @@ static void aui_draw_bg(int state)
 		a_disc(cx, ty, r, on ? C_TEXT : big ? C_BTN : C_PANEL, C_LINE);
 		a_icon(kind, cx, ty, big ? 15 : 11, on ? C_BG : C_TEXT);
 		const char *h = hint[i] ? hint[i] : (state == ST_PLAY ? "Select" : "Start");
-		a_text_c(&afont_small, cx, ty + r + AY(18), h, C_DIM);
+		a_text_c(&afont_small, cx, ty + r + AY(18), h, C_KEYS);
 	}
 
 	// equalizer panel
