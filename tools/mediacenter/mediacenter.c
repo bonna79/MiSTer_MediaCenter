@@ -79,7 +79,7 @@ static int fb_text(int x, int y, int s, const char *str, uint32_t color)
 {
 	for (; *str; str++, x += GLYPH_W * s)
 	{
-		const unsigned char *g = vcd_font[(unsigned char)*str & 0x7F];
+		const unsigned char *g = vcd_glyph((unsigned char)*str);
 		for (int c = 0; c < 8; c++)
 			for (int r = 0; r < 8; r++)
 				if ((g[c] >> r) & 1) fb_fill_rect(x + c * s, y + r * s, s, s, color);
@@ -87,15 +87,38 @@ static int fb_text(int x, int y, int s, const char *str, uint32_t color)
 	return x;
 }
 
-// Copies at most max glyphs of src, replacing non-ASCII bytes with '?'.
+// True when s is not valid UTF-8 (so it has a byte above 0x7F): then it is
+// Latin-1 text (the translated texts of tr_table), not a file name.
+static int latin1_text(const char *s)
+{
+	for (const unsigned char *p = (const unsigned char *)s; *p; p++)
+	{
+		if (*p < 0x80) continue;
+		int k = (*p & 0xE0) == 0xC0 ? 1 : (*p & 0xF0) == 0xE0 ? 2 : (*p & 0xF8) == 0xF0 ? 3 : -1;
+		if (k < 0) return 1;
+		for (int i = 1; i <= k; i++)
+			if ((p[i] & 0xC0) != 0x80) return 1;
+		p += k;
+	}
+	return 0;
+}
+
+// Copies at most max glyphs of src, replacing non-ASCII bytes with '?'
+// (one per UTF-8 character); Latin-1 text keeps the accented letters the
+// font has.
 static void fit_text(char *dst, size_t len, const char *src, int max)
 {
 	size_t n = 0;
 	int glyphs = 0;
+	int latin1 = latin1_text(src);
 	for (; *src && n + 4 < len && glyphs < max; src++)
 	{
 		unsigned char c = (unsigned char)*src;
-		if (c >= 0x80)
+		if (c >= 0x80 && latin1)
+		{
+			if (c < 0xA0 || vcd_glyph(c) == vcd_font[c & 0x7F]) c = '?';
+		}
+		else if (c >= 0x80)
 		{
 			// skip UTF-8 continuation bytes, one '?' per character
 			if ((c & 0xC0) == 0x80) continue;
@@ -3135,7 +3158,7 @@ static int fb_text_xy(int x, int y, int sx, int sy, int bold, const char *str, u
 {
 	for (; *str; str++, x += GLYPH_W * sx)
 	{
-		const unsigned char *g = vcd_font[(unsigned char)*str & 0x7F];
+		const unsigned char *g = vcd_glyph((unsigned char)*str);
 		for (int c = 0; c < 8; c++)
 			for (int r = 0; r < 8; r++)
 				if ((g[c] >> r) & 1) fb_fill_rect(x + c * sx, y + r * sy, sx + bold, sy, color);
@@ -4702,6 +4725,8 @@ static const char *const set_labels[SET_ITEMS] = { "Lingua menu", "Lingua audio"
 // (the file's own choice, Italian on DVD); the subtitles also have "off"
 static const char *const set_lang_codes[] = { "", "it", "en", "fr", "de", "es", "ja" };
 static const char *const set_lang_names[] = { "Predefinita", "Italiano", "Inglese", "Francese", "Tedesco", "Spagnolo", "Giapponese" };
+// the menu languages, each in its own language (lang_codes order)
+static const char *const lang_names[LANG_COUNT] = { "Italiano", "English", "Espa\361ol", "Fran\347ais", "Deutsch" };
 #define SET_LANGS ((int)(sizeof(set_lang_codes) / sizeof(set_lang_codes[0])))
 #define SET_AVOFF_MAX 100 // tens of milliseconds
 static int set_val[SET_CRT];
@@ -4716,7 +4741,7 @@ static int set_lang_index(const char *e)
 // The values in the environment (mediacenter.ini, read at start).
 static void set_load(void)
 {
-	set_val[SET_UILANG] = lang_en();
+	set_val[SET_UILANG] = lang_id();
 	set_val[SET_ALANG] = set_lang_index(getenv("MC_AUDIO_LANG"));
 	const char *e = getenv("MC_SUB_LANG");
 	set_val[SET_SLANG] = e && !strcasecmp(e, "off") ? 1 : set_lang_index(e) ? set_lang_index(e) + 1 : 0;
@@ -4729,7 +4754,7 @@ static void set_load(void)
 
 static int set_max(int i)
 {
-	return i == SET_UILANG || i == SET_FIELDS ? 1 : i == SET_ALANG ? SET_LANGS - 1 : i == SET_SLANG ? SET_LANGS : SET_AVOFF_MAX;
+	return i == SET_UILANG ? LANG_COUNT - 1 : i == SET_FIELDS ? 1 : i == SET_ALANG ? SET_LANGS - 1 : i == SET_SLANG ? SET_LANGS : SET_AVOFF_MAX;
 }
 
 // The value written in mediacenter.ini ("" leaves the line out).
@@ -4737,7 +4762,7 @@ static void set_text(int i, char *buf, size_t len)
 {
 	int v = set_val[i];
 	buf[0] = 0;
-	if (i == SET_UILANG && v) snprintf(buf, len, "en");
+	if (i == SET_UILANG && v) snprintf(buf, len, "%s", lang_codes[v]);
 	if (i == SET_ALANG && v) snprintf(buf, len, "%s", set_lang_codes[v]);
 	if (i == SET_SLANG && v) snprintf(buf, len, "%s", v == 1 ? "off" : set_lang_codes[v - 1]);
 	if (i == SET_AVOFF && v) snprintf(buf, len, "%.2f", v / 100.0);
@@ -4750,7 +4775,7 @@ static const char *set_shown(int i, char *buf, size_t len)
 	int v = set_val[i];
 	switch (i)
 	{
-	case SET_UILANG: return v ? "English" : "Italiano";
+	case SET_UILANG: return lang_names[v];
 	case SET_ALANG: return TR(set_lang_names[v]);
 	case SET_SLANG: return v == 0 ? TR("Predefiniti") : v == 1 ? TR("Spenti") : TR(set_lang_names[v - 1]);
 	case SET_AVOFF: snprintf(buf, len, "%+d ms", v * 10); return buf;

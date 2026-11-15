@@ -446,7 +446,8 @@ static void a_icon(int kind, int cx, int cy, float s, uint32_t c)
 }
 
 // UTF-8 to the font's codes (Latin-1; the arrows and the ellipsis on their
-// own codes; other characters as '?').
+// own codes; other characters as '?'). Bytes that are not UTF-8 are taken
+// as Latin-1.
 static void aui_latin1(char *dst, size_t len, const char *src)
 {
 	size_t n = 0;
@@ -456,7 +457,14 @@ static void aui_latin1(char *dst, size_t len, const char *src)
 		unsigned c = *s++;
 		if (c >= 0x80)
 		{
-			int more = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0;
+			int more = c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 0, ok = more > 0;
+			for (int i = 0; i < more && ok; i++) ok = (s[i] & 0xC0) == 0x80;
+			if (!ok)
+			{
+				// not UTF-8: a Latin-1 letter (the translated texts of tr_table)
+				dst[n++] = (char)(c >= 0xA0 ? c : '?');
+				continue;
+			}
 			c &= more == 3 ? 7 : more == 2 ? 15 : 31;
 			for (; more && (*s & 0xC0) == 0x80; more--) c = (c << 6) | (*s++ & 63);
 			if (c == 0x2026) c = 0x80;
@@ -614,7 +622,7 @@ static void aui_info(const char *path)
 		else if (cp->bit_rate > 0) snprintf(extra, sizeof(extra), "  %d kbit/s", (int)(cp->bit_rate / 1000));
 		else if (mc.fmt->bit_rate > 0) snprintf(extra, sizeof(extra), "  %d kbit/s", (int)(mc.fmt->bit_rate / 1000));
 		snprintf(tmp, sizeof(tmp), "%s  %s kHz%s  %s", aui_codec_name(cp->codec_id), khz, extra,
-			ch == 1 ? "Mono" : ch == 2 ? "Stereo" : TR("Multicanale"));
+			ch == 1 ? "Mono" : ch == 2 ? TR("Stereo") : TR("Multicanale"));
 		aui_latin1(aui.fmt, sizeof(aui.fmt), tmp);
 	}
 	if (aui_fmt_label && aui_fmt_label()) aui_latin1(aui.fmt, sizeof(aui.fmt), aui_fmt_label());
