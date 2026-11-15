@@ -2,41 +2,29 @@
 
 > Sviluppato con l'aiuto dell'intelligenza artificiale (Claude di Anthropic). / Developed with the help of AI (Anthropic's Claude).
 
-**MiSTer MediaCenter 4.6** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB, rete e server Jellyfin, su HDMI e su CRT a 15 kHz.
+**MiSTer MediaCenter 4.6.1** trasforma il MiSTer in un lettore per DVD-Video, Video CD, Super Video CD, video DivX/Xvid/MP4/MKV e musica, da disco, SD, USB, rete e server Jellyfin, su HDMI e su CRT a 15 kHz.
 
-**Novità della 4.6:**
+**Novità della 4.6.1:**
 
-- **Menu in inglese:** con `MC_LANG=en` in `mediacenter.ini`, oppure dalla pagina Impostazioni, le scritte di MMC sono in inglese (elenchi, comandi durante il video, schermata audio, Jellyfin, Regola CRT).
-- **Pagina Impostazioni** nell'elenco delle sorgenti: lingua del menu, lingua audio e dei sottotitoli preferite (per DVD e file), ritardo audio (da -1000 a +1000 ms a passi di 10 ms), Interlacciato Sì (ideale per CRT) / No, e il collegamento a Regola CRT. **A** salva in `mediacenter.ini` solo le righe cambiate, **B** annulla.
-- **Riquadro Start durante il film** con tre righe: Formato, Ritardo audio e Interlacciato. Mentre cambi il ritardo il film va in pausa, così l'audio non salta; **A** (Applica) lo conferma, risincronizza l'audio e lo salva.
-- **Sottotitoli testo per i file:** file esterni `.srt`, `.ass`, `.ssa`, `.vtt` accanto al video (`film.srt`, `film.ita.srt`…, anche `.srt` salvati da Windows con le lettere accentate), tracce SRT, ASS e WebVTT dentro gli MKV e mov_text dentro gli MP4. Il tasto **A** cambia traccia o li spegne. Sono disegnati sopra il video, quindi funzionano anche con l'acceleratore 1080p e sul CRT. I sottotitoli a immagini (PGS, VobSub) nei file non sono ancora supportati.
-- **Nuova immagine** Ver. 4.6 H264 Jellyfin Client 1080 P, mostrata solo quando si apre lo script.
+- **Menu in spagnolo, francese e tedesco**, oltre all'italiano e all'inglese: dalla pagina Impostazioni (riga Lingua menu: Italiano, English, Español, Français, Deutsch) oppure con `MC_LANG=es`, `MC_LANG=fr` o `MC_LANG=de` in `mediacenter.ini`. Valgono per elenchi, comandi durante il video di DVD, Video CD, Super Video CD, DivX/Xvid, MKV e MP4, schermata audio, Jellyfin, Regola CRT e Impostazioni. Il carattere piccolo dei menu ha ora le lettere accentate (à, é, ñ, ç, ü, ß…). Cinese e giapponese arriveranno più avanti.
+- **Schermata audio più leggibile sul CRT:** la riga dei tasti in basso e le scritte sotto i pulsanti ora sono gialle (FFFF00) invece che grigio scuro.
+- **Script per installare o aggiornare MMC nello zip:** `Update_Mister_Media_Center.sh` (cartella `Scripts`). Dal menu Scripts scarica l'ultima release da GitHub: su un MiSTer senza MMC installa tutto, se MMC c'è già sostituisce solo i file cambiati. Controlla il file scaricato (dimensione, impronta sha256 di GitHub, test dello zip), salva i vecchi file in `/media/fat/linux/mmc_backup`, chiede di riavviare se cambiano il Main o il core e non tocca mai `MiSTer.ini` né `mediacenter.ini`. Se in `MiSTer.ini` manca `main=MiSTer_MediaCenter` nella sezione `[menu]`, ricorda di copiare le righe di `MMC_MiSTer_ini.txt`.
 
-Cambia solo il lettore `mediacenter`, che gira sul processore ARM: il Main e il core del menu (seed 12) sono gli stessi della 4.5. I sottotitoli li disegna l'ARM nello stesso strato dei comandi a schermo, quindi compaiono anche quando le immagini arrivano dall'acceleratore FPGA.
+Cambiano solo il lettore `mediacenter` e gli script: il Main e il core del menu (seed 12) nascono dagli stessi sorgenti della 4.6.
 
-**Documentazione completa (PDF, 20 pagine):** [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6/MMC_4.6_documentazione_completa_IT.pdf) · [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6/MMC_4.6_documentation_complete_EN.pdf). Spiega il chip FPGA, il lettore ARM, i passaggi fra ARM e FPGA, le uscite HDMI e CRT, le novità della 4.5 e della 4.6 (sottotitoli, lingua, impostazioni) e come ricostruire tutto da zero. I PDF sono anche nella cartella [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs).
+**Documentazione completa (PDF, 21 pagine):** [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.1/MMC_4.6.1_documentazione_completa_IT.pdf) · [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.1/MMC_4.6.1_documentation_complete_EN.pdf). Spiega il chip FPGA, il lettore ARM, i passaggi fra ARM e FPGA, le uscite HDMI e CRT, le novità dalla 4.5 alla 4.6.1 (lingue, impostazioni, sottotitoli, script di aggiornamento) e come ricostruire tutto da zero. I PDF sono anche nella cartella [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs).
 
-**Nuove impostazioni in `mediacenter.ini`** (si scelgono anche dalla pagina Impostazioni):
-
-| Impostazione | Cosa fa |
-| --- | --- |
-| `MC_LANG=en` | scritte di MMC in inglese |
-| `MC_AUDIO_LANG=` | lingua audio preferita per DVD e file: `it`, `en`, `fr`, `de`, `es`, `ja` |
-| `MC_SUB_LANG=` | lingua dei sottotitoli preferita (stessi codici), `off` per spegnerli |
-
-Provata su un MiSTer vero il 14 novembre 2026, su CRT Sony Trinitron (SCART RGB) e HDMI insieme:
+Provata su un MiSTer vero il 14 e il 15 novembre 2026, su CRT Sony Trinitron (SCART RGB) e HDMI insieme:
 
 | Prova | Risultato |
 | --- | --- |
-| Menu in inglese con `MC_LANG=en` | Funziona |
-| Pagina Impostazioni | Funziona |
-| Riquadro Start con formato, ritardo audio e interlacciato | Funziona |
-| Sottotitoli esterni `.srt` | Funzionano |
-| Sottotitoli dentro MKV (SRT, ASS) e MP4 | Funzionano |
-| Ritardo audio dal riquadro Start durante un DVD | Funziona |
-| Immagine 4.6 all'apertura dello script, Build 225 | Funziona |
+| Menu in spagnolo, francese e tedesco, anche dalla pagina Impostazioni | Funziona |
+| Lettere accentate nei menu | Funzionano |
+| Schermata audio con la riga dei tasti e le scritte dei pulsanti gialle | Funziona |
+| Aggiornamento con lo script: Main in uso e lettore sostituiti, seconda volta "Hai gia' la versione v4.6" | Funziona |
+| Promemoria dello script quando `MiSTer.ini` non avvia ancora il Main di MMC | Funziona |
 
-Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-46). Le novità della 4.5 e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-45).
+Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-461). Le novità della 4.6 e delle versioni precedenti sono nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-della-versione-46).
 
 **Ringraziamenti:**
 
@@ -45,18 +33,17 @@ Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-dell
 - **mad4gith**, per le idee suggerite per migliorare MMC.
 - **FDA**, per il supporto tecnico e l'aiuto a chiudere il seme 12 del core FPGA.
 
-**Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD: contiene tutto quello che serve a MMC. Aggiorna sempre tutti i file insieme. **Dalla 4.5:** estrai lo zip sopra i file vecchi e riavvia; `MiSTer.ini` e `mediacenter.ini` restano come sono. **Dalla 4.0:** cancella anche il vecchio script `/media/fat/Scripts/mediacenter.sh` (altrimenti negli Scripts compaiono due voci).
+**Installazione:** estrai `MiSTer_MediaCenter.zip` nella cartella principale della SD: contiene tutto quello che serve a MMC. Aggiorna sempre tutti i file insieme. **Dalla 4.6:** lancia **Update_Mister_Media_Center** dal menu Scripts oppure estrai lo zip sopra i file vecchi, poi riavvia; `MiSTer.ini` e `mediacenter.ini` restano come sono. **Dalla 4.0:** cancella anche il vecchio script `/media/fat/Scripts/mediacenter.sh` (altrimenti negli Scripts compaiono due voci). Chi non ha ancora lo script lo scarica una volta via ssh: `cd /media/fat/Scripts && curl -sSfL --cacert /etc/ssl/certs/cacert.pem -O https://raw.githubusercontent.com/bonna79/MiSTer_MediaCenter/main/Scripts/Update_Mister_Media_Center.sh` ([guida](https://github.com/bonna79/MiSTer_MediaCenter#installare-o-aggiornare-con-lo-script)).
 
 | File | Cartella |
 | --- | --- |
 | `MiSTer_MediaCenter` (Main) | `/media/fat/` |
 | `mediacenter` (lettore ARM) | `/media/fat/linux/` |
 | `menu_mediacenter.rbf` (core del menu) | `/media/fat/linux/` |
-| `Mister_Media_Center.sh` (script) | `/media/fat/Scripts/` |
+| `Mister_Media_Center.sh` (script del lettore) | `/media/fat/Scripts/` |
+| `Update_Mister_Media_Center.sh` (script che installa o aggiorna) | `/media/fat/Scripts/` |
 | `libdvdcss.so.2` | `/media/fat/dvdcss/` |
 | `MMC_MiSTer_ini.txt` (righe per `MiSTer.ini`) | `/media/fat/` |
-
-MD5 dei file nello zip: `MiSTer_MediaCenter` bc95274c5f16ceaa0f8e6dc920724897, `mediacenter` 794d2af514165c55b403bda16ffb8733, `menu_mediacenter.rbf` 7cb8175f995d5b72a49c2ef032fbc963, `Mister_Media_Center.sh` 395f18116ad0a3156ccc3500e551e2d2, `libdvdcss.so.2` 7a140afb27296b1a7417358bbcc44cfd.
 
 Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0`, `forced_scandoubler=0` (e `composite_sync=1` con la SCART) in `[MiSTer]`, `main=MiSTer_MediaCenter` in `[menu]` e `main=MiSTer_Physical-CD` in `[A0CD-*]`. **Non mettere `main=MiSTer_MediaCenter` nella sezione `[MiSTer]`: va solo in `[menu]`.** Il Main di [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases), per i giochi su disco, si scarica dal suo progetto. Riavvia il MiSTer. Guida completa nel [README](https://github.com/bonna79/MiSTer_MediaCenter#installazione).
 
@@ -64,38 +51,32 @@ Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0
 
 ---
 
-**English:** **MiSTer MediaCenter 4.6** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB, network and Jellyfin server, over HDMI and on a 15 kHz CRT.
+**English:** **MiSTer MediaCenter 4.6.1** turns the MiSTer into a player for DVD-Video, Video CD, Super Video CD, DivX/Xvid/MP4/MKV video and music, from disc, SD, USB, network and Jellyfin server, over HDMI and on a 15 kHz CRT.
 
-**What's new in 4.6:**
+**What's new in 4.6.1:**
 
-- **English menu:** with `MC_LANG=en` in `mediacenter.ini`, or from the Settings page, MMC's text is in English (lists, controls during the video, audio screen, Jellyfin, CRT Adjust).
-- **Settings page** in the list of sources: menu language, preferred audio and subtitle language (for DVDs and files), audio delay (from -1000 to +1000 ms in 10 ms steps), Interlaced Yes (best for CRT) / No, and the link to CRT Adjust. **A** writes only the changed lines to `mediacenter.ini`, **B** cancels.
-- **Start box during the film** with three rows: Format, Audio delay and Interlaced. While you change the delay the film pauses, so the sound does not jump; **A** (Apply) confirms it, lines the sound up again and saves it.
-- **Text subtitles for files:** external `.srt`, `.ass`, `.ssa`, `.vtt` files next to the video (`film.srt`, `film.ita.srt`…, also `.srt` files saved on Windows with accented letters), SRT, ASS and WebVTT tracks inside MKV and mov_text inside MP4. The **A** button changes track or turns them off. They are drawn over the video, so they also work with the 1080p accelerator and on the CRT. Picture subtitles (PGS, VobSub) in files are not supported yet.
-- **New picture** Ver. 4.6 H264 Jellyfin Client 1080 P, shown only when the script is opened.
+- **Spanish, French and German menus**, in addition to Italian and English: from the Settings page (Menu language row: Italiano, English, Español, Français, Deutsch) or with `MC_LANG=es`, `MC_LANG=fr` or `MC_LANG=de` in `mediacenter.ini`. They cover lists, controls during DVD, Video CD, Super Video CD, DivX/Xvid, MKV and MP4 playback, audio screen, Jellyfin, CRT Adjust and Settings. The small menu font now has accented letters (à, é, ñ, ç, ü, ß…). Chinese and Japanese will come later.
+- **Audio screen easier to read on a CRT:** the keys line at the bottom and the captions under the buttons are now yellow (FFFF00) instead of dark grey.
+- **Install or update script in the zip:** `Update_Mister_Media_Center.sh` (`Scripts` folder). From the Scripts menu it downloads the latest release from GitHub: on a MiSTer without MMC it installs everything, if MMC is already there it replaces only the files that changed. It checks the download (size, GitHub's sha256, zip test), saves the old files in `/media/fat/linux/mmc_backup`, asks you to restart if the Main or the core changed and never touches `MiSTer.ini` or `mediacenter.ini`. If `MiSTer.ini` has no `main=MiSTer_MediaCenter` in the `[menu]` section, it reminds you to copy the lines of `MMC_MiSTer_ini.txt`.
 
-Only the `mediacenter` player changes, the program that runs on the ARM processor: the Main and the menu core (seed 12) are the same as in 4.5. Subtitles are drawn by the ARM in the same layer as the on-screen controls, so they also show when the pictures come from the FPGA accelerator.
+Only the `mediacenter` player and the scripts change: the Main and the menu core (seed 12) are built from the same sources as in 4.6.
 
-**Complete documentation (PDF, 20 pages):** [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6/MMC_4.6_documentation_complete_EN.pdf) · [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6/MMC_4.6_documentazione_completa_IT.pdf). It explains the FPGA chip, the ARM player, the hand-offs between ARM and FPGA, the HDMI and CRT outputs, what is new in 4.5 and 4.6 (subtitles, language, settings) and how to rebuild everything from scratch. The PDFs are also in the [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs) folder.
+**Complete documentation (PDF, 21 pages):** [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.1/MMC_4.6.1_documentation_complete_EN.pdf) · [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.1/MMC_4.6.1_documentazione_completa_IT.pdf). It explains the FPGA chip, the ARM player, the hand-offs between ARM and FPGA, the HDMI and CRT outputs, what is new from 4.5 to 4.6.1 (languages, settings, subtitles, update script) and how to rebuild everything from scratch. The PDFs are also in the [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs) folder.
 
-**New settings in `mediacenter.ini`** (also chosen from the Settings page): `MC_LANG=en` for English text; `MC_AUDIO_LANG=` preferred audio language for DVDs and files (`it`, `en`, `fr`, `de`, `es`, `ja`); `MC_SUB_LANG=` preferred subtitle language (same codes), `off` to turn them off.
-
-Tested on a real MiSTer on 14 November 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI together:
+Tested on a real MiSTer on 14 and 15 November 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI together:
 
 | Test | Result |
 | --- | --- |
-| English menu with `MC_LANG=en` | Working |
-| Settings page | Working |
-| Start box with format, audio delay and interlaced | Working |
-| External `.srt` subtitles | Working |
-| Subtitles inside MKV (SRT, ASS) and MP4 | Working |
-| Audio delay from the Start box during a DVD | Working |
-| 4.6 picture when the script opens, Build 225 | Working |
+| Spanish, French and German menus, also from the Settings page | Working |
+| Accented letters in the menus | Working |
+| Audio screen with yellow keys line and button captions | Working |
+| Update with the script: Main in use and player replaced, second run "You already have version v4.6" | Working |
+| Script reminder when `MiSTer.ini` does not start the MMC Main yet | Working |
 
-Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-46). What's new in 4.5 and earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-45).
+Details in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-461). What's new in 4.6 and earlier versions is in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#whats-new-in-version-46).
 
 **Thanks:** Umberto Parisi (rmonic79) of the Beceri Videoludici, whose work on [MiSTer CRT Adjust](https://github.com/rmonic79/MiSTer-CRT-Adjust) made CRT Adjust possible ([YouTube channel](https://youtube.com/@rmonic79_ibecerivideoludici)); Max Riptide for the many tests and suggestions; mad4gith for the ideas to improve MMC; FDA for the technical support and the help in closing timing on seed 12 of the FPGA core.
 
-**Install:** extract `MiSTer_MediaCenter.zip` to the root of the SD card: it holds everything MMC needs. Always update all files together (**from 4.5:** extract the zip over the old files and restart; `MiSTer.ini` and `mediacenter.ini` stay as they are; **from 4.0:** also delete the old script `/media/fat/Scripts/mediacenter.sh`, otherwise Scripts shows two entries): Main `MiSTer_MediaCenter` to `/media/fat/`, ARM player `mediacenter` and menu core `menu_mediacenter.rbf` to `/media/fat/linux/`, script `Mister_Media_Center.sh` to `/media/fat/Scripts/`, `libdvdcss.so.2` to `/media/fat/dvdcss/`, `MMC_MiSTer_ini.txt` to `/media/fat/` (MD5s as in the Italian table above). Copy the lines of `MMC_MiSTer_ini.txt` into `/media/fat/MiSTer.ini`. **Do not put `main=MiSTer_MediaCenter` in the `[MiSTer]` section: it goes only in `[menu]`.** The [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases) Main, for game discs, is downloaded from its own project. Restart the MiSTer. Full guide in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#installation).
+**Install:** extract `MiSTer_MediaCenter.zip` to the root of the SD card: it holds everything MMC needs. Always update all files together (**from 4.6:** start **Update_Mister_Media_Center** from the Scripts menu or extract the zip over the old files, then restart; `MiSTer.ini` and `mediacenter.ini` stay as they are; **from 4.0:** also delete the old script `/media/fat/Scripts/mediacenter.sh`, otherwise Scripts shows two entries): Main `MiSTer_MediaCenter` to `/media/fat/`, ARM player `mediacenter` and menu core `menu_mediacenter.rbf` to `/media/fat/linux/`, scripts `Mister_Media_Center.sh` and `Update_Mister_Media_Center.sh` to `/media/fat/Scripts/`, `libdvdcss.so.2` to `/media/fat/dvdcss/`, `MMC_MiSTer_ini.txt` to `/media/fat/`. If you do not have the update script yet, download it once over ssh: `cd /media/fat/Scripts && curl -sSfL --cacert /etc/ssl/certs/cacert.pem -O https://raw.githubusercontent.com/bonna79/MiSTer_MediaCenter/main/Scripts/Update_Mister_Media_Center.sh` ([guide](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#installing-or-updating-with-the-script)). Copy the lines of `MMC_MiSTer_ini.txt` into `/media/fat/MiSTer.ini`. **Do not put `main=MiSTer_MediaCenter` in the `[MiSTer]` section: it goes only in `[menu]`.** The [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases) Main, for game discs, is downloaded from its own project. Restart the MiSTer. Full guide in the [README](https://github.com/bonna79/MiSTer_MediaCenter/blob/main/README_EN.md#installation).
 
 **Your feedback is very valuable:** write to me, even when everything works. If there are problems, open a report on [Issues](https://github.com/bonna79/MiSTer_MediaCenter/issues) with photos of the screen and the `/tmp/mediacenter.log`, `/tmp/mediacenter_main.log` and `/tmp/mediacenter_crt` files.
