@@ -3529,6 +3529,30 @@ static int is_dvd_path(const char *path)
 	return !access(ifo, R_OK);
 }
 
+// A folder holding a DVD in VIDEO_TS and also other video or audio files
+// (a "DVD" folder with film.mkv, film.mp4 and VIDEO_TS): it opens as a
+// folder, so the files can be chosen too; its VIDEO_TS entry plays the DVD.
+static int dvd_dir_with_files(const char *path)
+{
+	char sub[1100];
+	snprintf(sub, sizeof(sub), "%s/VIDEO_TS/VIDEO_TS.IFO", path);
+	if (access(sub, R_OK)) return 0;
+	DIR *d = opendir(path);
+	if (!d) return 0;
+	struct dirent *de;
+	int found = 0;
+	while (!found && (de = readdir(d)))
+	{
+		if (de->d_name[0] == '.') continue;
+		char full[1100];
+		struct stat st;
+		snprintf(full, sizeof(full), "%s/%s", path, de->d_name);
+		found = !stat(full, &st) && !S_ISDIR(st.st_mode) && is_media(de->d_name);
+	}
+	closedir(d);
+	return found;
+}
+
 // A Super Video CD copied to the card as .bin + .cue: played like the disc
 // in the drive, reading the sectors from the image.
 static int play_cue_image(const char *cue)
@@ -4036,7 +4060,7 @@ static int browse(const char *root)
 			{
 				char path[1280];
 				snprintf(path, sizeof(path), "%s/%s", cwd, items[sel].name);
-				if (is_dvd_path(path))
+				if (is_dvd_path(path) && !dvd_dir_with_files(path))
 				{
 					if (play_file(path, 0) == END_QUIT) return 1;
 					continue;
