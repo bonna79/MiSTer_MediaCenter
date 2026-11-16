@@ -4574,19 +4574,10 @@ void video_cmd(char *cmd)
 				int out_w = v_cur.item[1], out_h = v_cur.item[5];
 				int win_h = out_h;
 				int win_w = (int)((int64_t)out_h * aw / ah);
-				// direct_video at 15 kHz (fewer than 300 lines): the output fills
-				// a 4:3 CRT whatever its pixel count, so the window is measured
-				// on a 4:3 screen (a 4:3 picture takes the whole line); height x
-				// aspect would give a window narrower than the frame buffer, which
-				// the scaler cannot shrink into.
-				int crt43 = video_is_direct() && out_h < 300;
-				if (crt43)
-					win_w = (int)((int64_t)out_w * aw * 3 / ((int64_t)ah * 4));
 				if (win_w > out_w)
 				{
 					win_w = out_w;
-					win_h = crt43 ? (int)((int64_t)out_h * ah * 4 / ((int64_t)aw * 3))
-					              : (int)((int64_t)out_w * ah / aw);
+					win_h = (int)((int64_t)out_w * ah / aw);
 				}
 				hmin = (uint16_t)((out_w - win_w) / 2);
 				vmin = (uint16_t)((out_h - win_h) / 2);
