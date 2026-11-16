@@ -3710,7 +3710,11 @@ void video_fb_enable(int enable, int n)
 		}
 
 		DisableIO();
-		if (cfg.direct_video) set_vga_fb(enable);
+		// MiSTer MediaCenter's menu core draws the frame buffer on its own
+		// 15 kHz output (mc_out), so with direct_video its VGA output stays on
+		// the core instead of the scaler (which gives 640x240 there, too small
+		// for the 720 pixel wide lists).
+		if (cfg.direct_video) set_vga_fb(enable && !(is_menu() && menu_is_mediacenter()));
 		if (is_menu()) user_io_status_set("[8:5]", (fb_enabled && !fb_num) ? 0xB : 0);
 	}
 }
