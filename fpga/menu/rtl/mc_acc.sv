@@ -425,7 +425,11 @@ reg [31:0] l_since = 0, l_starve = 0, l_mwait = 0;
 reg  [7:0] l_slot = 0;
 reg        err = 0, dead = 0, p_err = 0;
 reg [19:0] wd = 0;
-reg  [5:0] rst_n = 0;
+// engine reset after a new session: 1024 clocks, so that the FIFOs of
+// mc_parse are empty (they drain one word a clock while reset is high; the
+// command FIFO holds 512 words, and with 32 clocks up to ~480 old commands
+// stayed and were run after a seek: "unexpected command")
+reg [10:0] rst_n = 0;
 
 // page table: the page number of each 4 KB page of the ring
 reg  [19:0] tab_lo[512], tab_hi[512];
@@ -620,7 +624,7 @@ always @(posedge clk) begin
 				// read the page table
 				e_reset <= 1;
 				if (!f_req && !tq_n && q_done) begin
-					rst_n   <= 32;
+					rst_n   <= 11'd1024;
 					cf_wp   <= 0;
 					cf_rp   <= 0;
 					cf_qv   <= 0;

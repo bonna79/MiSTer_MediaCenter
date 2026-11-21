@@ -8,7 +8,9 @@
 //   mret motion memory read data, 64-bit words (two 32-bit words each, low
 //        first), clk -> pclk; a record is 35 words, so the 36th is dropped
 // While reset (clk side) is high, acc_parse is held in reset and every FIFO
-// is emptied on its read side, so a new session starts clean.
+// is emptied on its read side, one word a clock, so a new session starts
+// clean only if reset lasts long enough for the 512-word command FIFO
+// (mc_acc holds it 1024 clocks).
 module mc_parse
 (
 	input             clk,
