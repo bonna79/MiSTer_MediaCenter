@@ -2,7 +2,7 @@
 
 [Italiano](README.md) · **English**
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.6 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.6.2 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
 
@@ -36,6 +36,28 @@ The package is made of these parts:
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
 The player's on-screen texts are in Italian unless you choose another menu language: English (from 4.6), Spanish, French or German (from 4.6.1).
+
+## What's new in version 4.6.2
+
+Version 4.6.2 fixes two problems: **the 1080p accelerator turned off after some jumps** in the video and **files larger than 2 GB did not appear in the lists**. The menu core `menu_mediacenter.rbf` and the `mediacenter` player change. The Main is built from the same sources as in 4.6.1.
+
+- **Accelerator stays on after jumps:** with PgDn/PgUp (fast forward and rewind) and with left/right, after some jumps the FPGA could still receive commands from the previous position. It answered "unexpected command" and the player turned the accelerator off until the end of the file, so 1080p became jerky. The problem was also in 4.6.1.
+  - Now after every jump the core empties the whole queue of old commands before starting again (mc_acc holds the engine for 1024 cycles instead of 32).
+  - The new core uses fitter **seed 16**, the only one that meets all timing at 100 °C and -40 °C, in the slow and fast models of the chip, for both setup and hold (smallest margin +0.094 ns). The seed check now looks at all these cases, not just one.
+- **Files over 2 GB in the lists:** MKV or MP4 films larger than 2 GB did not appear, not even in a plain folder. Now they are listed and open like the others, also beyond 4 GB. The same fix applies to DVD `.iso` images.
+- **New picture** with the words Ver. 4.6.2 H264 Jellyfin Client 1080 P, shown only when the script is opened from Scripts.
+
+**Updating from 4.6.1:** start **Update_Mister_Media_Center** from the Scripts menu, or extract the 4.6.2 zip over the old files. The menu core changes, so then **restart the MiSTer**. `MiSTer.ini` and `mediacenter.ini` stay as they are.
+
+Tested on a real MiSTer on 21 and 22 November 2026, in two rounds (the second after switching the MiSTer fully off), on a Sony Trinitron CRT (SCART RGB) and HDMI at the same time:
+
+| Test | Result |
+| --- | --- |
+| One Piece 1080p, 567 s with about 38 jumps | Accelerator always on, 0 pictures lost by the FPGA, 1.8% not shown (all around the jumps) |
+| One Piece 720p after power-off, about 24 jumps | Accelerator always on, 0 lost, 2.7% not shown (around the jumps) |
+| HTC (heavy scenes) without jumps | 0% not shown, 300 of 300 pictures every 10 seconds |
+| Single file over 4 GB (5 h 34 min), over an hour with jumps up to 5 h 23 min | Listed; accelerator always on, 116,241 pictures, 0 lost, 0.4% not shown |
+| Original DVD (menus, chapters, jumps, audio switch) | Works as before |
 
 ## What's new in version 4.6.1
 
@@ -609,6 +631,8 @@ cd /media/fat/Scripts && curl -sSfL --cacert /etc/ssl/certs/cacert.pem -O https:
 **Updating with the script:** start **Update_Mister_Media_Center** from the Scripts menu when a new version is out. If you already have the latest one, the script says so and changes nothing. If it replaces the Main or the menu core, at the end it asks you to restart the MiSTer. If something goes wrong (no network, downloaded file not correct, SD card full) it stops before changing any file and says so on screen. The log of what it did is in `/tmp/Update_Mister_Media_Center.log`, and the replaced files stay in `/media/fat/linux/mmc_backup` until the next update.
 
 #### Updating by extracting the zip
+
+**Updating from 4.6.1 to 4.6.2:** with the script, or extract the 4.6.2 zip over the old files. The menu core changes: then restart the MiSTer.
 
 **Updating from 4.6 to 4.6.1:** with the script, or extract the 4.6.1 zip over the old files. Then restart the MiSTer.
 

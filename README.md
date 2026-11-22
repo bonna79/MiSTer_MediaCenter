@@ -2,7 +2,7 @@
 
 **Italiano** · [English](README_EN.md)
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.6 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.6.2 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > Questo progetto è stato sviluppato con l'aiuto dell'intelligenza artificiale: il codice e la documentazione sono stati scritti con Claude, l'IA di Anthropic, e provati da rgm su un MiSTer vero.
 
@@ -34,6 +34,28 @@ Il pacchetto è formato da queste parti:
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | Le righe da copiare in `MiSTer.ini` (non è un `MiSTer.ini`: copia solo le righe) |
 
 Il vecchio `vcd_player` delle prime versioni non serve più: il lettore Video CD è dentro `mediacenter`.
+
+## Novità della versione 4.6.2
+
+La 4.6.2 corregge due problemi: **l'acceleratore 1080p si spegneva dopo alcuni salti** nel video e **i file più grandi di 2 GB non comparivano negli elenchi**. Cambiano il core del menu `menu_mediacenter.rbf` e il lettore `mediacenter`. Il Main nasce dagli stessi sorgenti della 4.6.1.
+
+- **Acceleratore sempre acceso dopo i salti:** con PgGiù/PgSu (avanti e indietro veloce) e con sinistra/destra, dopo alcuni salti l'FPGA poteva ricevere ancora comandi del punto di prima. Rispondeva "unexpected command" e il lettore spegneva l'acceleratore fino alla fine del file: il 1080p diventava a scatti. Il problema c'era anche nella 4.6.1.
+  - Ora dopo ogni salto il core svuota per intero la coda dei comandi vecchi prima di ripartire (mc_acc tiene il motore fermo 1024 cicli invece di 32).
+  - Il nuovo core usa il **seed 16** del fitter, l'unico che rispetta tutti i tempi a 100 °C e a -40 °C, nei modelli lento e veloce del chip, sia in setup che in hold (margine minimo +0,094 ns). Il controllo dei semi ora guarda tutti questi casi, non uno solo.
+- **File oltre i 2 GB negli elenchi:** film MKV o MP4 più grandi di 2 GB non comparivano, nemmeno in una cartella semplice. Ora si vedono e si aprono come gli altri, anche oltre i 4 GB. La stessa correzione vale per le immagini DVD `.iso`.
+- **Nuova immagine** con la scritta Ver. 4.6.2 H264 Jellyfin Client 1080 P, mostrata solo quando si apre lo script dagli Scripts.
+
+**Aggiornare dalla 4.6.1:** lancia **Update_Mister_Media_Center** dal menu Scripts, oppure estrai lo zip della 4.6.2 sopra i file vecchi. Cambia il core del menu, quindi poi **riavvia il MiSTer**. `MiSTer.ini` e `mediacenter.ini` restano come sono.
+
+Provata su un MiSTer vero il 21 e il 22 novembre 2026, in due giri (il secondo dopo aver spento del tutto il MiSTer), su CRT Sony Trinitron (SCART RGB) e HDMI insieme:
+
+| Prova | Risultato |
+| --- | --- |
+| One Piece 1080p, 567 s con circa 38 salti | Acceleratore sempre acceso, 0 immagini perse dall'FPGA, 1,8% non mostrate (tutte attorno ai salti) |
+| One Piece 720p dopo lo spegnimento, circa 24 salti | Acceleratore sempre acceso, 0 perse, 2,7% non mostrate (attorno ai salti) |
+| HTC (scene pesanti) senza salti | 0% non mostrate, 300 immagini su 300 ogni 10 secondi |
+| File unico oltre i 4 GB (5 h 34 min), più di un'ora con salti fino a 5 h 23 min | Si vede nell'elenco; acceleratore sempre acceso, 116.241 immagini, 0 perse, 0,4% non mostrate |
+| DVD originale (menu, capitoli, salti, cambio audio) | Funziona come prima |
 
 ## Novità della versione 4.6.1
 
@@ -607,6 +629,8 @@ cd /media/fat/Scripts && curl -sSfL --cacert /etc/ssl/certs/cacert.pem -O https:
 **Aggiornare con lo script:** lancia **Update_Mister_Media_Center** dal menu Scripts quando esce una nuova versione. Se hai già l'ultima, lo script lo dice e non cambia niente. Se sostituisce il Main o il core del menu, alla fine chiede di riavviare il MiSTer. Se qualcosa va storto (niente rete, file scaricato non corretto, SD piena) si ferma prima di cambiare i file e lo scrive sullo schermo. Il registro di quello che ha fatto è in `/tmp/Update_Mister_Media_Center.log` e i file sostituiti restano in `/media/fat/linux/mmc_backup` fino all'aggiornamento successivo.
 
 #### Aggiornare estraendo lo zip
+
+**Aggiornare dalla 4.6.1 alla 4.6.2:** con lo script, oppure estrai lo zip della 4.6.2 sopra i file vecchi. Cambia il core del menu: poi riavvia il MiSTer.
 
 **Aggiornare dalla 4.6 alla 4.6.1:** con lo script, oppure estrai lo zip della 4.6.1 sopra i file vecchi. Poi riavvia il MiSTer.
 
