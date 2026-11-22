@@ -45,7 +45,7 @@ Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-dell
 | `libdvdcss.so.2` | `/media/fat/dvdcss/` |
 | `MMC_MiSTer_ini.txt` (righe per `MiSTer.ini`) | `/media/fat/` |
 
-MD5 dei file nello zip: MD5_DA_INSERIRE
+MD5 dei file nello zip: `MiSTer_MediaCenter` 168953fa87c9b2dc7c82f38d0f79c358, `mediacenter` 9471edda259c7f16cf19dd51cf22a272, `menu_mediacenter.rbf` 4e9b7bb85f167409ec1c2f5157a112a8, `Mister_Media_Center.sh` 395f18116ad0a3156ccc3500e551e2d2, `Update_Mister_Media_Center.sh` ea5d56246f3cb799fe00e7830cd4f0c4, `libdvdcss.so.2` 7a140afb27296b1a7417358bbcc44cfd.
 
 Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0`, `forced_scandoubler=0` (e `composite_sync=1` con la SCART) in `[MiSTer]`, `main=MiSTer_MediaCenter` in `[menu]` e `main=MiSTer_Physical-CD` in `[A0CD-*]`. **Non mettere `main=MiSTer_MediaCenter` nella sezione `[MiSTer]`: va solo in `[menu]`.** **Con `direct_video=1` (convertitori HDMI→VGA, scaler esterni come RetroTINK) MMC non usa la sua uscita CRT:** sulla VGA arriva l'immagine dello scaler, Regola CRT non ha effetto e l'elenco può uscire ingrandito o tagliato. Per un CRT sulla VGA lascia `direct_video=0` ([dettagli](https://github.com/bonna79/MiSTer_MediaCenter#uscita-video-hdmi-e-crt-a-15-khz)). Il Main di [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases), per i giochi su disco, si scarica dal suo progetto. Riavvia il MiSTer. Guida completa nel [README](https://github.com/bonna79/MiSTer_MediaCenter#installazione).
 
