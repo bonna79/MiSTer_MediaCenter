@@ -10,6 +10,9 @@ name: Menu core report (md5, resources, chip map data)
 #   10 ALMs, plus the M10K, DSP and PLL positions.
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/fpga_report.yml'
 
 jobs:
   report:
