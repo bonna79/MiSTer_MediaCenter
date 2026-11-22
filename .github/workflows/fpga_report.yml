@@ -1,0 +1,88 @@
+name: Menu core report (md5, resources, chip map data)
+
+# Compiles the menu core exactly as menu.qsf says (seed, date in
+# build_date.txt) and prints into the job log what the documentation needs,
+# so it can be read without downloading artifacts:
+# - the md5 of the rbf (Quartus is deterministic: same sources, seed and
+#   date give the same file as the one tested on the MiSTer);
+# - the fitter summary and the resources of the main modules;
+# - the chip map data: one line per LAB with the owner of each of its
+#   10 ALMs, plus the M10K, DSP and PLL positions.
+on:
+  workflow_dispatch:
+
+jobs:
+  report:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile with Quartus
+        run: |
+          grep -n "SEED" fpga/menu/menu.qsf
+          docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
+            quartus_sh --flow compile menu.qpf > compile.log 2>&1 || { tail -50 compile.log; exit 1; }
+          cat fpga/menu/output_files/menu.fit.summary
+          echo "RBF_MD5 $(md5sum < fpga/menu/output_files/menu.rbf | cut -d' ' -f1)"
+
+      - name: Resources of the main modules
+        run: |
+          # rows of "Fitter Resource Utilization by Entity" down to 4 levels
+          awk '/; Fitter Resource Utilization by Entity/{on=1} on&&/^$/{if(++blank>1)exit} on' \
+            fpga/menu/output_files/menu.fit.rpt > entity.txt
+          head -4 entity.txt
+          awk -F';' 'NF>10 { n=$2; d=gsub(/\|/,"|",n); if (d<=5) print "ENT" $0 }' entity.txt | head -400
+
+      - name: Chip map data
+        run: |
+          cat > fpga/menu/locs.tcl <<'TCL'
+          project_open menu
+          create_timing_netlist
+          set f [open locs.txt w]
+          foreach_in_collection c [get_cells -hierarchical *] {
+          	if {[catch {get_cell_info -location $c} loc]} { continue }
+          	puts $f "$loc [get_cell_info -name $c]"
+          }
+          close $f
+          delete_timing_netlist
+          project_close
+          TCL
+          docker run --rm -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
+            quartus_sta -t locs.tcl > locs.log 2>&1 || { tail -40 locs.log; exit 1; }
+          wc -l fpga/menu/locs.txt
+          grep -m5 "" fpga/menu/locs.txt
+          python3 - fpga/menu/locs.txt <<'PY'
+          import re, sys
+          from collections import defaultdict, Counter
+          pat = re.compile(r'^([A-Z0-9_]+?)_X(\d+)_Y(\d+)_N(\d+)\s+(\S+)')
+          # same groups and order as the map script (first match wins)
+          G = [('emu|mc_acc|rq|', 'b'), ('emu|mc_acc|rxq|', 'b'), ('emu|mc_acc|par|ap|', 'p'),
+               ('emu|mc_acc|par|', 'q'), ('emu|mc_acc|engine|dbk|', 'd'), ('emu|mc_acc|engine|mc|', 'm'),
+               ('emu|mc_acc|engine|', 'e'), ('emu|mc_acc|', 'a'), ('emu|mc_zc|', 'z'),
+               ('emu|mc_out|', 'o'), ('ascal|', 's')]
+          def grp(n):
+              for k, c in G:
+                  if n.startswith(k): return c
+              return 'x'
+          alm = defaultdict(Counter); labs = set(); blk = {}; pll = set()
+          for line in open(sys.argv[1], errors='replace'):
+              m = pat.search(line)
+              if not m: continue
+              k, x, y, n, name = m.group(1), int(m.group(2)), int(m.group(3)), int(m.group(4)), m.group(5)
+              if k in ('LABCELL', 'MLABCELL', 'FF'):
+                  labs.add((x, y)); alm[(x, y, n // 6)][grp(name)] += 1
+              elif k.startswith('M10K'):
+                  blk[('M', x, y)] = grp(name)
+              elif k.startswith('DSP'):
+                  blk[('D', x, y)] = grp(name)
+              elif 'PLL' in k and 'OUTPUT_COUNTER' not in k:
+                  pll.add('%s_X%d_Y%d %s' % (k, x, y, name.split('|')[0]))
+          for (x, y) in sorted(labs):
+              s = ''.join((alm[(x, y, a)].most_common(1)[0][0] if alm.get((x, y, a)) else '.') for a in range(10))
+              print('LAB %d %d %s' % (x, y, s))
+          for (t, x, y), g in sorted(blk.items()):
+              print('BLK %s %d %d %s' % (t, x, y, g))
+          for p in sorted(pll):
+              print('PLL ' + p)
+          print('MAPEND labs %d blocks %d' % (len(labs), len(blk)))
+          PY
