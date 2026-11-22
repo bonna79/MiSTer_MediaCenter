@@ -538,7 +538,7 @@ video_mode=0          ; risoluzione dell'HDMI, per esempio 1280x720
 
 Nella sezione `[menu]` **non** mettere `vga_scaler=1`, `video_mode`, `direct_video` o altre forzature dello scaler: valgono solo per il menu, dove gira MMC, e prendono il posto delle impostazioni generali. Con `vga_scaler=1` e un `video_mode` a 240 righe, per esempio, sul CRT arriva l'immagine dello scaler, stretta e tagliata ai lati.
 
-> ⚠️ **Con `direct_video=1` MMC non usa la sua uscita CRT.** `direct_video=1` serve per i convertitori HDMI→VGA e per gli scaler esterni (per esempio RetroTINK). Con questa impostazione, quando gira MMC il MiSTer manda sulla VGA l'immagine del suo scaler: Regola CRT non ha effetto e l'elenco può uscire ingrandito o tagliato. Per usare MMC su un CRT collegato alla VGA lascia `direct_video=0`. Se ti serve `direct_video=1`, regola l'immagine dai comandi del televisore e lascia Regola CRT a 0 e Modo 15 kHz su Auto.
+> ⚠️ **Con `direct_video=1` MMC non usa la sua uscita CRT.** `direct_video=1` serve per i convertitori HDMI→VGA e per gli scaler esterni (per esempio RetroTINK). Con questa impostazione, quando gira MMC il MiSTer manda sulla VGA l'immagine del suo scaler: Regola CRT non ha effetto e l'elenco può uscire ingrandito o tagliato. Per usare MMC su un CRT a 15 kHz collegato all'uscita analogica DB-15 lascia `direct_video=0`. Se ti serve `direct_video=1`, regola l'immagine dai comandi del televisore e lascia Regola CRT a 0 e Modo 15 kHz su Auto.
 
 Provata da rgm su un televisore Sony Trinitron con cavo SCART RGB: DVD e DivX centrati e interi, interlacciati a 576i; nello stesso momento HDMI a 720p corretto.
 

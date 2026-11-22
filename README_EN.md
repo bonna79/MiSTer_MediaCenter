@@ -540,7 +540,7 @@ video_mode=0          ; HDMI resolution, for example 1280x720
 
 Do **not** put `vga_scaler=1`, `video_mode`, `direct_video` or other scaler overrides in the `[menu]` section: they apply only to the menu, where MMC runs, and replace the general settings. With `vga_scaler=1` and a 240-line `video_mode`, for example, the CRT gets the scaler's picture, narrow and cut at the sides.
 
-> ⚠️ **With `direct_video=1` MMC does not use its own CRT output.** `direct_video=1` is for HDMI→VGA converters and external scalers (for example RetroTINK). With it, while MMC runs the MiSTer sends its scaler's picture to VGA: CRT Adjust has no effect and the list may look enlarged or cut. To use MMC on a CRT connected to VGA keep `direct_video=0`. If you need `direct_video=1`, adjust the picture with the TV's controls and leave CRT Adjust at 0 and 15 kHz mode on Auto.
+> ⚠️ **With `direct_video=1` MMC does not use its own CRT output.** `direct_video=1` is for HDMI→VGA converters and external scalers (for example RetroTINK). With it, while MMC runs the MiSTer sends its scaler's picture to VGA: CRT Adjust has no effect and the list may look enlarged or cut. To use MMC on a 15 kHz CRT connected to the DB-15 analog output keep `direct_video=0`. If you need `direct_video=1`, adjust the picture with the TV's controls and leave CRT Adjust at 0 and 15 kHz mode on Auto.
 
 Tested by rgm on a Sony Trinitron TV with a SCART RGB cable: DVD and DivX centred and whole, interlaced at 576i; at the same time HDMI at 720p correct.
 
