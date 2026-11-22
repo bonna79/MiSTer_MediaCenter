@@ -94,16 +94,18 @@ jobs:
       # The menu core is compiled by fpga.yml (Quartus, only when fpga/ changes).
       # The release takes the core build the user tested, by its run id: the
       # fit changes with the build date (sys/build_id.tcl), so a new build of
-      # the same sources can miss timing. 4.0: fpga.yml run 42522126993, fitter
-      # seed 12 (the file tested on the MiSTer, the only seed of the final code
-      # that meets timing at 100 C and -40 C, slow and fast models).
+      # the same sources can miss timing. 4.6.2: fpga_seeds.yml run 44939202072,
+      # fitter seed 16 (the file tested on the MiSTer; with the reset fix
+      # a9a531e8 only seeds 5, 7, 14 and 16 meet setup and hold at 100 C and
+      # -40 C, slow and fast models; 16 has the largest margin). 4.0-4.6.1:
+      # fpga.yml run 42522126993, seed 12.
       - name: Fetch the menu core
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         uses: dawidd6/action-download-artifact@v6
         with:
-          workflow: fpga.yml
-          run_id: 42522126993
-          name: mediacenter_rbf
+          workflow: fpga_seeds.yml
+          run_id: 44939202072
+          name: mediacenter_rbf_seed16
           path: rbf
 
       - name: Package release
@@ -111,8 +113,8 @@ jobs:
         run: |
           mkdir -p pkg/linux pkg/Scripts
           # the core tested on the MiSTer, byte for byte
-          echo "7cb8175f995d5b72a49c2ef032fbc963  rbf/menu_mediacenter.rbf" | md5sum -c
-          cp rbf/menu_mediacenter.rbf pkg/linux/menu_mediacenter.rbf
+          echo "4e9b7bb85f167409ec1c2f5157a112a8  rbf/menu_mediacenter_seed16.rbf" | md5sum -c
+          cp rbf/menu_mediacenter_seed16.rbf pkg/linux/menu_mediacenter.rbf
           mkdir -p pkg/dvdcss
           # libdvdcss for protected DVDs, kept in the repository (dvdcss/)
           cp dvdcss/libdvdcss.so.2 pkg/dvdcss/
