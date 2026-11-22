@@ -3050,8 +3050,12 @@ static int list_dir(const char *path)
 		char full[1024];
 		snprintf(full, sizeof(full), "%s/%s", path, de->d_name);
 		struct stat st;
-		if (stat(full, &st)) continue;
-		int dir = S_ISDIR(st.st_mode);
+		int dir;
+		// Files over 2 GB: the player's 32-bit stat() fails with EOVERFLOW
+		// (FFmpeg reads them fine). Only a regular file can be that big.
+		if (!stat(full, &st)) dir = S_ISDIR(st.st_mode);
+		else if (errno == EOVERFLOW) dir = 0;
+		else continue;
 		if (!dir && !is_media(de->d_name)) continue;
 		snprintf(items[num_items].name, sizeof(items[0].name), "%s", de->d_name);
 		items[num_items].dir = dir;
@@ -3544,8 +3548,13 @@ static int is_dvd_path(const char *path)
 {
 	char ifo[1100];
 	struct stat st;
-	if (stat(path, &st)) return 0;
-	if (!S_ISDIR(st.st_mode)) return has_ext(path, (const char *const[]){ "iso", NULL });
+	// A DVD .iso is always over 2 GB: the player's 32-bit stat() fails with
+	// EOVERFLOW for it, and only a regular file can be that big.
+	int dir;
+	if (!stat(path, &st)) dir = S_ISDIR(st.st_mode);
+	else if (errno == EOVERFLOW) dir = 0;
+	else return 0;
+	if (!dir) return has_ext(path, (const char *const[]){ "iso", NULL });
 	snprintf(ifo, sizeof(ifo), "%s/VIDEO_TS/VIDEO_TS.IFO", path);
 	if (!access(ifo, R_OK)) return 1;
 	snprintf(ifo, sizeof(ifo), "%s/VIDEO_TS.IFO", path);

@@ -1,7 +1,8 @@
 name: Menu core fitter seeds (timing only)
 
 # Compiles the menu core with several fitter seeds side by side and prints
-# the worst setup slack of each clock, to pick the seed for menu.qsf.
+# the worst setup and hold slack of each clock in every corner, to pick
+# the seed for menu.qsf.
 # Each seed's rbf is kept as an artifact.
 on:
   workflow_dispatch:
@@ -28,13 +29,17 @@ jobs:
           create_timing_netlist
           read_sdc
           update_timing_netlist
-          foreach t {100 -40} {
-          	set_operating_conditions -model slow -temperature $t -voltage 1100
+          # every corner Quartus knows (slow and fast, hot and cold), setup and hold
+          foreach_in_collection oc [get_available_operating_conditions] {
+          	set_operating_conditions $oc
           	update_timing_netlist
-          	foreach_in_collection c [all_clocks] {
-          		set n [get_clock_info -name $c]
-          		foreach_in_collection p [get_timing_paths -setup -to_clock $c -npaths 1] {
-          			puts [format "SLACK seed=${::env(SEED)} temp=%s %8.3f %s" $t [get_path_info $p -slack] $n]
+          	if {[catch {get_operating_conditions_info $oc -display_name} cn]} { set cn "corner" }
+          	foreach kind {setup hold} {
+          		foreach_in_collection c [all_clocks] {
+          			set n [get_clock_info -name $c]
+          			foreach_in_collection p [get_timing_paths -$kind -to_clock $c -npaths 1] {
+          				puts [format "SLACK seed=${::env(SEED)} %s %-28s %8.3f %s" $kind [string map {" " _} $cn] [get_path_info $p -slack] $n]
+          			}
           		}
           	}
           }
@@ -45,7 +50,8 @@ jobs:
             quartus_sh --flow compile menu.qpf > compile.log 2>&1 || { tail -50 compile.log; exit 1; }
           cat fpga/menu/output_files/menu.fit.summary
           docker run --rm -e SEED=${{ matrix.seed }} -v "$PWD:/build" -w /build/fpga/menu theypsilon/quartus-lite-c5:17.0.2 \
-            quartus_sta -t slack.tcl 2>&1 | grep "^SLACK" | sort -k4 -n
+            quartus_sta -t slack.tcl > sta.log 2>&1 || true
+          if grep -q "^SLACK" sta.log; then grep "^SLACK" sta.log | sort -k5 -n; else echo "no SLACK lines:"; tail -40 sta.log; fi
           cp fpga/menu/output_files/menu.rbf menu_mediacenter_seed${{ matrix.seed }}.rbf
 
       - uses: actions/upload-artifact@v4
