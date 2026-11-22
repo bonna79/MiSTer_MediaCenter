@@ -87,7 +87,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "recent.h"
 #include "support.h"
 #include "support/physical_disc/physical_disc_launch.h"
-#include "support/vcd/vcd.h"
 #include "support/megadrive/mdplus.h"
 #include "support/snes/snes.h"
 #include "bootcore.h"
@@ -9068,7 +9067,6 @@ void HandleUI(void)
 
 
 			physical_disc_launch_menu_tick();
-			mediacenter_mgl_tick();
 
 
 

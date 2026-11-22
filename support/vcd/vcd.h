@@ -30,14 +30,4 @@ int mediacenter_launch_dvd(const char *device);
 // Data disc with video or music files: MediaCenter opens its file list.
 int mediacenter_launch_disc(const char *device);
 
-// An MGL file whose <rbf> is "mediacenter" (for example
-// _Utility/Mister Media Center.mgl) opens MiSTer MediaCenter from the core
-// list, like Scripts/Mister_Media_Center.sh. Started outside the menu, it
-// returns to the menu first and opens the player from there.
-#define MEDIACENTER_MGL_RBF "mediacenter"
-int mediacenter_launch_from_mgl(void);
-// Called from the menu's periodic tick: opens the player when an MGL asked
-// for it from inside a core.
-void mediacenter_mgl_tick(void);
-
 #endif
