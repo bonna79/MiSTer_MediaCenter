@@ -8,11 +8,9 @@ name: Menu core report (md5, resources, chip map data)
 # - the fitter summary and the resources of the main modules;
 # - the chip map data: one line per LAB with the owner of each of its
 #   10 ALMs, plus the M10K, DSP and PLL positions.
+# Started by hand (workflow_dispatch) from the Actions page.
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - '.github/workflows/fpga_report.yml'
 
 permissions:
   contents: write
