@@ -21,6 +21,8 @@ void SelectINI();
 // Returns non-zero when the command was queued.
 int menu_launch_script_command(const char *command, const char *title, const char *process_name);
 int menu_launch_graphical_script_command(const char *command, const char *title, const char *process_name);
+// Non-zero while a script is queued or running (or its window is still open).
+int menu_script_busy(void);
 
 void open_joystick_setup();
 int menu_lightgun_cb(int idx, uint16_t type, uint16_t code, int value);

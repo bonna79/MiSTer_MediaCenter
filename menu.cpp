@@ -87,6 +87,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "recent.h"
 #include "support.h"
 #include "support/physical_disc/physical_disc_launch.h"
+#include "support/vcd/vcd.h"
 #include "support/megadrive/mdplus.h"
 #include "support/snes/snes.h"
 #include "bootcore.h"
@@ -1221,6 +1222,11 @@ int menu_launch_script_command(const char *command, const char *title, const cha
 int menu_launch_graphical_script_command(const char *command, const char *title, const char *process_name)
 {
 	return menu_queue_script_command(command, title, process_name, true);
+}
+
+int menu_script_busy(void)
+{
+	return script_pipe || script_command_override || menustate == MENU_SCRIPTS || menustate == MENU_SCRIPTS1;
 }
 
 static bool mra_pending_target(const char *p)
@@ -9067,6 +9073,7 @@ void HandleUI(void)
 
 
 			physical_disc_launch_menu_tick();
+			mediacenter_mgl_tick();
 
 
 

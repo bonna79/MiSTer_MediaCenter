@@ -18,6 +18,7 @@
 
 #include "buffer.h"
 #include "mra_loader.h"
+#include "../vcd/vcd.h"
 
 #define kBigTextSize 1024
 struct arc_struct {
@@ -1299,6 +1300,25 @@ static const char *get_rbf(const char *xml, int arcade)
 	return lastfound[0] ? rbfname : NULL;
 }
 
+// MiSTer MediaCenter: an MGL whose <rbf> is MEDIACENTER_MGL_RBF opens the
+// player instead of loading a core.
+static int xml_is_mediacenter(const char *xml)
+{
+	static char rbfname[kBigTextSize];
+	rbfname[0] = 0;
+	SAX_Callbacks sax;
+	SAX_Callbacks_init(&sax);
+	sax.all_event = xml_scan_rbf;
+	XMLDoc_parse_file_SAX(xml, &sax, rbfname);
+	rbfname[kBigTextSize - 1] = 0;
+
+	char *s = rbfname;
+	while (*s && isspace((unsigned char)*s)) s++;
+	char *e = s + strlen(s);
+	while (e > s && isspace((unsigned char)e[-1])) *--e = 0;
+	return !strcasecmp(s, MEDIACENTER_MGL_RBF);
+}
+
 int xml_load(const char *xml)
 {
 	MenuHide();
@@ -1312,6 +1332,11 @@ int xml_load(const char *xml)
 
 	if (is_arcade) set_arcade_root(path);
 	printf("xml_load [%s]\n", path);
+	if (!is_arcade && xml_is_mediacenter(path))
+	{
+		mediacenter_launch_from_mgl();
+		return 0;
+	}
 	const char *rbf = get_rbf(path, is_arcade);
 
 	if (rbf)

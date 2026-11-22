@@ -111,7 +111,7 @@ jobs:
       - name: Package release
         if: startsWith(github.ref, 'refs/tags/v') || contains(github.event.head_commit.message, '[release]')
         run: |
-          mkdir -p pkg/linux pkg/Scripts
+          mkdir -p pkg/linux pkg/Scripts pkg/_Utility
           # the core tested on the MiSTer, byte for byte
           echo "4e9b7bb85f167409ec1c2f5157a112a8  rbf/menu_mediacenter_seed16.rbf" | md5sum -c
           cp rbf/menu_mediacenter_seed16.rbf pkg/linux/menu_mediacenter.rbf
@@ -122,6 +122,8 @@ jobs:
           cp bin/mediacenter pkg/linux/
           cp Scripts/Mister_Media_Center.sh pkg/Scripts/
           cp Scripts/Update_Mister_Media_Center.sh pkg/Scripts/
+          # MMC in the OSD core list (opened by the MiSTer_MediaCenter Main)
+          cp _Utility/Mister_Media_Center.mgl pkg/_Utility/
           cp LICENSE pkg/linux/mediacenter-LICENSE
           # the MiSTer.ini lines to copy (not a MiSTer.ini: it would replace the user's)
           cp docs/MMC_MiSTer_ini.txt pkg/
