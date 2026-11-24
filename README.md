@@ -848,4 +848,4 @@ make mediacenter FFMPEG=$PWD/ffmpeg-arm DVDNAV=$PWD/dvdnav-arm XMP=$PWD/xmp-arm
 
 ## Provenienza e licenza
 
-MiSTer MediaCenter deriva da [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer), dal core del menu del MiSTer e dal supporto ai dischi fisici di Physical Disc di Anime0t4ku. Usa FFmpeg, libdvdread, libdvdnav e libxmp. È distribuito con licenza GPL-3.0, come i progetti da cui deriva: vedi [LICENSE](LICENSE) e [NOTICE](NOTICE).
+MiSTer MediaCenter deriva da [Main_MiSTer](https://github.com/MiSTer-devel/Main_MiSTer), dal core del menu del MiSTer e dal supporto ai dischi fisici di Physical Disc di Anime0t4ku. Usa FFmpeg, libdvdread, libdvdnav e libxmp. I caratteri giapponesi e cinesi dei menu sono disegnati dal carattere Noto Sans CJK (SIL Open Font License 1.1). È distribuito con licenza GPL-3.0, come i progetti da cui deriva: vedi [LICENSE](LICENSE) e [NOTICE](NOTICE).

@@ -20,6 +20,12 @@ The mediacenter player contains libxmp 4.6.3 (MIT licence, Copyright (C)
 Claudio Matsuoka and Hipolito Carraro Jr), which plays the tracker modules.
 https://xmp.sourceforge.net
 
+The Japanese and Simplified Chinese characters of the menus
+(tools/vcd_player/vcd_font_cjk.h) are bitmaps drawn from Noto Sans CJK
+(SIL Open Font License 1.1, Copyright 2014-2021 Adobe), made by
+tools/vcd_player/make_cjk_font.py.
+https://github.com/notofonts/noto-cjk
+
 The release package also includes dvdcss/libdvdcss.so.2, an ARM build of
 libdvdcss by VideoLAN (GPL-2.0-or-later), loaded at run time to play
 protected DVDs. Its source code is available at

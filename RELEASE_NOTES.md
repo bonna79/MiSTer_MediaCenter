@@ -13,7 +13,7 @@
 
 Cambiano il Main `MiSTer_MediaCenter` e il lettore `mediacenter`; il core del menu `menu_mediacenter.rbf` è lo stesso della 4.6.2. **Dopo l'aggiornamento riavvia il MiSTer**, perché cambia il Main.
 
-**Documentazione completa (PDF):** [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.3/MMC_4.6.3_documentazione_completa_IT.pdf) · [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.3/MMC_4.6.3_documentation_complete_EN.pdf). Spiega il chip FPGA, il lettore ARM, i passaggi fra ARM e FPGA, le uscite HDMI e CRT, le novità dalla 4.5 alla 4.6.3 (lingue, impostazioni, sottotitoli, script di aggiornamento, acceleratore dopo i salti, giapponese e cinese, file MGL) e come ricostruire tutto da zero. I PDF sono anche nella cartella [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs).
+**Documentazione completa (PDF, 23 pagine):** [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.3/MMC_4.6.3_documentazione_completa_IT.pdf) · [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.3/MMC_4.6.3_documentation_complete_EN.pdf). Spiega il chip FPGA, il lettore ARM, i passaggi fra ARM e FPGA, le uscite HDMI e CRT, le novità dalla 4.5 alla 4.6.3 (lingue, impostazioni, sottotitoli, script di aggiornamento, acceleratore dopo i salti, giapponese e cinese, file MGL) e come ricostruire tutto da zero. I PDF sono anche nella cartella [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs).
 
 Provata su un MiSTer vero dal 23 al 24 novembre 2026, su CRT Sony Trinitron (SCART RGB) e HDMI insieme:
 
@@ -48,7 +48,7 @@ Dettagli nel [README](https://github.com/bonna79/MiSTer_MediaCenter#novità-dell
 | `Mister_Media_Center.mgl` (voce nell'elenco dei core) | `/media/fat/_Utility/` |
 | `MMC_MiSTer_ini.txt` (righe per `MiSTer.ini`) | `/media/fat/` |
 
-MD5 dei file nello zip: MD5_DA_INSERIRE
+MD5 dei file nello zip: `MiSTer_MediaCenter` c3338179191f18996e9823c3e8901f5d, `mediacenter` 44cb7100cda65f2d101e94761d12b38f, `menu_mediacenter.rbf` 4e9b7bb85f167409ec1c2f5157a112a8, `Mister_Media_Center.sh` 395f18116ad0a3156ccc3500e551e2d2, `Update_Mister_Media_Center.sh` ea5d56246f3cb799fe00e7830cd4f0c4, `libdvdcss.so.2` 7a140afb27296b1a7417358bbcc44cfd, `Mister_Media_Center.mgl` 751b315ebc12185445e40a785e44f404.
 
 Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0`, `forced_scandoubler=0` (e `composite_sync=1` con la SCART) in `[MiSTer]`, `main=MiSTer_MediaCenter` in `[menu]` e `main=MiSTer_Physical-CD` in `[A0CD-*]`. **Non mettere `main=MiSTer_MediaCenter` nella sezione `[MiSTer]`: va solo in `[menu]`.** **Con `direct_video=1` (convertitori HDMI→VGA, scaler esterni come RetroTINK) MMC non usa la sua uscita CRT:** sulla VGA arriva l'immagine dello scaler, Regola CRT non ha effetto e l'elenco può uscire ingrandito o tagliato. Per un CRT a 15 kHz sull'uscita analogica DB-15 lascia `direct_video=0` ([dettagli](https://github.com/bonna79/MiSTer_MediaCenter#uscita-video-hdmi-e-crt-a-15-khz)). Il Main di [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTer_Physical_Disc/releases), per i giochi su disco, si scarica dal suo progetto. Riavvia il MiSTer. Guida completa nel [README](https://github.com/bonna79/MiSTer_MediaCenter#installazione).
 
@@ -67,7 +67,7 @@ Copia in `/media/fat/MiSTer.ini` le righe di `MMC_MiSTer_ini.txt`: `vga_scaler=0
 
 The `MiSTer_MediaCenter` Main and the `mediacenter` player change; the menu core `menu_mediacenter.rbf` is the same as in 4.6.2. **Restart the MiSTer after updating**, because the Main changes.
 
-**Complete documentation (PDF):** [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.3/MMC_4.6.3_documentation_complete_EN.pdf) · [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.3/MMC_4.6.3_documentazione_completa_IT.pdf). It explains the FPGA chip, the ARM player, the hand-offs between ARM and FPGA, the HDMI and CRT outputs, what is new from 4.5 to 4.6.3 (languages, settings, subtitles, update script, accelerator after jumps, Japanese and Chinese, MGL file) and how to rebuild everything from scratch. The PDFs are also in the [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs) folder.
+**Complete documentation (PDF, 23 pages):** [English](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.3/MMC_4.6.3_documentation_complete_EN.pdf) · [italiano](https://github.com/bonna79/MiSTer_MediaCenter/releases/download/v4.6.3/MMC_4.6.3_documentazione_completa_IT.pdf). It explains the FPGA chip, the ARM player, the hand-offs between ARM and FPGA, the HDMI and CRT outputs, what is new from 4.5 to 4.6.3 (languages, settings, subtitles, update script, accelerator after jumps, Japanese and Chinese, MGL file) and how to rebuild everything from scratch. The PDFs are also in the [docs](https://github.com/bonna79/MiSTer_MediaCenter/tree/main/docs) folder.
 
 Tested on a real MiSTer from 23 to 24 November 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI together:
 
