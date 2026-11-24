@@ -3236,13 +3236,32 @@ static int text_w(const char *str, int sx)
 // at glyph column col, or one glyph after a longer label. The label is cut
 // to max glyphs; the value is drawn as it is (a language name may be
 // Latin-1 or Japanese and Chinese after a label in another language).
-static void fb_label_value(int x, int y, int sx, int sy, int bold, const char *label, const char *value, int col, int max, uint32_t color)
+// Returns the x after the value.
+static int fb_label_value(int x, int y, int sx, int sy, int bold, const char *label, const char *value, int col, int max, uint32_t color)
 {
 	char fit[96];
 	fit_text(fit, sizeof(fit), label, max);
 	int gw = GLYPH_W * sx, vx = col * gw, lw = text_w(fit, sx) + gw;
 	fb_text_xy(x, y, sx, sy, bold, fit, color);
-	fb_text_xy(x + (lw > vx ? lw : vx), y, sx, sy, bold, value, color);
+	return fb_text_xy(x + (lw > vx ? lw : vx), y, sx, sy, bold, value, color);
+}
+
+#include "flags.h"
+
+// The flag of menu language l (lang_codes order), 15x10 glyph pixels from
+// x, y: flags.h drawn for that size (30x20 at 480/576 lines, 30x10 at
+// 240/288), or the nearer one scaled.
+static void fb_flag(int x, int y, int sx, int sy, int l)
+{
+	if (l < 0 || l >= FLAG_COUNT) return;
+	int w = 15 * sx, h = 10 * sy, sh = h >= 15 ? 20 : 10;
+	const uint32_t *f = sh == 20 ? flag_30x20[l] : flag_30x10[l];
+	for (int j = 0; j < h; j++)
+		for (int i = 0; i < w; i++)
+		{
+			uint32_t c = f[(j * sh / h) * 30 + i * 30 / w];
+			fb_fill_rect(x + i, y + j, 1, 1, fb_rgb(c >> 16, (c >> 8) & 0xFF, c & 0xFF));
+		}
 }
 
 static void text_centre(int y, int sx, int sy, int bold, const char *str, uint32_t color)
@@ -4966,7 +4985,12 @@ static void set_draw(int sel, const char *message)
 			fit_text(fit, sizeof(fit), TR(set_labels[i]), (mw - 2 * mx) / gw);
 			fb_text_xy(ox + mx, y, sx, sy, 1, fit, white);
 		}
-		else fb_label_value(ox + mx, y, sx, sy, 1, TR(set_labels[i]), set_shown(i, v, sizeof(v)), 17, (mw - 2 * mx) / gw, white);
+		else
+		{
+			int vx = fb_label_value(ox + mx, y, sx, sy, 1, TR(set_labels[i]), set_shown(i, v, sizeof(v)), 17, (mw - 2 * mx) / gw, white);
+			// the menu language with its flag beside it, in the middle of the row
+			if (i == SET_UILANG) fb_flag(vx + gw, y - 2 * sy + (row_h - 10 * sy) / 2, sx, sy, set_val[i]);
+		}
 	}
 	y += row_h / 2;
 	text_centre(y, sx, sy, 0, TR(sel == SET_CRT ? "A apre Regola CRT" : sel == SET_UILANG ? "Subito dopo il salvataggio" :
