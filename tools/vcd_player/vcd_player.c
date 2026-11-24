@@ -851,8 +851,8 @@ static const unsigned char *vcd_glyph(unsigned char c)
 	return vcd_font[c & 0x7F];
 }
 
-// Japanese and Chinese characters (vcd_font_cjk.h): a square of 12x12 units
-// of the 8x8 grid, starting 2 units above the 8x8 glyphs, 12 units across.
+// Japanese and Chinese characters (vcd_font_cjk.h): a box of 12x12 units of
+// the 8x8 grid, starting 2 units above the 8x8 glyphs, 12 units across.
 #include "vcd_font_cjk.h"
 #define CJK_W 12
 
@@ -878,18 +878,23 @@ static int cjk_char(const char *s)
 static int cjk_lang(void) { return lang_id() == LANG_JA || lang_id() == LANG_ZH; }
 
 // Draws character i in a box w pixels wide and h tall with fill(x, y, w, h,
-// c): from the em of 12, 24 or 36 pixels next above the box (36 at most),
-// Chinese shapes when the menus are in Chinese, Japanese ones otherwise.
-// A pixel of the box is set when any pixel of the em it covers is.
+// c), Chinese shapes when the menus are in Chinese, Japanese ones otherwise:
+// from the table of vcd_font_cjk.h made for that size, or else from the one
+// nearest in size, a pixel of the box set when any pixel it covers is.
 static void cjk_draw(int i, int x, int y, int w, int h, void (*fill)(int, int, int, int, uint32_t), uint32_t c)
 {
-	int big = w > h ? w : h, zh = lang_id() == LANG_ZH;
-	int em = big <= 12 ? 12 : big <= 24 ? 24 : 36, bpr = (em + 7) / 8;
-	const unsigned char *g = em == 12 ? (zh ? cjk_zh_12[i] : cjk_ja_12[i]) :
-		em == 24 ? (zh ? cjk_zh_24[i] : cjk_ja_24[i]) : (zh ? cjk_zh_36[i] : cjk_ja_36[i]);
+	const cjk_size_t *t = &cjk_sizes[0];
+	int best = 1 << 30;
+	for (size_t k = 0; k < sizeof(cjk_sizes) / sizeof(cjk_sizes[0]); k++)
+	{
+		int d = abs(cjk_sizes[k].w - w) + abs(cjk_sizes[k].h - h);
+		if (d < best) { best = d; t = &cjk_sizes[k]; }
+	}
+	int sw = t->w, sh = t->h, bpr = (sw + 7) / 8;
+	const unsigned char *g = (lang_id() == LANG_ZH ? t->zh : t->ja) + (size_t)i * bpr * sh;
 	for (int r = 0; r < h; r++)
 	{
-		int y0 = r * em / h, y1 = (r + 1) * em / h;
+		int y0 = r * sh / h, y1 = (r + 1) * sh / h;
 		if (y1 <= y0) y1 = y0 + 1;
 		int run = -1;
 		for (int col = 0; col <= w; col++)
@@ -897,7 +902,7 @@ static void cjk_draw(int i, int x, int y, int w, int h, void (*fill)(int, int, i
 			int on = 0;
 			if (col < w)
 			{
-				int x0 = col * em / w, x1 = (col + 1) * em / w;
+				int x0 = col * sw / w, x1 = (col + 1) * sw / w;
 				if (x1 <= x0) x1 = x0 + 1;
 				for (int yy = y0; yy < y1 && !on; yy++)
 					for (int xx = x0; xx < x1 && !on; xx++)

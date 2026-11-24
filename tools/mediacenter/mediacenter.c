@@ -4594,7 +4594,7 @@ static const char *format_label(void)
 	const char *name;
 	if (fmt_row == 0) { name = TR("Formato"); snprintf(v, sizeof(v), "%s", TR(fmt_list[fmt_index()].name)); }
 	else if (fmt_row == 1) { name = TR("Ritardo audio"); snprintf(v, sizeof(v), "%+d ms", fmt_delay * 10); }
-	else { name = TR("Interlacciato"); snprintf(v, sizeof(v), "%s", fmt_fields() ? TR("Si") : "No"); }
+	else { name = TR("Interlacciato"); snprintf(v, sizeof(v), "%s", fmt_fields() ? TR("Si") : cjk_lang() ? TR("No") : "No"); }
 	snprintf(fmt_text, sizeof(fmt_text), "\x12\x13 %d/%d  %s  \x10 %s \x11", fmt_row + 1, FMT_ROWS, name, v);
 	return fmt_text;
 }
