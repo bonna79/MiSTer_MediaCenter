@@ -2,7 +2,7 @@
 
 [Italiano](README.md) · **English**
 
-<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.6.2 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
+<p align="center"><img src="docs/mmc.png" alt="MiSTer Media Center Ver. 4.6.3 H264 Jellyfin Client 1080p: DVD, MP3, DivX, Video CD, Super Video CD, CD Audio" width="720"></p>
 
 > This project was developed with the help of artificial intelligence: the code and the documentation were written with Claude, Anthropic's AI, and tested by rgm on a real MiSTer.
 
@@ -31,11 +31,40 @@ The package is made of these parts:
 | `Update_Mister_Media_Center.sh` | `/media/fat/Scripts/` | The script that installs or updates MMC by downloading the latest release from GitHub (in the zip from 4.6.1) |
 | `menu_mediacenter.rbf` | `/media/fat/linux/` | MMC's menu core: the normal MiSTer menu plus the colour conversion, the 15 kHz output for the CRT and, from 3.0, the H.264 accelerator for 1080p |
 | `libdvdcss.so.2` | `/media/fat/dvdcss/` | The library for reading protected DVDs |
+| `Mister_Media_Center.mgl` | `/media/fat/_Utility/` | The **Mister_Media_Center** entry in the Utility folder of the core list: opens MMC from the MiSTer menu (from 4.6.3) |
 | `MMC_MiSTer_ini.txt` | `/media/fat/` | The lines to copy into `MiSTer.ini` (it is not a `MiSTer.ini`: copy only the lines) |
 
 The old `vcd_player` from the first versions is no longer needed: the Video CD player is inside `mediacenter`.
 
-The player's on-screen texts are in Italian unless you choose another menu language: English (from 4.6), Spanish, French or German (from 4.6.1).
+The player's on-screen texts are in Italian unless you choose another menu language: English (from 4.6), Spanish, French or German (from 4.6.1), Japanese or Simplified Chinese (from 4.6.3).
+
+## What's new in version 4.6.3
+
+Version 4.6.3 adds the **menu in Japanese and Simplified Chinese**, the **flag of the language** on the Settings page, an entry to **open MMC from the MiSTer core list** and a **new picture**. The `MiSTer_MediaCenter` Main and the `mediacenter` player change; the menu core `menu_mediacenter.rbf` is the same as in 4.6.2.
+
+- **Menu in Japanese and Simplified Chinese:** besides Italian, English, Spanish, French and German. Choose it on the **Settings** page, **Menu language** row (日本語, 简体中文), or with a line in `mediacenter.ini`: `MC_LANG=ja` or `MC_LANG=zh`. It applies to the lists, the controls during DVD, Video CD, Super Video CD, DivX/Xvid, MKV and MP4 video, Jellyfin, CRT Adjust and Settings.
+  - The characters come from the free Noto Sans CJK font, drawn in advance for every size the menus use, so they read well both on the 15 kHz CRT and on the LCD TV over HDMI.
+  - In the Japanese and Chinese menus the rows are a little taller, to make room for the characters.
+  - The audio screen stays in English, and file names stay as they are written on the disc.
+- **Language flag:** on the Settings page, the flag of the menu language sits beside its name (Italy, United Kingdom, Spain, France, Germany, Japan, China), drawn as pixel art with solid colours and a light frame, easy to see on the CRT too.
+- **MMC from the core list:** the file `Mister_Media_Center.mgl` goes in `/media/fat/_Utility`. In the MiSTer menu it appears in the **Utility** folder of the core list: choosing it opens MMC like the script from Scripts, with its picture and the file list.
+  - The MMC Main opens it, so it works from the MiSTer menu (with `main=MiSTer_MediaCenter` in the `[menu]` section).
+  - If you choose it while a core runs with another Main (the official one or the Physical Disc one), the MiSTer shows "No rbf found!": go back to the menu first.
+  - If a disc or MMC itself is already running, it does not open a second one.
+- **New picture** with the words Ver. 4.6.3 H264 Jellyfin Client 1080 P. It shows only when you open MMC from the script or from the MGL file. When MMC starts by itself for a DVD, a Video CD, a data CD or DVD or another disc, the picture is not shown: the video or the file list opens straight away.
+
+**Updating from 4.6.2:** start **Update_Mister_Media_Center** from the Scripts menu, or extract the 4.6.3 zip over the old files. The Main changes, so then **restart the MiSTer**. `MiSTer.ini` and `mediacenter.ini` stay as they are.
+
+Tested on a real MiSTer from 23 to 24 November 2026, on a Sony Trinitron CRT (SCART RGB) and HDMI together:
+
+| Test | Result |
+| --- | --- |
+| Japanese and Chinese menus, also from the Settings page | Read very well on the CRT and on the LCD TV |
+| Flag beside Menu language | Working |
+| MMC from the MGL file in the MiSTer menu | Opens as from the script |
+| MGL chosen inside a normal core and inside an A0CD core (other Main) | "No rbf found!", as expected |
+| Disc at power-on: video DVD, data DVD with DivX, XviD and MKV | Start by themselves as before |
+| One Piece 1080p with jumps | Accelerator always on, 0 pictures lost by the FPGA |
 
 ## What's new in version 4.6.2
 
@@ -611,7 +640,7 @@ Still to test: Super Video CD read from a burned disc.
 
 ### 1. Download the files
 
-From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds everything MMC needs: the Main, the player, the script, the menu core, the library for protected DVDs and `MMC_MiSTer_ini.txt` with the lines for `MiSTer.ini`. The Physical Disc Main, for games, is downloaded from its own project. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
+From the [Releases](../../releases) page download `MiSTer_MediaCenter.zip` and extract it to the root of the SD card (`/media/fat`). The folders in the zip already match the SD card layout. The zip holds everything MMC needs: the Main, the player, the script, the MGL file for the core list, the menu core, the library for protected DVDs and `MMC_MiSTer_ini.txt` with the lines for `MiSTer.ini`. The Physical Disc Main, for games, is downloaded from its own project. Always update them together, because the FPGA colour conversion needs the Main and the core of the same version. Restart the MiSTer after copying the Main or the core.
 
 #### Installing or updating with the script
 
@@ -631,6 +660,8 @@ cd /media/fat/Scripts && curl -sSfL --cacert /etc/ssl/certs/cacert.pem -O https:
 **Updating with the script:** start **Update_Mister_Media_Center** from the Scripts menu when a new version is out. If you already have the latest one, the script says so and changes nothing. If it replaces the Main or the menu core, at the end it asks you to restart the MiSTer. If something goes wrong (no network, downloaded file not correct, SD card full) it stops before changing any file and says so on screen. The log of what it did is in `/tmp/Update_Mister_Media_Center.log`, and the replaced files stay in `/media/fat/linux/mmc_backup` until the next update.
 
 #### Updating by extracting the zip
+
+**Updating from 4.6.2 to 4.6.3:** with the script, or extract the 4.6.3 zip over the old files. The Main changes: then restart the MiSTer.
 
 **Updating from 4.6.1 to 4.6.2:** with the script, or extract the 4.6.2 zip over the old files. The menu core changes: then restart the MiSTer.
 
@@ -654,6 +685,7 @@ Also install the [MiSTer Physical Disc](https://github.com/Anime0t4ku/Main_MiSTe
 | `mediacenter` | `/media/fat/linux/mediacenter` |
 | `Mister_Media_Center.sh` | `/media/fat/Scripts/Mister_Media_Center.sh` |
 | `Update_Mister_Media_Center.sh` | `/media/fat/Scripts/Update_Mister_Media_Center.sh` |
+| `Mister_Media_Center.mgl` | `/media/fat/_Utility/Mister_Media_Center.mgl` |
 | `menu_mediacenter.rbf` | `/media/fat/linux/menu_mediacenter.rbf` |
 | `MiSTer_Physical-CD` (Physical Disc Main) | `/media/fat/MiSTer_Physical-CD` |
 
@@ -728,8 +760,8 @@ MC_CRT_VPOS=2
 | `MC_NOZC=1` | 1080p videos without the accelerator: the ARM copies the picture instead of the menu core (zero-copy off) |
 | `MC_MENU_HD=1` | Lists at 1280x720 as in version 2.1, instead of drawn for the CRT |
 | `MC_DIAG=0` | Turns off the `mediacenter: diag` diagnosis lines in the log |
-| `MC_SPLASH=0` | Turns off the MMC picture when the script starts |
-| `MC_LANG=en` | MMC's text in English; `es` Spanish, `fr` French, `de` German (from 4.6.1) |
+| `MC_SPLASH=0` | Turns off the MMC picture when MMC starts from the script or the MGL file |
+| `MC_LANG=en` | MMC's text in English; `es` Spanish, `fr` French, `de` German (from 4.6.1), `ja` Japanese, `zh` Simplified Chinese (from 4.6.3) |
 | `MC_AUDIO_LANG=en` | Preferred audio language for DVDs and files: `it`, `en`, `fr`, `de`, `es`, `ja` |
 | `MC_SUB_LANG=it` | Preferred subtitle language for DVDs and files (same codes), `off` to turn them off |
 | `MC_JELLYFIN=http://192.168.0.10:8096` | Jellyfin server address, when MMC does not find it by itself. `MC_JELLYFIN=0` removes the Jellyfin entry |

@@ -52,14 +52,18 @@
 // Italian one listed here in that language (columns of tr_table in this
 // order), and the Italian text itself when MC_LANG is not one of them or the
 // text is not listed. Accented letters are Latin-1 bytes (octal escapes),
-// drawn by vcd_font_latin1.h and by the audio screen's font.
+// drawn by vcd_font_latin1.h and by the audio screen's font. Japanese (ja)
+// and Simplified Chinese (zh) are UTF-8, drawn by vcd_font_cjk.h; the audio
+// screen's font has no CJK glyphs, so it shows English then (TRA()).
 #define LANG_IT 0
 #define LANG_EN 1
 #define LANG_ES 2
 #define LANG_FR 3
 #define LANG_DE 4
-#define LANG_COUNT 5
-static const char *const lang_codes[LANG_COUNT] = { "it", "en", "es", "fr", "de" };
+#define LANG_JA 5
+#define LANG_ZH 6
+#define LANG_COUNT 7
+static const char *const lang_codes[LANG_COUNT] = { "it", "en", "es", "fr", "de", "ja", "zh" };
 static int lang_cache = -1; // -1: read MC_LANG again (MediaCenter's Impostazioni)
 static int lang_id(void)
 {
@@ -74,173 +78,189 @@ static int lang_id(void)
 }
 static int lang_en(void) { return lang_id() == LANG_EN; }
 
-static const char *const tr_table[][5] =
+static const char *const tr_table[][LANG_COUNT] =
 {
 	// playback controls (VCD, files, DVD)
-	{ "Pausa", "Pause", "Pausa", "Pause", "Pause" },
-	{ "Capitolo", "Chapter", "Cap\355tulo", "Chapitre", "Kapitel" },
-	{ "Esci", "Exit", "Salir", "Quitter", "Beenden" },
-	{ "Scelta", "Choose", "Elegir", "Choisir", "W\344hlen" },
-	{ "Conferma", "Confirm", "Confirmar", "Valider", "Best\344tigen" },
-	{ "Pagina", "Page", "P\341gina", "Page", "Seite" },
-	{ "Indietro", "Back", "Atr\341s", "Retour", "Zur\374ck" },
-	{ "Sottotitoli", "Subtitles", "Subt\355tulos", "Sous-titres", "Untertitel" },
-	{ "Torna al film", "Back to film", "Volver al v\355deo", "Retour au film", "Zur\374ck zum Film" },
-	{ "Chiudi", "Close", "Cerrar", "Fermer", "Schlie\337en" },
-	{ "Uscire dal Video CD?", "Exit the Video CD?", "\277Salir del Video CD?", "Quitter le Vid\351o CD ?", "Video-CD beenden?" },
-	{ "Uscire dal DVD?", "Exit the DVD?", "\277Salir del DVD?", "Quitter le DVD ?", "DVD beenden?" },
-	{ "Uscire dal %s?", "Exit the %s?", "\277Salir del %s?", "Quitter le %s ?", "%s beenden?" },
-	{ "Tornare all'elenco?", "Back to the list?", "\277Volver a la lista?", "Retour \340 la liste ?", "Zur\374ck zur Liste?" },
-	{ "Scelta: %d", "Choice: %d", "Opci\363n: %d", "Choix : %d", "Auswahl: %d" },
-	{ "PAUSA", "PAUSE", "PAUSA", "PAUSE", "PAUSE" },
-	{ "AVANTI 10x", "FORWARD 10x", "AVANCE 10x", "AVANCE 10x", "VOR 10x" },
-	{ "INDIETRO 10x", "REWIND 10x", "RETROCESO 10x", "RETOUR 10x", "ZUR\334CK 10x" },
-	{ "Audio Sinistro", "Audio Left", "Audio izquierdo", "Audio gauche", "Audio links" },
-	{ "Audio Destro", "Audio Right", "Audio derecho", "Audio droit", "Audio rechts" },
-	{ "Capitolo %d/%d", "Chapter %d/%d", "Cap\355tulo %d/%d", "Chapitre %d/%d", "Kapitel %d/%d" },
-	{ "Altro tasto: Annulla", "Other key: Cancel", "Otra tecla: cancelar", "Autre touche : annuler", "Andere Taste: Abbruch" },
-	{ "Senza audio", "No audio", "Sin audio", "Sans audio", "Ohne Ton" },
-	{ "  Sott. no", "  Subs off", "  Subt. no", "  Sous-t. non", "  UT aus" },
-	{ "  Sott. %d/%d%s", "  Subs %d/%d%s", "  Subt. %d/%d%s", "  Sous-t. %d/%d%s", "  UT %d/%d%s" },
-	{ "MENU DVD", "DVD MENU", "MEN\332 DVD", "MENU DVD", "DVD-MEN\334" },
+	{ "Pausa", "Pause", "Pausa", "Pause", "Pause", "一時停止", "暂停" },
+	{ "Capitolo", "Chapter", "Cap\355tulo", "Chapitre", "Kapitel", "チャプター", "章节" },
+	{ "Esci", "Exit", "Salir", "Quitter", "Beenden", "終了", "退出" },
+	{ "Scelta", "Choose", "Elegir", "Choisir", "W\344hlen", "選択", "选择" },
+	{ "Conferma", "Confirm", "Confirmar", "Valider", "Best\344tigen", "決定", "确定" },
+	{ "Pagina", "Page", "P\341gina", "Page", "Seite", "ページ", "翻页" },
+	{ "Indietro", "Back", "Atr\341s", "Retour", "Zur\374ck", "戻る", "返回" },
+	{ "Sottotitoli", "Subtitles", "Subt\355tulos", "Sous-titres", "Untertitel", "字幕", "字幕" },
+	{ "Torna al film", "Back to film", "Volver al v\355deo", "Retour au film", "Zur\374ck zum Film", "映画に戻る", "返回影片" },
+	{ "Chiudi", "Close", "Cerrar", "Fermer", "Schlie\337en", "閉じる", "关闭" },
+	{ "Uscire dal Video CD?", "Exit the Video CD?", "\277Salir del Video CD?", "Quitter le Vid\351o CD ?", "Video-CD beenden?", "ビデオCDを終了しますか?", "退出视频CD?" },
+	{ "Uscire dal DVD?", "Exit the DVD?", "\277Salir del DVD?", "Quitter le DVD ?", "DVD beenden?", "DVDを終了しますか?", "退出DVD?" },
+	{ "Uscire dal %s?", "Exit the %s?", "\277Salir del %s?", "Quitter le %s ?", "%s beenden?", "%sを終了しますか?", "退出%s?" },
+	{ "Tornare all'elenco?", "Back to the list?", "\277Volver a la lista?", "Retour \340 la liste ?", "Zur\374ck zur Liste?", "リストに戻りますか?", "返回列表?" },
+	{ "Scelta: %d", "Choice: %d", "Opci\363n: %d", "Choix : %d", "Auswahl: %d", "選択: %d", "选择: %d" },
+	{ "PAUSA", "PAUSE", "PAUSA", "PAUSE", "PAUSE", "一時停止", "暂停" },
+	{ "AVANTI 10x", "FORWARD 10x", "AVANCE 10x", "AVANCE 10x", "VOR 10x", "早送り 10x", "快进 10x" },
+	{ "INDIETRO 10x", "REWIND 10x", "RETROCESO 10x", "RETOUR 10x", "ZUR\334CK 10x", "巻き戻し 10x", "快退 10x" },
+	{ "Audio Sinistro", "Audio Left", "Audio izquierdo", "Audio gauche", "Audio links", "音声 左", "左声道" },
+	{ "Audio Destro", "Audio Right", "Audio derecho", "Audio droit", "Audio rechts", "音声 右", "右声道" },
+	{ "Capitolo %d/%d", "Chapter %d/%d", "Cap\355tulo %d/%d", "Chapitre %d/%d", "Kapitel %d/%d", "チャプター %d/%d", "章节 %d/%d" },
+	{ "Altro tasto: Annulla", "Other key: Cancel", "Otra tecla: cancelar", "Autre touche : annuler", "Andere Taste: Abbruch", "他のキー: キャンセル", "其他键: 取消" },
+	{ "Senza audio", "No audio", "Sin audio", "Sans audio", "Ohne Ton", "音声なし", "无音频" },
+	{ "  Sott. no", "  Subs off", "  Subt. no", "  Sous-t. non", "  UT aus", "  字幕 オフ", "  字幕 关" },
+	{ "  Sott. %d/%d%s", "  Subs %d/%d%s", "  Subt. %d/%d%s", "  Sous-t. %d/%d%s", "  UT %d/%d%s", "  字幕 %d/%d%s", "  字幕 %d/%d%s" },
+	{ "MENU DVD", "DVD MENU", "MEN\332 DVD", "MENU DVD", "DVD-MEN\334", "DVDメニュー", "DVD菜单" },
 	// lists
-	{ "Disco nel lettore", "Disc in the drive", "Disco en la unidad", "Disque dans le lecteur", "Disc im Laufwerk" },
-	{ "SD: Musica", "SD: Music", "SD: M\372sica", "SD: Musique", "SD: Musik" },
-	{ "SD: tutta la scheda", "SD: whole card", "SD: toda la tarjeta", "SD: toute la carte", "SD: ganze Karte" },
-	{ "Rete (CIFS)", "Network (CIFS)", "Red (CIFS)", "R\351seau (CIFS)", "Netzwerk (CIFS)" },
-	{ "Regola CRT (dimensioni e posizione)", "CRT Adjust (size and position)", "Ajuste CRT (tama\361o y posici\363n)", "R\351glage CRT (taille et position)", "CRT-Einstellung (Gr\366\337e und Lage)" },
-	{ "Nessun file video o audio qui", "No video or audio files here", "No hay archivos de v\355deo o audio", "Aucun fichier vid\351o ou audio ici", "Keine Video- oder Audiodateien" },
+	{ "Disco nel lettore", "Disc in the drive", "Disco en la unidad", "Disque dans le lecteur", "Disc im Laufwerk", "ドライブのディスク", "光驱中的光盘" },
+	{ "SD: Musica", "SD: Music", "SD: M\372sica", "SD: Musique", "SD: Musik", "SD: 音楽", "SD: 音乐" },
+	{ "SD: tutta la scheda", "SD: whole card", "SD: toda la tarjeta", "SD: toute la carte", "SD: ganze Karte", "SD: カード全体", "SD: 整张卡" },
+	{ "Rete (CIFS)", "Network (CIFS)", "Red (CIFS)", "R\351seau (CIFS)", "Netzwerk (CIFS)", "ネットワーク (CIFS)", "网络 (CIFS)" },
+	{ "Regola CRT (dimensioni e posizione)", "CRT Adjust (size and position)", "Ajuste CRT (tama\361o y posici\363n)", "R\351glage CRT (taille et position)", "CRT-Einstellung (Gr\366\337e und Lage)", "CRT調整 (サイズと位置)", "CRT调整 (大小和位置)" },
+	{ "Nessun file video o audio qui", "No video or audio files here", "No hay archivos de v\355deo o audio", "Aucun fichier vid\351o ou audio ici", "Keine Video- oder Audiodateien", "動画・音声ファイルがありません", "此处没有视频或音频文件" },
 	{ "A Apri  B Indietro  \x10\x11 Pagina  X Esci",
 	  "A Open  B Back  \x10\x11 Page  X Exit",
 	  "A Abrir  B Atr\341s  \020\021 P\341gina  X Salir",
 	  "A Ouvrir  B Retour  \020\021 Page  X Quitter",
-	  "A \326ffnen  B Zur\374ck  \020\021 Seite  X Beenden" },
-	{ "A Apri  B Indietro  X Esci", "A Open  B Back  X Exit", "A Abrir  B Atr\341s  X Salir", "A Ouvrir  B Retour  X Quitter", "A \326ffnen  B Zur\374ck  X Beenden" },
-	{ "Scegli la sorgente", "Choose the source", "Elige la fuente", "Choisissez la source", "Quelle w\344hlen" },
-	{ "Nessun disco leggibile", "No readable disc", "Ning\372n disco legible", "Aucun disque lisible", "Keine lesbare Disc" },
-	{ "La MiSTer sta finendo l'avvio", "The MiSTer is finishing its start-up", "El MiSTer est\341 terminando de arrancar", "Le MiSTer termine son d\351marrage", "Der MiSTer startet noch" },
-	{ "Il video parte da solo  (%d s)", "The video starts by itself  (%d s)", "El v\355deo empieza solo  (%d s)", "La vid\351o d\351marre seule  (%d s)", "Das Video startet von selbst  (%d s)" },
-	{ "B Indietro", "B Back", "B Atr\341s", "B Retour", "B Zur\374ck" },
-	{ "%s - traccia %d", "%s - track %d", "%s - pista %d", "%s - piste %d", "%s - Titel %d" },
+	  "A \326ffnen  B Zur\374ck  \020\021 Seite  X Beenden",
+	  "A 開く  B 戻る  \x10\x11 ページ  X 終了",
+	  "A 打开  B 返回  \x10\x11 翻页  X 退出" },
+	{ "A Apri  B Indietro  X Esci", "A Open  B Back  X Exit", "A Abrir  B Atr\341s  X Salir", "A Ouvrir  B Retour  X Quitter", "A \326ffnen  B Zur\374ck  X Beenden", "A 開く  B 戻る  X 終了", "A 打开  B 返回  X 退出" },
+	{ "Scegli la sorgente", "Choose the source", "Elige la fuente", "Choisissez la source", "Quelle w\344hlen", "ソースを選択", "选择来源" },
+	{ "Nessun disco leggibile", "No readable disc", "Ning\372n disco legible", "Aucun disque lisible", "Keine lesbare Disc", "読み取れるディスクがありません", "没有可读取的光盘" },
+	{ "La MiSTer sta finendo l'avvio", "The MiSTer is finishing its start-up", "El MiSTer est\341 terminando de arrancar", "Le MiSTer termine son d\351marrage", "Der MiSTer startet noch", "MiSTerの起動を待っています", "MiSTer正在完成启动" },
+	{ "Il video parte da solo  (%d s)", "The video starts by itself  (%d s)", "El v\355deo empieza solo  (%d s)", "La vid\351o d\351marre seule  (%d s)", "Das Video startet von selbst  (%d s)", "動画は自動で始まります  (%d秒)", "视频将自动播放  (%d秒)" },
+	{ "B Indietro", "B Back", "B Atr\341s", "B Retour", "B Zur\374ck", "B 戻る", "B 返回" },
+	{ "%s - traccia %d", "%s - track %d", "%s - pista %d", "%s - piste %d", "%s - Titel %d", "%s - トラック %d", "%s - 音轨 %d" },
 	// Regola CRT and the format box
-	{ "Larghezza", "Width", "Anchura", "Largeur", "Breite" },
-	{ "Pos. orizzontale", "Horiz. position", "Pos. horizontal", "Pos. horizontale", "Pos. horizontal" },
-	{ "Altezza", "Height", "Altura", "Hauteur", "H\366he" },
-	{ "Pos. verticale", "Vert. position", "Pos. vertical", "Pos. verticale", "Pos. vertikal" },
-	{ "Modo 15 kHz", "15 kHz mode", "Modo 15 kHz", "Mode 15 kHz", "15-kHz-Modus" },
-	{ "Filtro tremolio", "Flicker filter", "Filtro parpadeo", "Anti-scintillement", "Flimmerfilter" },
-	{ "Formato", "Format", "Formato", "Format", "Format" },
-	{ "Spento", "Off", "Apagado", "Arr\352t", "Aus" },
-	{ "Acceso", "On", "Encendido", "Marche", "An" },
-	{ "Pieno", "Full", "Completo", "Plein", "Voll" },
-	{ "Anamorfico 2,35:1", "Anamorphic 2.35:1", "Anam\363rfico 2,35:1", "Anamorphose 2,35:1", "Anamorph 2,35:1" },
-	{ "Cinema 1,85:1", "Cinema 1.85:1", "Cine 1,85:1", "Cin\351ma 1,85:1", "Kino 1,85:1" },
-	{ "Regola CRT", "CRT Adjust", "Ajuste CRT", "R\351glage CRT", "CRT-Einstellung" },
-	{ "Il bordo rosso deve toccare i lati", "The red border must touch the sides", "El borde rojo debe tocar los lados", "Le bord rouge doit toucher les c\364t\351s", "Der rote Rand muss die Seiten ber\374hren" },
-	{ "Misurata: %s", "Measured: %s", "Medida: %s", "Mesur\351e : %s", "Gemessen: %s" },
-	{ "non ancora", "not yet", "a\372n no", "pas encore", "noch nicht" },
-	{ "Su/Giu Scegli  \x10\x11 Cambia", "Up/Down Choose  \x10\x11 Change", "Arr/Ab Elegir  \020\021 Cambiar", "Haut/Bas Choisir  \020\021 Modifier", "Auf/Ab W\344hlen  \020\021 \304ndern" },
-	{ "A Salva  B Annulla  Y Azzera", "A Save  B Cancel  Y Reset", "A Guardar  B Cancelar  Y Restaurar", "A Enregistrer  B Annuler  Y D\351faut", "A Speichern  B Abbruch  Y Zur\374cksetzen" },
-	{ "Impossibile salvare il file ini", "Cannot save the ini file", "No se puede guardar el archivo ini", "Impossible d'enregistrer le fichier ini", "Ini-Datei kann nicht gespeichert werden" },
+	{ "Larghezza", "Width", "Anchura", "Largeur", "Breite", "幅", "宽度" },
+	{ "Pos. orizzontale", "Horiz. position", "Pos. horizontal", "Pos. horizontale", "Pos. horizontal", "水平位置", "水平位置" },
+	{ "Altezza", "Height", "Altura", "Hauteur", "H\366he", "高さ", "高度" },
+	{ "Pos. verticale", "Vert. position", "Pos. vertical", "Pos. verticale", "Pos. vertikal", "垂直位置", "垂直位置" },
+	{ "Modo 15 kHz", "15 kHz mode", "Modo 15 kHz", "Mode 15 kHz", "15-kHz-Modus", "15kHzモード", "15kHz模式" },
+	{ "Filtro tremolio", "Flicker filter", "Filtro parpadeo", "Anti-scintillement", "Flimmerfilter", "ちらつき軽減", "防闪烁" },
+	{ "Formato", "Format", "Formato", "Format", "Format", "画面比率", "画面比例" },
+	{ "Spento", "Off", "Apagado", "Arr\352t", "Aus", "オフ", "关" },
+	{ "Acceso", "On", "Encendido", "Marche", "An", "オン", "开" },
+	{ "Pieno", "Full", "Completo", "Plein", "Voll", "フル", "全屏" },
+	{ "Anamorfico 2,35:1", "Anamorphic 2.35:1", "Anam\363rfico 2,35:1", "Anamorphose 2,35:1", "Anamorph 2,35:1", "シネスコ 2.35:1", "宽银幕 2.35:1" },
+	{ "Cinema 1,85:1", "Cinema 1.85:1", "Cine 1,85:1", "Cin\351ma 1,85:1", "Kino 1,85:1", "ビスタ 1.85:1", "电影 1.85:1" },
+	{ "Regola CRT", "CRT Adjust", "Ajuste CRT", "R\351glage CRT", "CRT-Einstellung", "CRT調整", "CRT调整" },
+	{ "Il bordo rosso deve toccare i lati", "The red border must touch the sides", "El borde rojo debe tocar los lados", "Le bord rouge doit toucher les c\364t\351s", "Der rote Rand muss die Seiten ber\374hren", "赤い枠を画面の端に合わせる", "红框应贴住屏幕边缘" },
+	{ "Misurata: %s", "Measured: %s", "Medida: %s", "Mesur\351e : %s", "Gemessen: %s", "測定値: %s", "测量值: %s" },
+	{ "non ancora", "not yet", "a\372n no", "pas encore", "noch nicht", "未測定", "尚未测量" },
+	{ "Su/Giu Scegli  \x10\x11 Cambia", "Up/Down Choose  \x10\x11 Change", "Arr/Ab Elegir  \020\021 Cambiar", "Haut/Bas Choisir  \020\021 Modifier", "Auf/Ab W\344hlen  \020\021 \304ndern", "上下 選択  \x10\x11 変更", "上下 选择  \x10\x11 更改" },
+	{ "A Salva  B Annulla  Y Azzera", "A Save  B Cancel  Y Reset", "A Guardar  B Cancelar  Y Restaurar", "A Enregistrer  B Annuler  Y D\351faut", "A Speichern  B Abbruch  Y Zur\374cksetzen", "A 保存  B キャンセル  Y リセット", "A 保存  B 取消  Y 重置" },
+	{ "Impossibile salvare il file ini", "Cannot save the ini file", "No se puede guardar el archivo ini", "Impossible d'enregistrer le fichier ini", "Ini-Datei kann nicht gespeichert werden", "iniファイルを保存できません", "无法保存ini文件" },
 	// Jellyfin
-	{ "Accesso rifiutato dal server", "Access refused by the server", "Acceso rechazado por el servidor", "Acc\350s refus\351 par le serveur", "Zugriff vom Server verweigert" },
+	{ "Accesso rifiutato dal server", "Access refused by the server", "Acceso rechazado por el servidor", "Acc\350s refus\351 par le serveur", "Zugriff vom Server verweigert", "サーバーがアクセスを拒否しました", "服务器拒绝访问" },
 	{ "Il server non conosce questa richiesta",
 	  "The server does not know this request",
 	  "El servidor no conoce esta petici\363n",
 	  "Le serveur ne conna\356t pas cette requ\352te",
-	  "Der Server kennt diese Anfrage nicht" },
-	{ "Risposta del server non valida", "Invalid reply from the server", "Respuesta del servidor no v\341lida", "R\351ponse du serveur non valide", "Ung\374ltige Antwort vom Server" },
-	{ "Server Jellyfin non raggiungibile", "Jellyfin server not reachable", "Servidor Jellyfin no accesible", "Serveur Jellyfin injoignable", "Jellyfin-Server nicht erreichbar" },
-	{ "Utente o password non accettati", "User or password not accepted", "Usuario o contrase\361a no aceptados", "Utilisateur ou mot de passe refus\351", "Benutzer oder Passwort abgelehnt" },
+	  "Der Server kennt diese Anfrage nicht",
+	  "サーバーが要求を認識しません",
+	  "服务器无法识别此请求" },
+	{ "Risposta del server non valida", "Invalid reply from the server", "Respuesta del servidor no v\341lida", "R\351ponse du serveur non valide", "Ung\374ltige Antwort vom Server", "サーバーの応答が無効です", "服务器响应无效" },
+	{ "Server Jellyfin non raggiungibile", "Jellyfin server not reachable", "Servidor Jellyfin no accesible", "Serveur Jellyfin injoignable", "Jellyfin-Server nicht erreichbar", "Jellyfinサーバーに接続できません", "无法连接Jellyfin服务器" },
+	{ "Utente o password non accettati", "User or password not accepted", "Usuario o contrase\361a no aceptados", "Utilisateur ou mot de passe refus\351", "Benutzer oder Passwort abgelehnt", "ユーザー名かパスワードが違います", "用户名或密码错误" },
 	{ "Quick Connect e' spento nel server.",
 	  "Quick Connect is off on the server.",
 	  "Quick Connect est\341 apagado en el servidor.",
 	  "Quick Connect d\351sactiv\351 sur le serveur.",
-	  "Quick Connect ist am Server aus." },
+	  "Quick Connect ist am Server aus.",
+	  "サーバーのQuick Connectがオフです。",
+	  "服务器上的Quick Connect已关闭。" },
 	{ "Accendilo in Jellyfin: Pannello di controllo",
 	  "Turn it on in Jellyfin: Dashboard",
 	  "Act\355valo en Jellyfin: Panel de control",
 	  "Activez-le dans Jellyfin : Tableau de bord",
-	  "In Jellyfin einschalten: Dashboard" },
-	{ "> Generale > Abilita Quick Connect,", "> General > Enable Quick Connect,", "> General > Habilitar Quick Connect,", "> G\351n\351ral > Activer Quick Connect,", "> Allgemein > Quick Connect aktivieren," },
-	{ "oppure scrivi in mediacenter.ini", "or write in mediacenter.ini", "o escribe en mediacenter.ini", "ou indiquez dans mediacenter.ini", "oder in mediacenter.ini eintragen" },
-	{ "MC_JELLYFIN_USER e MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER and MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER y MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER et MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER und MC_JELLYFIN_PASS." },
-	{ "Jellyfin: accesso", "Jellyfin: sign in", "Jellyfin: acceso", "Jellyfin: connexion", "Jellyfin: Anmeldung" },
-	{ "       Codice:   %s", "       Code:   %s", "       C\363digo:   %s", "       Code:   %s", "       Code:   %s" },
-	{ "Sul computer apri Jellyfin, poi", "On the computer open Jellyfin, then", "En el ordenador abre Jellyfin y luego", "Sur l'ordinateur, ouvrez Jellyfin, puis", "Am Computer Jellyfin \366ffnen, dann" },
-	{ "Profilo > Quick Connect e scrivi:", "Profile > Quick Connect and enter:", "Perfil > Quick Connect y escribe:", "Profil > Quick Connect et saisissez :", "Profil > Quick Connect und eingeben:" },
-	{ "In attesa... (B per annullare)", "Waiting... (B to cancel)", "Esperando... (B para cancelar)", "En attente... (B pour annuler)", "Warte... (B zum Abbrechen)" },
+	  "In Jellyfin einschalten: Dashboard",
+	  "Jellyfinでオンにする: ダッシュボード",
+	  "请在Jellyfin中开启: 控制台" },
+	{ "> Generale > Abilita Quick Connect,", "> General > Enable Quick Connect,", "> General > Habilitar Quick Connect,", "> G\351n\351ral > Activer Quick Connect,", "> Allgemein > Quick Connect aktivieren,", "> 一般 > Quick Connectを有効にする", "> 常规 > 启用Quick Connect," },
+	{ "oppure scrivi in mediacenter.ini", "or write in mediacenter.ini", "o escribe en mediacenter.ini", "ou indiquez dans mediacenter.ini", "oder in mediacenter.ini eintragen", "またはmediacenter.iniに", "或在mediacenter.ini中写入" },
+	{ "MC_JELLYFIN_USER e MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER and MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER y MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER et MC_JELLYFIN_PASS.", "MC_JELLYFIN_USER und MC_JELLYFIN_PASS.", "MC_JELLYFIN_USERとMC_JELLYFIN_PASSを記入。", "MC_JELLYFIN_USER和MC_JELLYFIN_PASS。" },
+	{ "Jellyfin: accesso", "Jellyfin: sign in", "Jellyfin: acceso", "Jellyfin: connexion", "Jellyfin: Anmeldung", "Jellyfin: ログイン", "Jellyfin: 登录" },
+	{ "       Codice:   %s", "       Code:   %s", "       C\363digo:   %s", "       Code:   %s", "       Code:   %s", "       コード:   %s", "       代码:   %s" },
+	{ "Sul computer apri Jellyfin, poi", "On the computer open Jellyfin, then", "En el ordenador abre Jellyfin y luego", "Sur l'ordinateur, ouvrez Jellyfin, puis", "Am Computer Jellyfin \366ffnen, dann", "パソコンでJellyfinを開き、", "在电脑上打开Jellyfin,然后" },
+	{ "Profilo > Quick Connect e scrivi:", "Profile > Quick Connect and enter:", "Perfil > Quick Connect y escribe:", "Profil > Quick Connect et saisissez :", "Profil > Quick Connect und eingeben:", "プロフィール > Quick Connectで入力:", "个人资料 > Quick Connect并输入:" },
+	{ "In attesa... (B per annullare)", "Waiting... (B to cancel)", "Esperando... (B para cancelar)", "En attente... (B pour annuler)", "Warte... (B zum Abbrechen)", "待機中... (Bでキャンセル)", "等待中... (B取消)" },
 	{ "Cerco un server Jellyfin nella rete...",
 	  "Looking for a Jellyfin server on the network...",
 	  "Buscando un servidor Jellyfin en la red...",
 	  "Recherche d'un serveur Jellyfin...",
-	  "Suche Jellyfin-Server im Netzwerk..." },
-	{ "Nessun server Jellyfin trovato.", "No Jellyfin server found.", "Ning\372n servidor Jellyfin encontrado.", "Aucun serveur Jellyfin trouv\351.", "Kein Jellyfin-Server gefunden." },
+	  "Suche Jellyfin-Server im Netzwerk...",
+	  "ネットワークでJellyfinサーバーを検索中...",
+	  "正在网络中搜索Jellyfin服务器..." },
+	{ "Nessun server Jellyfin trovato.", "No Jellyfin server found.", "Ning\372n servidor Jellyfin encontrado.", "Aucun serveur Jellyfin trouv\351.", "Kein Jellyfin-Server gefunden.", "Jellyfinサーバーが見つかりません。", "未找到Jellyfin服务器。" },
 	{ "Controlla che sia acceso, oppure scrivi",
 	  "Check that it is on, or write",
 	  "Comprueba que est\351 encendido, o escribe",
 	  "V\351rifiez qu'il est allum\351, ou indiquez",
-	  "Pr\374fen, ob er l\344uft, oder seine" },
-	{ "in mediacenter.ini il suo indirizzo:", "its address in mediacenter.ini:", "su direcci\363n en mediacenter.ini:", "son adresse dans mediacenter.ini :", "Adresse in mediacenter.ini eintragen:" },
-	{ "Continua a guardare", "Continue watching", "Seguir viendo", "Continuer \340 regarder", "Weiterschauen" },
-	{ "Riprendi da %s", "Resume from %s", "Reanudar desde %s", "Reprendre \340 %s", "Fortsetzen ab %s" },
-	{ "Dall'inizio", "From the start", "Desde el principio", "Depuis le d\351but", "Von Anfang an" },
-	{ "Non riesco ad aprire questo titolo", "Cannot open this title", "No se puede abrir este t\355tulo", "Impossible d'ouvrir ce titre", "Titel kann nicht ge\366ffnet werden" },
-	{ "Carico l'elenco...", "Loading the list...", "Cargando la lista...", "Chargement de la liste...", "Lade Liste..." },
-	{ "Niente da riprodurre qui", "Nothing to play here", "Nada que reproducir aqu\355", "Rien \340 lire ici", "Nichts abzuspielen" },
+	  "Pr\374fen, ob er l\344uft, oder seine",
+	  "電源が入っているか確認するか、",
+	  "请确认服务器已开启,或在" },
+	{ "in mediacenter.ini il suo indirizzo:", "its address in mediacenter.ini:", "su direcci\363n en mediacenter.ini:", "son adresse dans mediacenter.ini :", "Adresse in mediacenter.ini eintragen:", "mediacenter.iniにアドレスを記入:", "mediacenter.ini中写入其地址:" },
+	{ "Continua a guardare", "Continue watching", "Seguir viendo", "Continuer \340 regarder", "Weiterschauen", "続きから見る", "继续观看" },
+	{ "Riprendi da %s", "Resume from %s", "Reanudar desde %s", "Reprendre \340 %s", "Fortsetzen ab %s", "%sから再開", "从%s继续" },
+	{ "Dall'inizio", "From the start", "Desde el principio", "Depuis le d\351but", "Von Anfang an", "最初から", "从头开始" },
+	{ "Non riesco ad aprire questo titolo", "Cannot open this title", "No se puede abrir este t\355tulo", "Impossible d'ouvrir ce titre", "Titel kann nicht ge\366ffnet werden", "このタイトルを開けません", "无法打开此标题" },
+	{ "Carico l'elenco...", "Loading the list...", "Cargando la lista...", "Chargement de la liste...", "Lade Liste...", "リストを読み込み中...", "正在加载列表..." },
+	{ "Niente da riprodurre qui", "Nothing to play here", "Nada que reproducir aqu\355", "Rien \340 lire ici", "Nichts abzuspielen", "再生できるものがありません", "此处没有可播放的内容" },
 	// audio screen, audio CD, tracker modules
-	{ "Rete", "Network", "Red", "R\351seau", "Netzwerk" },
-	{ "Disco", "Disc", "Disco", "Disque", "Disc" },
-	{ "Multicanale", "Multichannel", "Multicanal", "Multicanal", "Mehrkanal" },
-	{ "Traccia %d di %d   \xb7   %s", "Track %d of %d   \xb7   %s", "Pista %d de %d   \267   %s", "Piste %d sur %d   \267   %s", "Titel %d von %d   \267   %s" },
-	{ "IN PAUSA", "PAUSED", "EN PAUSA", "EN PAUSE", "PAUSE" },
-	{ "FERMO", "STOPPED", "DETENIDO", "ARR\312T", "GESTOPPT" },
+	{ "Rete", "Network", "Red", "R\351seau", "Netzwerk", "Network", "Network" },
+	{ "Disco", "Disc", "Disco", "Disque", "Disc", "Disc", "Disc" },
+	{ "Multicanale", "Multichannel", "Multicanal", "Multicanal", "Mehrkanal", "Multichannel", "Multichannel" },
+	{ "Traccia %d di %d   \xb7   %s", "Track %d of %d   \xb7   %s", "Pista %d de %d   \267   %s", "Piste %d sur %d   \267   %s", "Titel %d von %d   \267   %s", "Track %d of %d   \xb7   %s", "Track %d of %d   \xb7   %s" },
+	{ "IN PAUSA", "PAUSED", "EN PAUSA", "EN PAUSE", "PAUSE", "PAUSED", "PAUSED" },
+	{ "FERMO", "STOPPED", "DETENIDO", "ARR\312T", "GESTOPPT", "STOPPED", "STOPPED" },
 	{ "EQUALIZZATORE   \x83\x84 guadagno   \x81\x82 banda",
 	  "EQUALIZER   \x83\x84 gain   \x81\x82 band",
 	  "ECUALIZADOR   \203\204 ganancia   \201\202 banda",
 	  "\311GALISEUR   \203\204 gain   \201\202 bande",
-	  "EQUALIZER   \203\204 Pegel   \201\202 Band" },
-	{ "EQUALIZZATORE   (Y per regolare)", "EQUALIZER   (Y to adjust)", "ECUALIZADOR   (Y para ajustar)", "\311GALISEUR   (Y pour r\351gler)", "EQUALIZER   (Y zum Einstellen)" },
+	  "EQUALIZER   \203\204 Pegel   \201\202 Band",
+	  "EQUALIZER   \x83\x84 gain   \x81\x82 band",
+	  "EQUALIZER   \x83\x84 gain   \x81\x82 band" },
+	{ "EQUALIZZATORE   (Y per regolare)", "EQUALIZER   (Y to adjust)", "ECUALIZADOR   (Y para ajustar)", "\311GALISEUR   (Y pour r\351gler)", "EQUALIZER   (Y zum Einstellen)", "EQUALIZER   (Y to adjust)", "EQUALIZER   (Y to adjust)" },
 	{ "Start Play  Select Pausa  B Stop  \x81 \x82 Brano  L/R Veloce  Y Equalizzatore  A Salvaschermo  X Esci",
 	  "Start Play  Select Pause  B Stop  \x81 \x82 Track  L/R Fast  Y Equalizer  A Screensaver  X Exit",
 	  "Start Play  Select Pausa  B Stop  \201 \202 Pista  L/R R\341pido  Y Ecualizador  A Salvapantallas  X Salir",
 	  "Start Lecture  Select Pause  B Stop  \201 \202 Piste  L/R Rapide  Y \311galiseur  A Veille  X Quitter",
-	  "Start Play  Select Pause  B Stop  \201 \202 Titel  L/R Schnell  Y Equalizer  A Bildschoner  X Beenden" },
-	{ "A conferma     altro tasto annulla", "A confirm     other key cancel", "A confirmar     otra tecla cancela", "A valider     autre touche annule", "A best\344tigen     andere Taste Abbruch" },
-	{ "1,3k", "1.3k", "1,3k", "1,3k", "1,3k" },
-	{ "3,6k", "3.6k", "3,6k", "3,6k", "3,6k" },
-	{ "Traccia %d", "Track %d", "Pista %d", "Piste %d", "Titel %d" },
-	{ "CD audio", "Audio CD", "CD de audio", "CD audio", "Audio-CD" },
-	{ "CD audio%s%s", "Audio CD%s%s", "CD de audio%s%s", "CD audio%s%s", "Audio-CD%s%s" },
-	{ "CD  44,1 kHz  16 bit  Stereo", "CD  44.1 kHz  16 bit  Stereo", "CD  44,1 kHz  16 bit  Est\351reo", "CD  44,1 kHz  16 bit  St\351r\351o", "CD  44,1 kHz  16 bit  Stereo" },
-	{ "%s  %s  %d canali", "%s  %s  %d channels", "%s  %s  %d canales", "%s  %s  %d canaux", "%s  %s  %d Kan\344le" },
+	  "Start Play  Select Pause  B Stop  \201 \202 Titel  L/R Schnell  Y Equalizer  A Bildschoner  X Beenden",
+	  "Start Play  Select Pause  B Stop  \x81 \x82 Track  L/R Fast  Y Equalizer  A Screensaver  X Exit",
+	  "Start Play  Select Pause  B Stop  \x81 \x82 Track  L/R Fast  Y Equalizer  A Screensaver  X Exit" },
+	{ "A conferma     altro tasto annulla", "A confirm     other key cancel", "A confirmar     otra tecla cancela", "A valider     autre touche annule", "A best\344tigen     andere Taste Abbruch", "A confirm     other key cancel", "A confirm     other key cancel" },
+	{ "1,3k", "1.3k", "1,3k", "1,3k", "1,3k", "1.3k", "1.3k" },
+	{ "3,6k", "3.6k", "3,6k", "3,6k", "3,6k", "3.6k", "3.6k" },
+	{ "Traccia %d", "Track %d", "Pista %d", "Piste %d", "Titel %d", "Track %d", "Track %d" },
+	{ "CD audio", "Audio CD", "CD de audio", "CD audio", "Audio-CD", "Audio CD", "Audio CD" },
+	{ "CD audio%s%s", "Audio CD%s%s", "CD de audio%s%s", "CD audio%s%s", "Audio-CD%s%s", "Audio CD%s%s", "Audio CD%s%s" },
+	{ "CD  44,1 kHz  16 bit  Stereo", "CD  44.1 kHz  16 bit  Stereo", "CD  44,1 kHz  16 bit  Est\351reo", "CD  44,1 kHz  16 bit  St\351r\351o", "CD  44,1 kHz  16 bit  Stereo", "CD  44.1 kHz  16 bit  Stereo", "CD  44.1 kHz  16 bit  Stereo" },
+	{ "%s  %s  %d canali", "%s  %s  %d channels", "%s  %s  %d canales", "%s  %s  %d canaux", "%s  %s  %d Kan\344le", "%s  %s  %d channels", "%s  %s  %d channels" },
 	// Impostazioni
-	{ "Impostazioni", "Settings", "Ajustes", "Param\350tres", "Einstellungen" },
-	{ "Lingua menu", "Menu language", "Idioma del men\372", "Langue du menu", "Men\374sprache" },
-	{ "Lingua audio", "Audio language", "Idioma del audio", "Langue audio", "Audiosprache" },
-	{ "Ritardo audio", "Audio delay", "Retardo de audio", "D\351calage audio", "Audioverz\366gerung" },
-	{ "Interlacciato", "Interlaced", "Entrelazado", "Entrelac\351", "Interlaced" },
-	{ "Si (ideale per CRT)", "Yes (best for CRT)", "S\355 (ideal para CRT)", "Oui (id\351al pour CRT)", "Ja (ideal f\374r CRT)" },
-	{ "Predefinita", "Default", "Predeterminado", "Par d\351faut", "Standard" },
-	{ "Predefiniti", "Default", "Predeterminados", "Par d\351faut", "Standard" },
-	{ "Spenti", "Off", "Desactivados", "D\351sactiv\351s", "Aus" },
-	{ "Italiano", "Italian", "Italiano", "Italien", "Italienisch" },
-	{ "Inglese", "English", "Ingl\351s", "Anglais", "Englisch" },
-	{ "Francese", "French", "Franc\351s", "Fran\347ais", "Franz\366sisch" },
-	{ "Tedesco", "German", "Alem\341n", "Allemand", "Deutsch" },
-	{ "Spagnolo", "Spanish", "Espa\361ol", "Espagnol", "Spanisch" },
-	{ "Giapponese", "Japanese", "Japon\351s", "Japonais", "Japanisch" },
-	{ "A apre Regola CRT", "A opens CRT Adjust", "A abre Ajuste CRT", "A ouvre R\351glage CRT", "A \366ffnet CRT-Einstellung" },
-	{ "Subito dopo il salvataggio", "At once after saving", "Al guardar", "D\350s l'enregistrement", "Sofort nach dem Speichern" },
-	{ "Vale dal prossimo video", "From the next video", "Desde el pr\363ximo v\355deo", "\300 partir de la prochaine vid\351o", "Ab dem n\344chsten Video" },
-	{ "A Salva  B Annulla", "A Save  B Cancel", "A Guardar  B Cancelar", "A Enregistrer  B Annuler", "A Speichern  B Abbruch" },
-	{ "Si", "Yes", "S\355", "Oui", "Ja" },
-	{ "Applica", "Apply", "Aplicar", "Appliquer", "Anwenden" },
-	{ "No", "No", "No", "Non", "Nein" },
-	{ "Menu", "Menu", "Men\372", "Menu", "Men\374" },
-	{ "MENU", "MENU", "MEN\332", "MENU", "MEN\334" },
-	{ "Audio Stereo", "Audio Stereo", "Audio est\351reo", "Audio st\351r\351o", "Audio Stereo" },
-	{ "Stereo", "Stereo", "Est\351reo", "St\351r\351o", "Stereo" },
+	{ "Impostazioni", "Settings", "Ajustes", "Param\350tres", "Einstellungen", "設定", "设置" },
+	{ "Lingua menu", "Menu language", "Idioma del men\372", "Langue du menu", "Men\374sprache", "メニュー言語", "菜单语言" },
+	{ "Lingua audio", "Audio language", "Idioma del audio", "Langue audio", "Audiosprache", "音声言語", "音频语言" },
+	{ "Ritardo audio", "Audio delay", "Retardo de audio", "D\351calage audio", "Audioverz\366gerung", "音声の遅延", "音频延迟" },
+	{ "Interlacciato", "Interlaced", "Entrelazado", "Entrelac\351", "Interlaced", "インターレース", "隔行扫描" },
+	{ "Si (ideale per CRT)", "Yes (best for CRT)", "S\355 (ideal para CRT)", "Oui (id\351al pour CRT)", "Ja (ideal f\374r CRT)", "はい (CRT向け)", "是 (适合CRT)" },
+	{ "Predefinita", "Default", "Predeterminado", "Par d\351faut", "Standard", "標準", "默认" },
+	{ "Predefiniti", "Default", "Predeterminados", "Par d\351faut", "Standard", "標準", "默认" },
+	{ "Spenti", "Off", "Desactivados", "D\351sactiv\351s", "Aus", "オフ", "关闭" },
+	{ "Italiano", "Italian", "Italiano", "Italien", "Italienisch", "イタリア語", "意大利语" },
+	{ "Inglese", "English", "Ingl\351s", "Anglais", "Englisch", "英語", "英语" },
+	{ "Francese", "French", "Franc\351s", "Fran\347ais", "Franz\366sisch", "フランス語", "法语" },
+	{ "Tedesco", "German", "Alem\341n", "Allemand", "Deutsch", "ドイツ語", "德语" },
+	{ "Spagnolo", "Spanish", "Espa\361ol", "Espagnol", "Spanisch", "スペイン語", "西班牙语" },
+	{ "Giapponese", "Japanese", "Japon\351s", "Japonais", "Japanisch", "日本語", "日语" },
+	{ "A apre Regola CRT", "A opens CRT Adjust", "A abre Ajuste CRT", "A ouvre R\351glage CRT", "A \366ffnet CRT-Einstellung", "A でCRT調整を開く", "A 打开CRT调整" },
+	{ "Subito dopo il salvataggio", "At once after saving", "Al guardar", "D\350s l'enregistrement", "Sofort nach dem Speichern", "保存後すぐ有効", "保存后立即生效" },
+	{ "Vale dal prossimo video", "From the next video", "Desde el pr\363ximo v\355deo", "\300 partir de la prochaine vid\351o", "Ab dem n\344chsten Video", "次の動画から有効", "下一个视频起生效" },
+	{ "A Salva  B Annulla", "A Save  B Cancel", "A Guardar  B Cancelar", "A Enregistrer  B Annuler", "A Speichern  B Abbruch", "A 保存  B キャンセル", "A 保存  B 取消" },
+	{ "Si", "Yes", "S\355", "Oui", "Ja", "はい", "是" },
+	{ "Applica", "Apply", "Aplicar", "Appliquer", "Anwenden", "適用", "应用" },
+	{ "No", "No", "No", "Non", "Nein", "いいえ", "否" },
+	{ "Menu", "Menu", "Men\372", "Menu", "Men\374", "メニュー", "菜单" },
+	{ "MENU", "MENU", "MEN\332", "MENU", "MEN\334", "メニュー", "菜单" },
+	{ "Audio Stereo", "Audio Stereo", "Audio est\351reo", "Audio st\351r\351o", "Audio Stereo", "ステレオ", "立体声" },
+	{ "Stereo", "Stereo", "Est\351reo", "St\351r\351o", "Stereo", "Stereo", "Stereo" },
 };
 
 __attribute__((format_arg(1)))
@@ -250,6 +270,18 @@ static const char *TR(const char *it)
 	if (l == LANG_IT) return it;
 	for (size_t i = 0; i < sizeof(tr_table) / sizeof(tr_table[0]); i++)
 		if (!strcmp(tr_table[i][0], it)) return tr_table[i][l];
+	return it;
+}
+
+// TR() for the audio screen (its font draws ASCII and Latin-1 only):
+// English in place of Japanese and Chinese.
+__attribute__((format_arg(1)))
+static const char *TRA(const char *it)
+{
+	int l = it ? lang_id() : LANG_IT;
+	if (l != LANG_JA && l != LANG_ZH) return TR(it);
+	for (size_t i = 0; i < sizeof(tr_table) / sizeof(tr_table[0]); i++)
+		if (!strcmp(tr_table[i][0], it)) return tr_table[i][LANG_EN];
 	return it;
 }
 
@@ -819,6 +851,97 @@ static const unsigned char *vcd_glyph(unsigned char c)
 	return vcd_font[c & 0x7F];
 }
 
+// Japanese and Chinese characters (vcd_font_cjk.h): a box of 12x12 units of
+// the 8x8 grid, starting 2 units above the 8x8 glyphs, 12 units across.
+#include "vcd_font_cjk.h"
+#define CJK_W 12
+
+// Index in vcd_font_cjk.h of the character whose UTF-8 bytes (always 3)
+// start s, or -1. Latin-1 text never has an accented letter from 0xE0 to
+// 0xEF followed by two bytes from 0x80 to 0xBF, so it is not taken for one.
+static int cjk_char(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+	if ((p[0] & 0xF0) != 0xE0 || (p[1] & 0xC0) != 0x80 || (p[2] & 0xC0) != 0x80) return -1;
+	unsigned cp = (p[0] & 0x0F) << 12 | (p[1] & 0x3F) << 6 | (p[2] & 0x3F);
+	int lo = 0, hi = CJK_N - 1;
+	while (lo <= hi)
+	{
+		int m = (lo + hi) / 2;
+		if (cjk_cp[m] == cp) return m;
+		if (cjk_cp[m] < cp) lo = m + 1;
+		else hi = m - 1;
+	}
+	return -1;
+}
+
+static int cjk_lang(void) { return lang_id() == LANG_JA || lang_id() == LANG_ZH; }
+
+// Draws character i in a box w pixels wide and h tall with fill(x, y, w, h,
+// c), Chinese shapes when the menus are in Chinese, Japanese ones otherwise:
+// from the table of vcd_font_cjk.h made for that size, or else from the one
+// nearest in size, a pixel of the box set when any pixel it covers is.
+static void cjk_draw(int i, int x, int y, int w, int h, void (*fill)(int, int, int, int, uint32_t), uint32_t c)
+{
+	const cjk_size_t *t = &cjk_sizes[0];
+	int best = 1 << 30;
+	for (size_t k = 0; k < sizeof(cjk_sizes) / sizeof(cjk_sizes[0]); k++)
+	{
+		int d = abs(cjk_sizes[k].w - w) + abs(cjk_sizes[k].h - h);
+		if (d < best) { best = d; t = &cjk_sizes[k]; }
+	}
+	int sw = t->w, sh = t->h, bpr = (sw + 7) / 8;
+	const unsigned char *g = (lang_id() == LANG_ZH ? t->zh : t->ja) + (size_t)i * bpr * sh;
+	for (int r = 0; r < h; r++)
+	{
+		int y0 = r * sh / h, y1 = (r + 1) * sh / h;
+		if (y1 <= y0) y1 = y0 + 1;
+		int run = -1;
+		for (int col = 0; col <= w; col++)
+		{
+			int on = 0;
+			if (col < w)
+			{
+				int x0 = col * sw / w, x1 = (col + 1) * sw / w;
+				if (x1 <= x0) x1 = x0 + 1;
+				for (int yy = y0; yy < y1 && !on; yy++)
+					for (int xx = x0; xx < x1 && !on; xx++)
+						on = (g[yy * bpr + xx / 8] >> (7 - xx % 8)) & 1;
+			}
+			if (on && run < 0) run = col;
+			if (!on && run >= 0) { fill(x + run, y + r, col - run, 1, c); run = -1; }
+		}
+	}
+}
+
+// Glyphs of a text: 8x8 ones (ASCII and Latin-1 bytes) in *n8, Japanese and
+// Chinese characters in *n12.
+static void text_glyphs(const char *s, int *n8, int *n12)
+{
+	*n8 = *n12 = 0;
+	while (*s)
+	{
+		if (cjk_char(s) >= 0) { (*n12)++; s += 3; }
+		else { (*n8)++; s++; }
+	}
+}
+
+// Cuts s to at most cells cells of 8 units (a Japanese or Chinese character
+// takes one and a half) at a character boundary.
+static void text_cut(char *s, int cells)
+{
+	int half = 0;
+	char *p = s;
+	while (*p)
+	{
+		int k = cjk_char(p) >= 0 ? 3 : 1, u = k == 3 ? 3 : 2;
+		if (half + u > 2 * cells) break;
+		half += u;
+		p += k;
+	}
+	*p = 0;
+}
+
 #define OSD_TIMEOUT 10.0
 
 // Sizes of the controls, in pixels of the frame buffer. "ui" is the unit
@@ -865,13 +988,25 @@ static void ovl_frame(int x, int y, int w, int h, int tx, int ty, uint8_t v, uin
 
 static int text_width(const char *s)
 {
-	return (int)strlen(s) * SX(GLYPH_W);
+	int n8, n12;
+	text_glyphs(s, &n8, &n12);
+	return n8 * SX(GLYPH_W) + n12 * SX(CJK_W);
 }
+
+static void ovl_fill(int x, int y, int w, int h, uint32_t c) { ovl_rect(x, y, w, h, c & 0xFF, c >> 8); }
 
 static void ovl_glyphs(int x, int y, const char *s, uint8_t v, uint8_t a)
 {
 	for (; *s; s++, x += SX(GLYPH_W))
 	{
+		int k = cjk_char(s);
+		if (k >= 0)
+		{
+			cjk_draw(k, x, y - SY(2), SX(CJK_W), SY(CJK_W), ovl_fill, v | (uint32_t)a << 8);
+			x += SX(CJK_W) - SX(GLYPH_W);
+			s += 2;
+			continue;
+		}
 		const unsigned char *g = vcd_glyph((unsigned char)*s);
 		for (int c = 0; c < 8; c++)
 			for (int r = 0; r < 8; r++)
@@ -1190,7 +1325,7 @@ static void osd_draw(const osd_info_t *info)
 		int lx = legend_rows > 1 ? mx : x + SX(16);
 		int ly = legend_rows > 1 ? info_y : status_y;
 		int room = ((legend_rows > 1 ? fb_w - mx : time_x - SX(16)) - lx) / SX(GLYPH_W);
-		if (room < (int)strlen(cut) && room >= 0) cut[room] = 0;
+		if (room >= 0) text_cut(cut, room);
 		if (room > 0) ovl_text(lx, ly, cut);
 	}
 

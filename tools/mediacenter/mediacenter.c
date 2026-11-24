@@ -79,6 +79,14 @@ static int fb_text(int x, int y, int s, const char *str, uint32_t color)
 {
 	for (; *str; str++, x += GLYPH_W * s)
 	{
+		int k = cjk_char(str);
+		if (k >= 0)
+		{
+			cjk_draw(k, x, y - 2 * s, CJK_W * s, CJK_W * s, fb_fill_rect, color);
+			x += (CJK_W - GLYPH_W) * s;
+			str += 2;
+			continue;
+		}
 		const unsigned char *g = vcd_glyph((unsigned char)*str);
 		for (int c = 0; c < 8; c++)
 			for (int r = 0; r < 8; r++)
@@ -103,6 +111,45 @@ static int latin1_text(const char *s)
 	return 0;
 }
 
+// Text width in pixels at scale s (8*s pixels per 8x8 glyph).
+static int fb_text_w(const char *str, int s)
+{
+	int n8, n12;
+	text_glyphs(str, &n8, &n12);
+	return (n8 * GLYPH_W + n12 * CJK_W) * s;
+}
+
+// fit_text with the menus in Japanese or Chinese, for UTF-8 text: the
+// characters of vcd_font_cjk.h are kept, one and a half glyphs wide.
+static void fit_text_cjk(char *dst, size_t len, const char *src, int max)
+{
+	size_t n = 0, keep = 0;
+	int half = 0, cut = 0;
+	while (*src)
+	{
+		int k = cjk_char(src) >= 0 ? 3 : 1, u = k == 3 ? 3 : 2;
+		unsigned char c = (unsigned char)*src;
+		if (half + u > 2 * max || n + k + 4 > len) { cut = 1; break; }
+		if (half + u + 6 <= 2 * max) keep = n + k; // room left for "..."
+		if (k == 3) { memcpy(dst + n, src, 3); src += 3; }
+		else
+		{
+			// other UTF-8 characters: one '?' each
+			if (c >= 0x80) { src++; while ((*src & 0xC0) == 0x80) src++; c = '?'; }
+			else src++;
+			dst[n] = (char)c;
+		}
+		n += k;
+		half += u;
+	}
+	if (cut && max >= 3)
+	{
+		memcpy(dst + keep, "...", 3);
+		n = keep + 3;
+	}
+	dst[n] = 0;
+}
+
 // Copies at most max glyphs of src, replacing non-ASCII bytes with '?'
 // (one per UTF-8 character); Latin-1 text keeps the accented letters the
 // font has.
@@ -111,6 +158,7 @@ static void fit_text(char *dst, size_t len, const char *src, int max)
 	size_t n = 0;
 	int glyphs = 0;
 	int latin1 = latin1_text(src);
+	if (cjk_lang() && !latin1) { fit_text_cjk(dst, len, src, max); return; }
 	for (; *src && n + 4 < len && glyphs < max; src++)
 	{
 		unsigned char c = (unsigned char)*src;
@@ -2588,12 +2636,12 @@ static void draw_audio_screen(void)
 	int s = fb_w >= 1280 ? 3 : 2;
 	char line[128];
 	fit_text(line, sizeof(line), mc.title, fb_w / (GLYPH_W * s) - 4);
-	int w = (int)strlen(line) * GLYPH_W * s;
+	int w = fb_text_w(line, s);
 	fb_text((fb_w - w) / 2, fb_h / 3, s, line, fb_rgb(255, 255, 255));
 	if (mc.adec)
 	{
 		snprintf(line, sizeof(line), "%s  %d Hz", avcodec_get_name(mc.adec->codec_id), mc.adec->sample_rate);
-		w = (int)strlen(line) * GLYPH_W * (s - 1);
+		w = fb_text_w(line, s - 1);
 		fb_text((fb_w - w) / 2, fb_h / 3 + 16 * s, s - 1, line, fb_rgb(170, 170, 170));
 	}
 }
@@ -3162,6 +3210,15 @@ static int fb_text_xy(int x, int y, int sx, int sy, int bold, const char *str, u
 {
 	for (; *str; str++, x += GLYPH_W * sx)
 	{
+		int k = cjk_char(str);
+		if (k >= 0)
+		{
+			// the font is bold already: no extra pixel
+			cjk_draw(k, x, y - 2 * sy, CJK_W * sx, CJK_W * sy, fb_fill_rect, color);
+			x += (CJK_W - GLYPH_W) * sx;
+			str += 2;
+			continue;
+		}
 		const unsigned char *g = vcd_glyph((unsigned char)*str);
 		for (int c = 0; c < 8; c++)
 			for (int r = 0; r < 8; r++)
@@ -3172,7 +3229,39 @@ static int fb_text_xy(int x, int y, int sx, int sy, int bold, const char *str, u
 
 static int text_w(const char *str, int sx)
 {
-	return (int)strlen(str) * GLYPH_W * sx;
+	return fb_text_w(str, sx);
+}
+
+// A label and its value, as "%-*s %s" with col - 1 for the width: the value
+// at glyph column col, or one glyph after a longer label. The label is cut
+// to max glyphs; the value is drawn as it is (a language name may be
+// Latin-1 or Japanese and Chinese after a label in another language).
+// Returns the x after the value.
+static int fb_label_value(int x, int y, int sx, int sy, int bold, const char *label, const char *value, int col, int max, uint32_t color)
+{
+	char fit[96];
+	fit_text(fit, sizeof(fit), label, max);
+	int gw = GLYPH_W * sx, vx = col * gw, lw = text_w(fit, sx) + gw;
+	fb_text_xy(x, y, sx, sy, bold, fit, color);
+	return fb_text_xy(x + (lw > vx ? lw : vx), y, sx, sy, bold, value, color);
+}
+
+#include "flags.h"
+
+// The flag of menu language l (lang_codes order), 15x10 glyph pixels from
+// x, y: flags.h drawn for that size (30x20 at 480/576 lines, 30x10 at
+// 240/288), or the nearer one scaled.
+static void fb_flag(int x, int y, int sx, int sy, int l)
+{
+	if (l < 0 || l >= FLAG_COUNT) return;
+	int w = 15 * sx, h = 10 * sy, sh = h >= 15 ? 20 : 10;
+	const uint32_t *f = sh == 20 ? flag_30x20[l] : flag_30x10[l];
+	for (int j = 0; j < h; j++)
+		for (int i = 0; i < w; i++)
+		{
+			uint32_t c = f[(j * sh / h) * 30 + i * 30 / w];
+			fb_fill_rect(x + i, y + j, 1, 1, fb_rgb(c >> 16, (c >> 8) & 0xFF, c & 0xFF));
+		}
 }
 
 static void text_centre(int y, int sx, int sy, int bold, const char *str, uint32_t color)
@@ -3225,7 +3314,7 @@ static void browser_layout(int *top, int *row_h, int *rows)
 {
 	int sy = menu_sy();
 	*top = 48 * sy;
-	*row_h = 12 * sy;
+	*row_h = (cjk_lang() ? 14 : 12) * sy; // Japanese and Chinese characters are 12 units tall
 	*rows = (fb_h - 20 * sy - *top) / *row_h;
 	if (*rows < 1) *rows = 1;
 }
@@ -3263,7 +3352,7 @@ static void draw_browser(const char *title, const char *const *labels, const int
 		char item[260];
 		snprintf(item, sizeof(item), "%s%s", labels[i], dirs && dirs[i] ? "/" : "");
 		fit_text(line, sizeof(line), item, (mw - 2 * mx) / gw);
-		fb_text_xy(ox + mx, y + 2 * sy, sx, sy, 1, line, white);
+		fb_text_xy(ox + mx, y + (row_h - 8 * sy) / 2, sx, sy, 1, line, white);
 	}
 
 	// the keys: centred, as large as the list and bold
@@ -4524,7 +4613,7 @@ static const char *format_label(void)
 	const char *name;
 	if (fmt_row == 0) { name = TR("Formato"); snprintf(v, sizeof(v), "%s", TR(fmt_list[fmt_index()].name)); }
 	else if (fmt_row == 1) { name = TR("Ritardo audio"); snprintf(v, sizeof(v), "%+d ms", fmt_delay * 10); }
-	else { name = TR("Interlacciato"); snprintf(v, sizeof(v), "%s", fmt_fields() ? TR("Si") : "No"); }
+	else { name = TR("Interlacciato"); snprintf(v, sizeof(v), "%s", fmt_fields() ? TR("Si") : cjk_lang() ? TR("No") : "No"); }
 	snprintf(fmt_text, sizeof(fmt_text), "\x12\x13 %d/%d  %s  \x10 %s \x11", fmt_row + 1, FMT_ROWS, name, v);
 	return fmt_text;
 }
@@ -4611,7 +4700,7 @@ static void crt_draw(int sel, const char *message)
 	fb_fill_rect(ox, 0, 2 * sx, fb_h, red);
 	fb_fill_rect(ox + mw - 2 * sx, 0, 2 * sx, fb_h, red);
 
-	int row_h = 11 * sy;
+	int row_h = (cjk_lang() ? 13 : 11) * sy; // Japanese and Chinese: taller rows
 	int bw = 38 * gw, bh = 29 * row_h / 2 + 8 * sy;
 	if (bw > mw - 8 * sx) bw = mw - 8 * sx;
 	int bx = (fb_w - bw) / 2, by = (fb_h - bh) / 2;
@@ -4630,7 +4719,14 @@ static void crt_draw(int sel, const char *message)
 		else if (i == CRT_PANSCAN) snprintf(line, sizeof(line), "%-17s %s", TR(crt_items[i].label), TR(crt_val[i] ? "Acceso" : "Spento"));
 		else snprintf(line, sizeof(line), "%-17s %+d", TR(crt_items[i].label), crt_val[i]);
 		if (i == sel) fb_fill_rect(bx + sx, y - 2 * sy, bw - 2 * sx, row_h, accent);
-		fb_text_xy(bx + gw, y, sx, sy, 1, line, white);
+		if (cjk_lang())
+		{
+			// Japanese and Chinese labels: the values in a column of their own
+			const char *val = strchr(line + strlen(TR(crt_items[i].label)), ' ');
+			while (val && *val == ' ') val++;
+			fb_label_value(bx + gw, y, sx, sy, 1, TR(crt_items[i].label), val ? val : "", 18, 38, white);
+		}
+		else fb_text_xy(bx + gw, y, sx, sy, 1, line, white);
 	}
 	y += row_h / 2;
 	char m[64], line[96];
@@ -4735,7 +4831,7 @@ static const char *const set_labels[SET_ITEMS] = { "Lingua menu", "Lingua audio"
 static const char *const set_lang_codes[] = { "", "it", "en", "fr", "de", "es", "ja" };
 static const char *const set_lang_names[] = { "Predefinita", "Italiano", "Inglese", "Francese", "Tedesco", "Spagnolo", "Giapponese" };
 // the menu languages, each in its own language (lang_codes order)
-static const char *const lang_names[LANG_COUNT] = { "Italiano", "English", "Espa\361ol", "Fran\347ais", "Deutsch" };
+static const char *const lang_names[LANG_COUNT] = { "Italiano", "English", "Espa\361ol", "Fran\347ais", "Deutsch", "日本語", "简体中文" };
 #define SET_LANGS ((int)(sizeof(set_lang_codes) / sizeof(set_lang_codes[0])))
 #define SET_AVOFF_MAX 100 // tens of milliseconds
 static int set_val[SET_CRT];
@@ -4876,22 +4972,32 @@ static void set_draw(int sel, const char *message)
 	int tsx = text_w(name, 2 * sx) <= mw - 2 * mx ? 2 * sx : sx;
 	text_centre(6 * sy, tsx, 3 * sy, 1, name, white);
 	fb_text_xy(ox + mx, 34 * sy, sx, sy, 0, TR("Impostazioni"), grey);
-	int row_h = 11 * sy, y = 48 * sy;
+	// Japanese and Chinese characters are 12 units tall: taller rows
+	int row_h = (cjk_lang() ? 13 : 11) * sy, y = 48 * sy;
 	for (int i = 0; i < SET_ITEMS; i++, y += row_h)
 	{
-		char line[96], v[24];
-		if (i == SET_CRT) { y += row_h / 2; snprintf(line, sizeof(line), "%s", TR(set_labels[i])); }
-		else snprintf(line, sizeof(line), "%-16s %s", TR(set_labels[i]), set_shown(i, v, sizeof(v)));
-		char fit[96];
-		fit_text(fit, sizeof(fit), line, (mw - 2 * mx) / gw);
+		char v[24];
+		if (i == SET_CRT) y += row_h / 2;
 		if (i == sel) fb_fill_rect(ox + mx / 2, y - 2 * sy, mw - mx, row_h, accent);
-		fb_text_xy(ox + mx, y, sx, sy, 1, fit, white);
+		if (i == SET_CRT)
+		{
+			char fit[96];
+			fit_text(fit, sizeof(fit), TR(set_labels[i]), (mw - 2 * mx) / gw);
+			fb_text_xy(ox + mx, y, sx, sy, 1, fit, white);
+		}
+		else
+		{
+			int vx = fb_label_value(ox + mx, y, sx, sy, 1, TR(set_labels[i]), set_shown(i, v, sizeof(v)), 17, (mw - 2 * mx) / gw, white);
+			// the menu language with its flag beside it, in the middle of the row
+			if (i == SET_UILANG) fb_flag(vx + gw, y - 2 * sy + (row_h - 10 * sy) / 2, sx, sy, set_val[i]);
+		}
 	}
 	y += row_h / 2;
 	text_centre(y, sx, sy, 0, TR(sel == SET_CRT ? "A apre Regola CRT" : sel == SET_UILANG ? "Subito dopo il salvataggio" :
 		"Vale dal prossimo video"), grey);
-	if (message) text_centre(fb_h - 26 * sy, sx, sy, 1, message, fb_rgb(255, 200, 80));
-	else text_centre(fb_h - 26 * sy, sx, sy, 1, TR("Su/Giu Scegli  \x10\x11 Cambia"), fb_rgb(230, 230, 230));
+	int ky = fb_h - (cjk_lang() ? 28 : 26) * sy;
+	if (message) text_centre(ky, sx, sy, 1, message, fb_rgb(255, 200, 80));
+	else text_centre(ky, sx, sy, 1, TR("Su/Giu Scegli  \x10\x11 Cambia"), fb_rgb(230, 230, 230));
 	text_centre(fb_h - 14 * sy, sx, sy, 1, TR("A Salva  B Annulla"), fb_rgb(230, 230, 230));
 	menu_end();
 }
@@ -4998,7 +5104,7 @@ static void show_splash(void)
 		char b[32];
 		snprintf(b, sizeof(b), "Build %s", MC_BUILD);
 		int s = dh / 160 > 2 ? dh / 160 : 2;
-		int tw = (int)strlen(b) * GLYPH_W * s;
+		int tw = fb_text_w(b, s);
 		fb_text(x0 + dw * 560 / 640 - tw, y0 + dh * 436 / 480, s, b, fb_rgb(200, 200, 200));
 	}
 	menu_end();
