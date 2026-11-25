@@ -3300,7 +3300,22 @@ static void set_yc_mode()
 			* frame_clocks was counted across both fields.
 			*/
 			if(current_video_info.interlaced)
+			{
 				frame_ticks *= 2;
+
+				/*
+				 * MiSTer MediaCenter menu core: its fields alternate
+				 * 263/262 (NTSC) or 313/312 (PAL) lines, so twice one field
+				 * is one line off the 525/625-line frame (0.19%, about 7 kHz
+				 * on the subcarrier: no colour on composite and S-Video).
+				 * Scale the measured field to the whole frame instead.
+				 */
+				const uint32_t ht = current_video_info.htime;
+				const uint32_t frame_lines = pal ? 625 : 525;
+				const uint32_t field_lines = ht ? (current_video_info.vtime + ht / 2) / ht : 0;
+				if(is_menu() && (field_lines == frame_lines / 2 || field_lines == frame_lines / 2 + 1))
+					frame_ticks = (uint32_t)div_round_u64((uint64_t)current_video_info.vtime * frame_lines, field_lines);
+			}
 
 			CLK_VIDEO = current_video_info.frame_clocks * 100.0 /
 				frame_ticks;
